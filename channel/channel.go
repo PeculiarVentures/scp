@@ -201,7 +201,7 @@ func (sc *SecureChannel) Unwrap(resp *apdu.Response) (*apdu.Response, error) {
 			return nil, fmt.Errorf("compute R-MAC: %w", err)
 		}
 
-		if !constantTimeEqual(expectedMAC[:MACLen], receivedMAC) {
+		if !constantTimeEqual(expectedMAC[:sc.MACSize], receivedMAC) {
 			return nil, errors.New("R-MAC verification failed: response may be tampered")
 		}
 

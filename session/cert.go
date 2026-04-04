@@ -48,7 +48,14 @@ func extractCardPublicKey(data []byte, trustAnchors *x509.CertPool) (*ecdh.Publi
 func parseRawCert(data []byte, trustAnchors *x509.CertPool) (*ecdh.PublicKey, error) {
 	cert, err := x509.ParseCertificate(data)
 	if err != nil {
-		// Not an X.509 certificate. Try GP proprietary format.
+		// Not an X.509 certificate. If trust anchors are configured,
+		// we MUST NOT fall back to unvalidated key extraction — that
+		// would bypass the chain validation the caller requested.
+		if trustAnchors != nil {
+			return nil, fmt.Errorf("card certificate is not valid X.509 and trust anchors are configured (cannot validate): %w", err)
+		}
+
+		// No trust anchors configured — try GP proprietary format.
 		// GP SCP11 §6.1: GP certificate uses tag 7F21 containing
 		// tag 7F49 with the raw EC public key point.
 		key, gpErr := parseGPCertificate(data)

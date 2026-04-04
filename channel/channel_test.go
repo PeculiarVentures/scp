@@ -434,3 +434,144 @@ func TestWrapUnwrapRoundTrip(t *testing.T) {
 	t.Logf("Wrap round-trip: %d bytes plaintext -> %d bytes wrapped",
 		len(plainData), len(wrapped.Data))
 }
+
+// ============================================================
+// Regression: S16 mode (16-byte MAC) wrap/unwrap round trip.
+//
+// Before the fix, Unwrap compared expectedMAC[:MACLen] (8 bytes)
+// against receivedMAC (16 bytes), which always failed because
+// constantTimeEqual rejects mismatched lengths. This test verifies
+// S16 mode works end-to-end after the fix.
+// ============================================================
+
+func TestWrapUnwrapRoundTrip_S16(t *testing.T) {
+	keys := &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{0x11}, 16),
+		SMAC:     bytes.Repeat([]byte{0x22}, 16),
+		SRMAC:    bytes.Repeat([]byte{0x33}, 16),
+		DEK:      bytes.Repeat([]byte{0x44}, 16),
+		MACChain: make([]byte, 16),
+	}
+
+	scHost := NewS16(keys, LevelFull)
+
+	cardKeys := &kdf.SessionKeys{
+		SENC:     append([]byte{}, keys.SENC...),
+		SMAC:     append([]byte{}, keys.SMAC...),
+		SRMAC:    append([]byte{}, keys.SRMAC...),
+		DEK:      append([]byte{}, keys.DEK...),
+		MACChain: make([]byte, 16),
+	}
+	scCard := NewS16(cardKeys, LevelFull)
+
+	// Wrap a command on the host side.
+	plainData := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE}
+	cmd := &apdu.Command{CLA: 0x80, INS: 0xDA, P1: 0x01, P2: 0x02, Data: plainData, Le: -1}
+	wrapped, err := scHost.Wrap(cmd)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	// Verify the wrapped data contains a 16-byte MAC (not 8).
+	// Encrypted payload is 16 bytes (6 data + 0x80 padding = 16),
+	// plus 16-byte MAC = 32 total.
+	if len(wrapped.Data) != 32 {
+		t.Errorf("S16 wrapped data length: got %d, want 32 (16 enc + 16 mac)", len(wrapped.Data))
+	}
+
+	// Simulate card side: verify C-MAC, build encrypted response, add R-MAC.
+	// First verify the C-MAC using the card channel.
+	receivedMAC := wrapped.Data[len(wrapped.Data)-FullMACLen:]
+	encData := wrapped.Data[:len(wrapped.Data)-FullMACLen]
+
+	var macInput []byte
+	macInput = append(macInput, scCard.macChain...)
+	macInput = append(macInput, wrapped.CLA, wrapped.INS, wrapped.P1, wrapped.P2)
+	macInput = append(macInput, byte(len(wrapped.Data)))
+	macInput = append(macInput, encData...)
+	expectedCMAC, _ := cmac.AESCMAC(cardKeys.SMAC, macInput)
+
+	if !bytes.Equal(receivedMAC, expectedCMAC[:FullMACLen]) {
+		t.Fatalf("S16 C-MAC verification failed on card side")
+	}
+
+	// Update card's MAC chain.
+	scCard.SetMACChain(expectedCMAC)
+
+	// Card decrypts command data.
+	decrypted, err := scCard.DecryptCommand(encData)
+	if err != nil {
+		t.Fatalf("card decrypt: %v", err)
+	}
+	if !bytes.Equal(decrypted, plainData) {
+		t.Errorf("decrypted data mismatch: got %X, want %X", decrypted, plainData)
+	}
+
+	// Card builds and wraps a response.
+	cardResp := &apdu.Response{Data: []byte{0x01, 0x02, 0x03}, SW1: 0x90, SW2: 0x00}
+	wrappedResp, err := scCard.WrapResponse(cardResp)
+	if err != nil {
+		t.Fatalf("card WrapResponse: %v", err)
+	}
+
+	// Host unwraps the response — this is the critical test.
+	// Before the fix, this would ALWAYS fail in S16 mode.
+	unwrappedResp, err := scHost.Unwrap(wrappedResp)
+	if err != nil {
+		t.Fatalf("S16 Unwrap failed (this was the bug): %v", err)
+	}
+
+	if !bytes.Equal(unwrappedResp.Data, cardResp.Data) {
+		t.Errorf("unwrapped response data mismatch: got %X, want %X",
+			unwrappedResp.Data, cardResp.Data)
+	}
+
+	t.Logf("S16 round-trip passed: %d bytes plaintext, %d bytes wrapped command",
+		len(plainData), len(wrapped.Data))
+}
+
+// ============================================================
+// Regression: S16 Unwrap must compare full 16-byte MAC, not 8.
+//
+// Construct a response with a correct first-8-bytes but wrong
+// last-8-bytes of the MAC. Before the fix this would have been
+// accepted (only first 8 compared). After the fix it must reject.
+// ============================================================
+
+func TestS16_RejectsPartialMACMatch(t *testing.T) {
+	keys := &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{0x11}, 16),
+		SMAC:     bytes.Repeat([]byte{0x22}, 16),
+		SRMAC:    bytes.Repeat([]byte{0x33}, 16),
+		DEK:      bytes.Repeat([]byte{0x44}, 16),
+		MACChain: make([]byte, 16),
+	}
+
+	sc := NewS16(keys, LevelRMAC) // R-MAC only, no encryption
+
+	// Build a valid R-MAC for known data.
+	responseData := []byte{0xAA, 0xBB, 0xCC}
+	var macInput []byte
+	macInput = append(macInput, sc.macChain...)
+	macInput = append(macInput, responseData...)
+	macInput = append(macInput, 0x90, 0x00)
+
+	validMAC, _ := cmac.AESCMAC(keys.SRMAC, macInput)
+
+	// Corrupt the last 8 bytes of the MAC, keeping the first 8 intact.
+	corruptMAC := make([]byte, 16)
+	copy(corruptMAC, validMAC)
+	for i := 8; i < 16; i++ {
+		corruptMAC[i] ^= 0xFF
+	}
+
+	var respData []byte
+	respData = append(respData, responseData...)
+	respData = append(respData, corruptMAC...)
+
+	resp := &apdu.Response{Data: respData, SW1: 0x90, SW2: 0x00}
+	_, err := sc.Unwrap(resp)
+	if err == nil {
+		t.Fatal("S16 Unwrap should have rejected response with corrupted last 8 MAC bytes")
+	}
+}

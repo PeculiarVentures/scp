@@ -179,3 +179,42 @@ func TestSCP03_SessionInterface(t *testing.T) {
 	_ = sess.SessionKeys()
 	sess.Close()
 }
+
+// ============================================================
+// Regression: parseInitUpdateResponse requires 29 bytes minimum.
+//
+// Before the fix, the length check was `< 28` but the code slices
+// data[21:29] which requires 29 bytes. A 28-byte input would panic.
+// ============================================================
+
+func TestParseInitUpdateResponse_MinLength(t *testing.T) {
+	// 28 bytes should be rejected (data[21:29] needs 29).
+	data28 := make([]byte, 28)
+	data28[11] = 0x03 // SCP ID
+	_, err := parseInitUpdateResponse(data28)
+	if err == nil {
+		t.Fatal("28-byte input should be rejected (need 29+)")
+	}
+
+	// 29 bytes should be accepted.
+	data29 := make([]byte, 29)
+	data29[11] = 0x03 // SCP ID
+	r, err := parseInitUpdateResponse(data29)
+	if err != nil {
+		t.Fatalf("29-byte input should be accepted: %v", err)
+	}
+	if len(r.cardCryptogram) != 8 {
+		t.Errorf("cardCryptogram length: got %d, want 8", len(r.cardCryptogram))
+	}
+
+	// 32 bytes should include the optional sequence counter.
+	data32 := make([]byte, 32)
+	data32[11] = 0x03
+	r, err = parseInitUpdateResponse(data32)
+	if err != nil {
+		t.Fatalf("32-byte input should be accepted: %v", err)
+	}
+	if len(r.sequenceCounter) != 3 {
+		t.Errorf("sequenceCounter length: got %d, want 3", len(r.sequenceCounter))
+	}
+}

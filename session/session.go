@@ -165,6 +165,15 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		cfg.SecurityLevel = channel.LevelFull
 	}
 
+	// Validate that the configured SecurityLevel is consistent with the
+	// key usage qualifier (0x3C = full security) sent in INTERNAL/MUTUAL
+	// AUTHENTICATE. The card enforces the negotiated level, so a mismatch
+	// causes the host wrapper to diverge from what the card expects.
+	if cfg.SecurityLevel != channel.LevelFull {
+		return nil, errors.New("SCP11 currently only supports full security level (C-MAC|C-DEC|R-MAC|R-ENC); " +
+			"the key usage qualifier 0x3C negotiated with the card requires it")
+	}
+
 	s := &Session{
 		config:    cfg,
 		transport: t,
@@ -183,8 +192,10 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, fmt.Errorf("get card cert: %w", err)
 	}
 
-	// Step 3 (SCP11a only): Send OCE certificate via PERFORM SECURITY OPERATION.
-	if cfg.Variant == SCP11a {
+	// Step 3 (SCP11a/c): Send OCE certificate via PERFORM SECURITY OPERATION.
+	// Both SCP11a and SCP11c are mutual-auth variants that require the OCE
+	// certificate to be provided to the card before MUTUAL AUTHENTICATE.
+	if cfg.Variant == SCP11a || cfg.Variant == SCP11c {
 		if err := s.sendOCECertificate(ctx); err != nil {
 			s.state = StateFailed
 			return nil, fmt.Errorf("send OCE cert: %w", err)
@@ -361,7 +372,7 @@ func (s *Session) getCardCertificate(ctx context.Context) error {
 
 func (s *Session) sendOCECertificate(ctx context.Context) error {
 	if s.config.OCECertificate == nil {
-		return errors.New("OCE certificate required for SCP11a")
+		return errors.New("OCE certificate required for SCP11a/c (mutual-auth variants)")
 	}
 
 	// PERFORM SECURITY OPERATION sends the OCE certificate chain.

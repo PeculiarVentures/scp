@@ -328,8 +328,8 @@ type initUpdateResponse struct {
 // parseInitUpdateResponse parses the card's response to INITIALIZE UPDATE.
 // GP Amendment D §7.1.1: response is 28+ bytes.
 func parseInitUpdateResponse(data []byte) (*initUpdateResponse, error) {
-	if len(data) < 28 {
-		return nil, fmt.Errorf("INITIALIZE UPDATE response too short: %d bytes (need 28+)", len(data))
+	if len(data) < 29 {
+		return nil, fmt.Errorf("INITIALIZE UPDATE response too short: %d bytes (need 29+)", len(data))
 	}
 
 	r := &initUpdateResponse{
