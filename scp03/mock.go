@@ -137,14 +137,15 @@ func (c *MockCard) doExternalAuthenticate(cmd *apdu.Command) (*apdu.Response, er
 	c.session.ch = channel.New(c.session.keys, channel.LevelFull)
 
 	data := cmd.Data
-	if len(data) < channel.MACLen+8 {
+	macSize := c.session.ch.MACSize
+	if len(data) < macSize+8 {
 		c.session = nil
 		return &apdu.Response{SW1: 0x6A, SW2: 0x80}, nil
 	}
 
 	// Verify C-MAC on the EXTERNAL AUTHENTICATE command.
-	receivedMAC := data[len(data)-channel.MACLen:]
-	payload := data[:len(data)-channel.MACLen]
+	receivedMAC := data[len(data)-macSize:]
+	payload := data[:len(data)-macSize]
 
 	var macInput []byte
 	macInput = append(macInput, c.session.ch.ExportMACChain()...)
@@ -157,7 +158,7 @@ func (c *MockCard) doExternalAuthenticate(cmd *apdu.Command) (*apdu.Response, er
 		c.session = nil
 		return nil, err
 	}
-	if !constantTimeEqual(expectedMAC[:channel.MACLen], receivedMAC) {
+	if !constantTimeEqual(expectedMAC[:macSize], receivedMAC) {
 		c.session = nil
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil
 	}
@@ -203,13 +204,14 @@ func (c *MockCard) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	}
 
 	data := cmd.Data
-	if len(data) < channel.MACLen {
+	macSize := sess.ch.MACSize
+	if len(data) < macSize {
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil
 	}
 
 	// Verify C-MAC
-	receivedMAC := data[len(data)-channel.MACLen:]
-	encData := data[:len(data)-channel.MACLen]
+	receivedMAC := data[len(data)-macSize:]
+	encData := data[:len(data)-macSize]
 
 	var macInput []byte
 	macInput = append(macInput, sess.ch.ExportMACChain()...)
@@ -221,7 +223,7 @@ func (c *MockCard) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !constantTimeEqual(expectedMAC[:channel.MACLen], receivedMAC) {
+	if !constantTimeEqual(expectedMAC[:macSize], receivedMAC) {
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil
 	}
 	sess.ch.SetMACChain(expectedMAC)

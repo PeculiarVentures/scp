@@ -258,12 +258,13 @@ func (c *Card) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	}
 
 	data := cmd.Data
-	if len(data) < channel.MACLen {
+	macSize := sess.ch.MACSize
+	if len(data) < macSize {
 		return mkSW(0x6982), nil
 	}
 
-	receivedMAC := data[len(data)-channel.MACLen:]
-	encData := data[:len(data)-channel.MACLen]
+	receivedMAC := data[len(data)-macSize:]
+	encData := data[:len(data)-macSize]
 
 	var macInput []byte
 	macInput = append(macInput, sess.ch.ExportMACChain()...)
@@ -275,7 +276,7 @@ func (c *Card) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ctEq(expectedMAC[:channel.MACLen], receivedMAC) {
+	if !ctEq(expectedMAC[:macSize], receivedMAC) {
 		return mkSW(0x6982), nil
 	}
 	sess.ch.SetMACChain(expectedMAC)
