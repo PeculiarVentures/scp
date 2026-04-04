@@ -189,9 +189,11 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 
 	// Step 6: Verify card cryptogram.
-	// Card cryptogram = AES-MAC(S-MAC, host_challenge || card_challenge)
-	// using the derived S-MAC with derivation constant 0x00.
-	expectedCC, err := calculateCryptogram(senc, 0x00, kdfContext, keyLen)
+	// GP Amendment D §6.2.2: The card/host cryptograms use the data
+	// derivation scheme with S-MAC as the base key and derivation
+	// constants 0x00 (card) / 0x01 (host). See also GlobalPlatformPro
+	// GPSession.java which uses macKey for cryptogram computation.
+	expectedCC, err := calculateCryptogram(smac, 0x00, kdfContext, keyLen)
 	if err != nil {
 		return nil, fmt.Errorf("calculate card cryptogram: %w", err)
 	}
@@ -199,8 +201,8 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, errors.New("card cryptogram mismatch: possible MITM or wrong keys")
 	}
 
-	// Step 7: Calculate host cryptogram.
-	hostCryptogram, err := calculateCryptogram(senc, 0x01, kdfContext, keyLen)
+	// Step 7: Calculate host cryptogram (also derived with S-MAC).
+	hostCryptogram, err := calculateCryptogram(smac, 0x01, kdfContext, keyLen)
 	if err != nil {
 		return nil, fmt.Errorf("calculate host cryptogram: %w", err)
 	}
@@ -386,9 +388,11 @@ func deriveSCP03Key(staticKey []byte, derivConst byte, context []byte, keyLen in
 }
 
 // calculateCryptogram computes a card or host cryptogram.
-// GP Amendment D §6.2.2: cryptogram = first 8 bytes of
-// KDF(S-ENC, derivation_constant, context) with L=64 bits.
-func calculateCryptogram(senc []byte, derivConst byte, context []byte, keyLen int) ([]byte, error) {
+// GP Amendment D §6.2.2: The authentication cryptograms are computed
+// using the data derivation scheme with S-MAC as the base key.
+// Derivation constant 0x00 = card cryptogram, 0x01 = host cryptogram.
+// The output is L=64 bits (8 bytes) for S8 mode.
+func calculateCryptogram(smac []byte, derivConst byte, context []byte, keyLen int) ([]byte, error) {
 	cryptoLenBits := 64
 	var input []byte
 	input = append(input, make([]byte, 11)...)
@@ -398,7 +402,7 @@ func calculateCryptogram(senc []byte, derivConst byte, context []byte, keyLen in
 	input = append(input, 0x01) // counter = 1
 	input = append(input, context...)
 
-	mac, err := cmac.AESCMAC(senc, input)
+	mac, err := cmac.AESCMAC(smac, input)
 	if err != nil {
 		return nil, err
 	}

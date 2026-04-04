@@ -92,8 +92,8 @@ func (c *MockCard) doInitializeUpdate(cmd *apdu.Command) (*apdu.Response, error)
 		return nil, err
 	}
 
-	// Calculate card cryptogram
-	cardCryptogram, err := calculateCryptogram(senc, derivConstCardCrypto, kdfContext, keyLen)
+	// Calculate card cryptogram (using S-MAC per GP SCP03 spec)
+	cardCryptogram, err := calculateCryptogram(smac, derivConstCardCrypto, kdfContext, keyLen)
 	if err != nil {
 		return nil, err
 	}
@@ -109,8 +109,8 @@ func (c *MockCard) doInitializeUpdate(cmd *apdu.Command) (*apdu.Response, error)
 		},
 	}
 
-	// Also store context + senc for cryptogram verification in EXTERNAL AUTH
-	c.session.keys.Receipt = senc // Reuse receipt field to pass senc to extAuth
+	// Also store context + smac for cryptogram verification in EXTERNAL AUTH
+	c.session.keys.Receipt = smac // Reuse receipt field to pass smac to extAuth
 
 	// Build response: keyDivData(10) || keyVersion(1) || scpID(1) || iParam(1) ||
 	//                  cardChallenge(8) || cardCryptogram(8) = 29 bytes
@@ -175,10 +175,10 @@ func (c *MockCard) doExternalAuthenticate(cmd *apdu.Command) (*apdu.Response, er
 
 	// Verify host cryptogram.
 	kdfContext := c.session.keys.DEK // Retrieved from temp storage
-	senc := c.session.keys.Receipt   // Retrieved from temp storage
-	keyLen := len(senc)
+	smac := c.session.keys.Receipt   // Retrieved from temp storage (S-MAC key)
+	keyLen := len(smac)
 
-	expectedHC, err := calculateCryptogram(senc, derivConstHostCrypto, kdfContext, keyLen)
+	expectedHC, err := calculateCryptogram(smac, derivConstHostCrypto, kdfContext, keyLen)
 	if err != nil {
 		c.session = nil
 		return nil, err
