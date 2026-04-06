@@ -38,6 +38,7 @@ import (
 	"github.com/PeculiarVentures/scp/kdf"
 	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/trust"
 )
 
 // Variant selects the SCP11 protocol variant.
@@ -93,7 +94,17 @@ type Config struct {
 
 	// CardTrustAnchors validates the card's certificate chain.
 	// If nil, the card certificate is not validated (SCP11b behavior).
+	// For richer validation (P-256 enforcement, serial allowlists,
+	// SKI matching), use CardTrustPolicy instead.
 	CardTrustAnchors *x509.CertPool
+
+	// CardTrustPolicy, if set, provides full SCP11 certificate chain
+	// validation via the trust package. This supersedes CardTrustAnchors.
+	// When set, the library parses all certificates from the card's
+	// certificate store, validates the chain, enforces P-256, and
+	// only extracts the public key after successful validation.
+	// If validation fails, session establishment fails closed.
+	CardTrustPolicy *trust.Policy
 
 	// HostID is the optional OCE identifier included in the KDF shared
 	// info per GP SCP11 §3.1.2. If set, it is appended to the shared
@@ -359,13 +370,49 @@ func (s *Session) getCardCertificate(ctx context.Context) error {
 		return resp.Error()
 	}
 
-	// Parse the certificate chain from the response.
+	// If a full trust policy is configured, use the trust package
+	// for rigorous chain validation before extracting the key.
+	if s.config.CardTrustPolicy != nil {
+		return s.validateCardCertChain(resp.Data)
+	}
+
+	// Legacy path: simple key extraction with optional root validation.
 	pubKey, err := extractCardPublicKey(resp.Data, s.config.CardTrustAnchors)
 	if err != nil {
 		return fmt.Errorf("extract card public key: %w", err)
 	}
 
 	s.cardStaticPubKey = pubKey
+	s.state = StateCertRetrieved
+	return nil
+}
+
+// validateCardCertChain parses all certificates from the card's cert
+// store response and validates them using the trust package. This is
+// the preferred path when CardTrustPolicy is configured — it enforces
+// P-256, chain validation, and optional serial/SKI constraints before
+// allowing the card's public key to be used for key agreement.
+func (s *Session) validateCardCertChain(data []byte) error {
+	certs, err := parseCertsFromStore(data)
+	if err != nil {
+		return fmt.Errorf("parse card certificates: %w", err)
+	}
+	if len(certs) == 0 {
+		return errors.New("no certificates in card response")
+	}
+
+	result, err := trust.ValidateSCP11Chain(certs, *s.config.CardTrustPolicy)
+	if err != nil {
+		return fmt.Errorf("card certificate chain validation: %w", err)
+	}
+
+	// Convert the validated ECDSA key to ECDH for key agreement.
+	ecdhKey, err := result.PublicKey.ECDH()
+	if err != nil {
+		return fmt.Errorf("convert validated key to ECDH: %w", err)
+	}
+
+	s.cardStaticPubKey = ecdhKey
 	s.state = StateCertRetrieved
 	return nil
 }
