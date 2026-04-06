@@ -148,3 +148,74 @@ func TestSCP11_RejectsNonFullSecurityLevel(t *testing.T) {
 	}
 	t.Log("Non-full security levels correctly rejected")
 }
+
+// --- parseCertsFromStore tests ---
+
+func TestParseCertsFromStore_SingleDER(t *testing.T) {
+	// Generate a self-signed cert and pass its raw DER.
+	cert := generateSelfSignedCert(t)
+	certs, err := parseCertsFromStore(cert.Raw)
+	if err != nil {
+		t.Fatalf("parseCertsFromStore: %v", err)
+	}
+	if len(certs) != 1 {
+		t.Fatalf("expected 1 cert, got %d", len(certs))
+	}
+	if certs[0].Subject.CommonName != cert.Subject.CommonName {
+		t.Errorf("wrong cert: %q", certs[0].Subject.CommonName)
+	}
+}
+
+func TestParseCertsFromStore_ConcatenatedDER(t *testing.T) {
+	cert1 := generateSelfSignedCert(t)
+	cert2 := generateSelfSignedCert(t)
+
+	// Concatenate raw DER.
+	concat := append(cert1.Raw, cert2.Raw...)
+	certs, err := parseCertsFromStore(concat)
+	if err != nil {
+		t.Fatalf("parseCertsFromStore: %v", err)
+	}
+	if len(certs) != 2 {
+		t.Fatalf("expected 2 certs, got %d", len(certs))
+	}
+}
+
+func TestSplitDER(t *testing.T) {
+	cert1 := generateSelfSignedCert(t)
+	cert2 := generateSelfSignedCert(t)
+
+	concat := append(cert1.Raw, cert2.Raw...)
+	parts := splitDER(concat)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(parts))
+	}
+	if len(parts[0]) != len(cert1.Raw) {
+		t.Errorf("part 0 length: got %d, want %d", len(parts[0]), len(cert1.Raw))
+	}
+}
+
+func generateSelfSignedCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyAgreement,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}

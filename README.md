@@ -1,6 +1,6 @@
 # scp
 
-A Go implementation of GlobalPlatform Secure Channel Protocols for establishing authenticated and encrypted communication with smart cards.
+A Go implementation of GlobalPlatform Secure Channel Protocols for establishing authenticated and encrypted communication with smart cards, plus a typed Security Domain management layer for key lifecycle, certificate provisioning, and trust validation.
 
 Two protocols are supported through a unified API:
 
@@ -12,12 +12,6 @@ Both protocols produce a `scp.Session` with the same `Transmit` method. The cons
 ## Quick Start
 
 ```go
-import (
-    scp "github.com/PeculiarVentures/scp"
-    "github.com/PeculiarVentures/scp/scp03"
-    "github.com/PeculiarVentures/scp/session"  // SCP11
-)
-
 // SCP03 — symmetric keys
 sess, _ := scp03.Open(ctx, transport, &scp03.Config{
     Keys: scp03.StaticKeys{ENC: encKey, MAC: macKey, DEK: dekKey},
@@ -31,28 +25,30 @@ resp, _ := sess.Transmit(ctx, myCommand)
 sess.Close()
 ```
 
-Run the included example: `go run ./cmd/example`
-
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Your Application                │
-├────────────────────┬────────────────────────────┤
-│  scp03.Open()      │  session.Open() (SCP11)    │
-├────────────────────┴────────────────────────────┤
-│  scp.Session (common interface)                  │
-│  ┌──────────────────────────────────────────┐    │
-│  │   channel (secure messaging)             │    │
-│  │   AES-CBC encrypt, AES-CMAC, MAC chain   │    │
-│  └──────────────────────────────────────────┘    │
-│  ┌────────┐  ┌────────┐  ┌─────┐  ┌────┐        │
-│  │  kdf   │  │  cmac  │  │ tlv │  │apdu│        │
-│  └────────┘  └────────┘  └─────┘  └────┘        │
-├──────────────────────────────────────────────────┤
-│              transport.Transport                  │
-│  (PC/SC, NFC, gRPC relay, mock card, ...)        │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                   Your Application                    │
+├──────────────────┬───────────────────────────────────┤
+│  securitydomain  │  trust.ValidateSCP11Chain()       │
+│  .Session        │  Chain validation, P-256, SKI,    │
+│  Key mgmt, certs │  serial allowlists, fail-closed   │
+├──────────────────┴───────────────────────────────────┤
+│  scp03.Open()            session.Open() (SCP11)      │
+├──────────────────────────────────────────────────────┤
+│  scp.Session (common interface)                       │
+│  ┌────────────────────────────────────────────────┐   │
+│  │  channel (secure messaging)                    │   │
+│  │  AES-CBC encrypt, AES-CMAC, MAC chaining       │   │
+│  └────────────────────────────────────────────────┘   │
+│  ┌────────┐  ┌────────┐  ┌─────┐  ┌──────┐           │
+│  │  kdf   │  │  cmac  │  │ tlv │  │ apdu │           │
+│  └────────┘  └────────┘  └─────┘  └──────┘           │
+├──────────────────────────────────────────────────────┤
+│              transport.Transport                      │
+│  (PC/SC, NFC, gRPC relay, mock card, ...)            │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## Packages
@@ -62,6 +58,8 @@ Run the included example: `go run ./cmd/example`
 | `scp` | Common `Session` interface implemented by both protocols |
 | `scp03` | SCP03 handshake: INITIALIZE UPDATE + EXTERNAL AUTHENTICATE |
 | `session` | SCP11 handshake: ECDH key agreement (variants a/b/c) |
+| `securitydomain` | Security Domain management: key lifecycle, certificates, allowlists, reset |
+| `trust` | SCP11 certificate chain validation with configurable policy |
 | `channel` | Secure messaging shared by both protocols (encrypt, MAC, verify) |
 | `kdf` | Key derivation: X9.63 KDF, NIST SP 800-108 |
 | `cmac` | AES-CMAC per NIST SP 800-38B |
@@ -70,6 +68,64 @@ Run the included example: `go run ./cmd/example`
 | `transport` | Transport interface and helpers |
 | `piv` | PIV (NIST SP 800-73) command builders |
 | `mockcard` | Simulated SCP11 Security Domain for testing |
+
+## Security Domain Management
+
+The `securitydomain` package provides typed APIs for administering the YubiKey Security Domain. It wraps an authenticated SCP channel and exposes the operations needed for real provisioning workflows.
+
+```go
+// Open an authenticated management session
+sd, err := securitydomain.Open(ctx, transport, scp03.DefaultKeys, 0x00)
+defer sd.Close()
+
+// Inspect installed keys
+keys, _ := sd.GetKeyInformation(ctx)
+
+// Install a new SCP03 key set (replaces default)
+ref := securitydomain.NewKeyReference(securitydomain.KeyIDSCP03, 0x01)
+sd.PutSCP03Key(ctx, ref, newKeys, 0xFF)
+
+// Generate an SCP11b key pair on the device
+scp11Ref := securitydomain.NewKeyReference(securitydomain.KeyIDSCP11b, 0x01)
+pubKey, _ := sd.GenerateECKey(ctx, scp11Ref, 0)
+
+// Store certificates for the generated key
+sd.StoreCertificates(ctx, scp11Ref, certChain)
+
+// Configure SCP11a with OCE and CA issuer
+oceRef := securitydomain.NewKeyReference(securitydomain.KeyIDOCE, 0x03)
+sd.PutECPublicKey(ctx, oceRef, ocePublicKey, 0)
+sd.StoreCaIssuer(ctx, oceRef, subjectKeyIdentifier)
+sd.StoreAllowlist(ctx, oceRef, []string{"serial1hex", "serial2hex"})
+
+// Factory reset (restores default keys)
+sd.Reset(ctx)
+```
+
+The full API covers: `PutSCP03Key`, `GenerateECKey`, `PutECPrivateKey`, `PutECPublicKey`, `DeleteKey`, `Reset`, `GetKeyInformation`, `GetCardRecognitionData`, `GetSupportedCaIdentifiers`, `StoreCertificates`, `GetCertificates`, `StoreCaIssuer`, `StoreAllowlist`, `ClearAllowlist`, `StoreData`, `GetData`.
+
+APDU encoding has been validated against the [Yubico .NET SDK](https://github.com/Yubico/Yubico.NET.SDK) and [yubikey-manager](https://github.com/Yubico/yubikey-manager) Python SDK.
+
+## Certificate Trust Validation
+
+The `trust` package validates SCP11 certificate chains before trusting a card's identity. It is fail-closed: if trust anchors are configured and validation fails, the library will not fall back to raw key extraction.
+
+```go
+result, err := trust.ValidateSCP11Chain(certs, trust.Policy{
+    Roots:         rootPool,
+    Intermediates: intermediatePool,
+    CurrentTime:   time.Now(),
+    AllowedSerials: []string{"6b900288..."},  // optional
+    ExpectedSKI:    skiBytes,                  // optional
+})
+// result.Leaf, result.PublicKey, result.Chain
+
+// Or integrate directly into SCP11 session establishment:
+sess, err := session.Open(ctx, transport, &session.Config{
+    Variant:         session.SCP11b,
+    CardTrustPolicy: &trust.Policy{Roots: rootPool},
+})
+```
 
 ## SCP03 Usage
 
@@ -109,11 +165,10 @@ sess, err := session.Open(ctx, transport, &session.Config{
     OCECertificate: myCert,
 })
 
-// SCP11c — mutual auth with offline scripting
+// SCP11b with trust validation
 sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:  session.SCP11c,
-    KeyID:    0x15,
-    // ...
+    Variant:         session.SCP11b,
+    CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 ```
 
@@ -137,17 +192,21 @@ Both `scp03.Open` and `session.Open` accept any `Transport`. Whether it's a loca
 go test ./...
 ```
 
-The test suite includes 46 tests covering:
+The test suite includes 118 tests covering:
 
-- **SCP03 end-to-end:** Handshake, encrypted echo, 10-command MAC chain, wrong-key rejection, empty payload counter sync
+- **SCP03 end-to-end:** Handshake, encrypted echo, multi-command MAC chain, wrong-key rejection, empty payload counter sync
 - **SCP11 end-to-end:** SCP11b (no receipt), SCP11a (with receipt + cert chaining), PIV key generation, counter sync
 - **Reference vector tests:** Byte-exact verification against published SCP11 test vectors
 - **YubiKey compatibility tests:** APDU byte layout verification against YubiKey 5.7+ expectations
+- **Cross-implementation vectors:** SCP03 KDF, channel MAC, and RMAC vectors from the Yubico .NET SDK
+- **Security Domain management:** APDU construction, TLV parsing, KCV computation, DEK requirements, reset lockout dispatch
+- **Trust validation:** Chain building, fail-closed behavior, serial allowlists, SKI matching, real Yubico OCE certificate chain
 
 ## Specification Compliance
 
 | Spec | Coverage |
 |---|---|
+| GP Card Spec v2.3.1 §11 | Security Domain APDU commands: PUT KEY, DELETE, STORE DATA, GET DATA |
 | GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE, session key derivation, secure messaging |
 | GP Amendment F (SCP11) v1.3 | All three variants (a/b/c), ECKA, X9.63 KDF, receipt verification, S8 and S16 modes |
 | GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC (shared by both protocols) |
@@ -161,9 +220,9 @@ Apache 2.0
 
 ## Related Implementations
 
+- [Yubico/Yubico.NET.SDK](https://github.com/Yubico/Yubico.NET.SDK) (Apache 2.0) — Reference .NET SDK with SecurityDomainSession. Source of our cross-implementation test vectors.
+- [Yubico/yubikey-manager](https://github.com/Yubico/yubikey-manager) (BSD 2-clause) — Python `yubikit.securitydomain` and SCP core. Source of OCE certificate test fixtures.
+- [Samsung/OpenSCP-Java](https://github.com/Samsung/OpenSCP-Java) (Apache 2.0) — Full SCP03 + SCP11 in Java. Source of SCP11 reference test vectors.
 - [skythen/scp03](https://github.com/skythen/scp03) — Pure Go SCP03. Similar `Transmitter` interface pattern.
-- [Samsung/OpenSCP-Java](https://github.com/Samsung/OpenSCP-Java) (Apache 2.0) — Full SCP03 + SCP11 in Java. Source of reference test vectors.
 - [GlobalPlatformPro](https://github.com/martinpaljak/GlobalPlatformPro) — Java library and CLI. SCP01/02/03.
 - [ThothTrust/SCP11B](https://github.com/ThothTrustCom/SCP11B) (BSD-3) — Card-side and host-side SCP11b in Java.
-- [kaoh/globalplatform](https://github.com/kaoh/globalplatform) — C library and GPShell CLI. SCP01/02/03.
-- [Samsung/OpenSCP-Python](https://github.com/Samsung/OpenSCP-Python) — Python wrapper around OpenSCP-Java.

@@ -226,3 +226,104 @@ func isZeroSecret(secret []byte) bool {
 	}
 	return acc == 0
 }
+
+// parseCertsFromStore parses X.509 certificates from a GET DATA
+// certificate store response. The response may contain:
+//   - A BF21 container with 7F21-wrapped certificates
+//   - A BF21 container with concatenated raw DER certificates
+//   - A single raw DER certificate
+//
+// Returns certificates in the order they appear (leaf-last per
+// Yubico convention).
+func parseCertsFromStore(data []byte) ([]*x509.Certificate, error) {
+	var derCerts [][]byte
+
+	// Try TLV parsing first.
+	nodes, err := tlv.Decode(data)
+	if err == nil {
+		// Look for BF21 container.
+		store := tlv.Find(nodes, tlv.TagCertStore)
+		if store != nil {
+			// Check for 7F21-wrapped certs inside.
+			certNodes := tlv.FindAll(store.Children, tlv.TagCertificate)
+			if len(certNodes) > 0 {
+				for _, n := range certNodes {
+					derCerts = append(derCerts, n.Value)
+				}
+			} else if len(store.Value) > 0 {
+				// Concatenated raw DER inside BF21.
+				derCerts = splitDER(store.Value)
+			}
+		}
+
+		// If no BF21, try 7F21 entries at top level.
+		if len(derCerts) == 0 {
+			certNodes := tlv.FindAll(nodes, tlv.TagCertificate)
+			for _, n := range certNodes {
+				derCerts = append(derCerts, n.Value)
+			}
+		}
+	}
+
+	// Fallback: try splitting as concatenated DER sequences.
+	if len(derCerts) == 0 {
+		derCerts = splitDER(data)
+	}
+
+	// Parse all DER blobs into x509.Certificate objects.
+	var certs []*x509.Certificate
+	for _, der := range derCerts {
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			// Try GP proprietary format — not an X.509 cert,
+			// skip it for chain validation purposes.
+			continue
+		}
+		certs = append(certs, cert)
+	}
+
+	return certs, nil
+}
+
+// splitDER splits concatenated DER-encoded structures by parsing
+// each SEQUENCE header to determine boundaries.
+func splitDER(data []byte) [][]byte {
+	var result [][]byte
+	for len(data) > 0 {
+		if data[0] != 0x30 { // Not a SEQUENCE
+			result = append(result, data)
+			break
+		}
+		// Parse DER length.
+		total, ok := derElementLength(data)
+		if !ok || total > len(data) {
+			result = append(result, data)
+			break
+		}
+		result = append(result, data[:total])
+		data = data[total:]
+	}
+	return result
+}
+
+// derElementLength returns the total length of a DER element
+// (tag + length field + value) starting at data[0].
+func derElementLength(data []byte) (int, bool) {
+	if len(data) < 2 {
+		return 0, false
+	}
+	// Tag is 1 byte (0x30 for SEQUENCE).
+	lenByte := data[1]
+	if lenByte < 0x80 {
+		return 2 + int(lenByte), true
+	}
+	numBytes := int(lenByte & 0x7F)
+	if numBytes == 0 || numBytes > 4 || len(data) < 2+numBytes {
+		return 0, false
+	}
+	length := 0
+	for i := 0; i < numBytes; i++ {
+		length = (length << 8) | int(data[2+i])
+	}
+	return 2 + numBytes + length, true
+}
