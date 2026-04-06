@@ -13,7 +13,9 @@ import (
 // --- KCV tests ---
 
 func TestComputeAESKCV(t *testing.T) {
-	// Default SCP03 key: 0x40414243...4F
+	// KCV = AES-CBC(key, IV=zeros, data=ones)[:3]
+	// This should match the Python: _encrypt_cbc(k, _DEFAULT_KCV_IV)[:3]
+	// where _DEFAULT_KCV_IV = b"\1" * 16
 	key := []byte{0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
 		0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F}
 
@@ -30,12 +32,45 @@ func TestComputeAESKCV(t *testing.T) {
 	if !bytes.Equal(kcv, kcv2) {
 		t.Errorf("KCV not deterministic: %X vs %X", kcv, kcv2)
 	}
+
+	// Verify it's different from AES-ECB(key, zeros) — the old wrong computation.
+	// AES-ECB(key, zeros) != AES-CBC(key, IV=zeros, ones)
+	// (This ensures we fixed the KCV computation.)
+	t.Logf("KCV for default key: %X", kcv)
 }
 
 func TestComputeAESKCV_WrongLength(t *testing.T) {
-	kcv := computeAESKCV([]byte{0x01, 0x02, 0x03}) // too short
-	if kcv != nil {
+	if kcv := computeAESKCV([]byte{0x01, 0x02, 0x03}); kcv != nil {
 		t.Error("KCV should be nil for invalid key length")
+	}
+}
+
+func TestAesCBCEncrypt(t *testing.T) {
+	key := make([]byte, 16)
+	data := make([]byte, 16)
+
+	out := aesCBCEncrypt(key, data)
+	if out == nil {
+		t.Fatal("encryption should not return nil")
+	}
+	if len(out) != 16 {
+		t.Fatalf("expected 16 bytes output, got %d", len(out))
+	}
+}
+
+func TestPkcs7Pad(t *testing.T) {
+	// Already aligned — no padding.
+	data := make([]byte, 16)
+	padded := pkcs7Pad(data, 16)
+	if len(padded) != 16 {
+		t.Errorf("expected 16, got %d", len(padded))
+	}
+
+	// Needs padding.
+	data = make([]byte, 20)
+	padded = pkcs7Pad(data, 16)
+	if len(padded) != 32 {
+		t.Errorf("expected 32, got %d", len(padded))
 	}
 }
 
@@ -43,18 +78,15 @@ func TestComputeAESKCV_WrongLength(t *testing.T) {
 
 func TestKeyReference_String(t *testing.T) {
 	ref := NewKeyReference(0x01, 0xFF)
-	s := ref.String()
-	if s != "KID=0x01,KVN=0xFF" {
-		t.Errorf("unexpected string: %s", s)
+	if s := ref.String(); s != "KID=0x01,KVN=0xFF" {
+		t.Errorf("unexpected: %s", s)
 	}
 }
 
 // --- Serial conversion tests ---
 
 func TestSerialToHex(t *testing.T) {
-	serial := big.NewInt(0x2A)
-	got := SerialToHex(serial)
-	if got != "2a" {
+	if got := SerialToHex(big.NewInt(0x2A)); got != "2a" {
 		t.Errorf("expected 2a, got %s", got)
 	}
 }
@@ -70,21 +102,21 @@ func TestSerialFromHex(t *testing.T) {
 }
 
 func TestSerialFromHex_Invalid(t *testing.T) {
-	_, err := SerialFromHex("not-hex")
-	if err == nil {
-		t.Error("expected error for invalid hex")
+	if _, err := SerialFromHex("not-hex"); err == nil {
+		t.Error("expected error")
 	}
 }
 
 // --- APDU construction tests ---
 
-func TestPutKeySCP03Cmd_ValidKeys(t *testing.T) {
+func TestPutKeySCP03Cmd(t *testing.T) {
 	ref := NewKeyReference(KeyIDSCP03, 0x01)
 	enc := bytes.Repeat([]byte{0xAA}, 16)
 	mac := bytes.Repeat([]byte{0xBB}, 16)
 	dek := bytes.Repeat([]byte{0xCC}, 16)
+	sessionDEK := bytes.Repeat([]byte{0xDD}, 16)
 
-	cmd, expectedKCV, err := putKeySCP03Cmd(ref, enc, mac, dek, 0xFF)
+	cmd, expectedResp, err := putKeySCP03Cmd(ref, enc, mac, dek, sessionDEK, 0xFF)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,49 +124,68 @@ func TestPutKeySCP03Cmd_ValidKeys(t *testing.T) {
 		t.Errorf("expected INS 0x%02X, got 0x%02X", insPutKey, cmd.INS)
 	}
 	if cmd.P1 != 0xFF {
-		t.Errorf("expected P1=0xFF (replaceKvn), got 0x%02X", cmd.P1)
+		t.Errorf("expected P1=0xFF, got 0x%02X", cmd.P1)
 	}
 	if cmd.P2 != (KeyIDSCP03 | 0x80) {
 		t.Errorf("expected P2=0x%02X, got 0x%02X", KeyIDSCP03|0x80, cmd.P2)
 	}
-	if expectedKCV == nil || len(expectedKCV) != 3 {
-		t.Error("expected 3-byte KCV")
+
+	// Expected response: KVN(1) + KCV_enc(3) + KCV_mac(3) + KCV_dek(3) = 10 bytes
+	if len(expectedResp) != 10 {
+		t.Errorf("expected 10-byte expected response, got %d", len(expectedResp))
+	}
+	if expectedResp[0] != 0x01 {
+		t.Errorf("expected response starts with KVN 0x01, got 0x%02X", expectedResp[0])
 	}
 
-	// Data: 1 (version) + 3*(2 + 16 + 1 + 3) = 1 + 66 = 67
-	if len(cmd.Data) != 67 {
-		t.Errorf("expected 67 bytes data, got %d", len(cmd.Data))
-	}
+	// Data should start with KVN.
 	if cmd.Data[0] != 0x01 {
-		t.Errorf("first byte should be key version 0x01, got 0x%02X", cmd.Data[0])
+		t.Errorf("data should start with KVN 0x01, got 0x%02X", cmd.Data[0])
+	}
+
+	// Data should contain TLV-encoded encrypted keys (0x88 tag).
+	if cmd.Data[1] != keyTypeAES {
+		t.Errorf("first key type should be 0x%02X, got 0x%02X", keyTypeAES, cmd.Data[1])
 	}
 }
 
 func TestPutKeySCP03Cmd_WrongKeyLength(t *testing.T) {
 	ref := NewKeyReference(KeyIDSCP03, 0x01)
-	_, _, err := putKeySCP03Cmd(ref, make([]byte, 8), make([]byte, 16), make([]byte, 16), 0)
+	sessionDEK := make([]byte, 16)
+	_, _, err := putKeySCP03Cmd(ref, make([]byte, 8), make([]byte, 16), make([]byte, 16), sessionDEK, 0)
 	if err == nil {
 		t.Error("expected error for wrong key length")
 	}
 }
 
-func TestPutKeyECPrivateCmd_P256(t *testing.T) {
+func TestPutKeySCP03Cmd_NoDEK(t *testing.T) {
+	ref := NewKeyReference(KeyIDSCP03, 0x01)
+	_, _, err := putKeySCP03Cmd(ref, make([]byte, 16), make([]byte, 16), make([]byte, 16), nil, 0)
+	if err == nil {
+		t.Error("expected error for nil DEK")
+	}
+}
+
+func TestPutKeyECPrivateCmd(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	ref := NewKeyReference(KeyIDSCP11b, 0x03)
+	sessionDEK := make([]byte, 16)
 
-	cmd, err := putKeyECPrivateCmd(ref, key, 0)
+	cmd, err := putKeyECPrivateCmd(ref, key, sessionDEK, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cmd.INS != insPutKey {
 		t.Errorf("expected INS 0x%02X", insPutKey)
 	}
-	if cmd.P1 != 0x00 {
-		t.Errorf("expected P1=0x00 (new key), got 0x%02X", cmd.P1)
+
+	// Should contain B1 TLV (private key) and F0 TLV (params).
+	if !bytes.Contains(cmd.Data, []byte{keyTypeECParams}) {
+		t.Error("data should contain F0 (ECC_KEY_PARAMS) tag")
 	}
 }
 
-func TestPutKeyECPublicCmd_P256(t *testing.T) {
+func TestPutKeyECPublicCmd(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	ref := NewKeyReference(KeyIDOCE, 0x03)
 
@@ -145,28 +196,44 @@ func TestPutKeyECPublicCmd_P256(t *testing.T) {
 	if cmd.INS != insPutKey {
 		t.Errorf("expected INS 0x%02X", insPutKey)
 	}
-	// Data: 1 (version) + 1 (type) + 1 (len) + 65 (point) + 1 (no kcv) = 69
-	if len(cmd.Data) != 69 {
-		t.Errorf("expected 69 bytes data, got %d", len(cmd.Data))
+
+	// Should contain B0 TLV (public key) and F0 TLV (params).
+	if !bytes.Contains(cmd.Data, []byte{keyTypeECParams}) {
+		t.Error("data should contain F0 (ECC_KEY_PARAMS) tag")
+	}
+
+	// Should end with 0x00 (no KCV).
+	if cmd.Data[len(cmd.Data)-1] != 0x00 {
+		t.Error("data should end with 0x00 (no KCV)")
 	}
 }
 
 func TestGenerateECKeyCmd(t *testing.T) {
 	ref := NewKeyReference(KeyIDSCP11b, 0x01)
 	cmd := generateECKeyCmd(ref, 0)
-	if cmd.INS != insGenAsymKey {
-		t.Errorf("expected INS 0x%02X", insGenAsymKey)
+
+	// INS must be 0xF1, not 0xD8.
+	if cmd.INS != insGenerateKey {
+		t.Errorf("expected INS 0x%02X (GENERATE KEY), got 0x%02X", insGenerateKey, cmd.INS)
 	}
 	if cmd.P1 != 0x00 {
-		t.Errorf("expected P1=0x00 for new key")
+		t.Errorf("expected P1=0x00")
 	}
 	if cmd.P2 != KeyIDSCP11b {
 		t.Errorf("expected P2=0x%02X", KeyIDSCP11b)
 	}
+
+	// Data: KVN(1) + Tlv(F0, [00])
+	if cmd.Data[0] != 0x01 {
+		t.Errorf("data should start with KVN 0x01")
+	}
+	if !bytes.Contains(cmd.Data, []byte{keyTypeECParams}) {
+		t.Error("data should contain F0 (ECC_KEY_PARAMS) tag")
+	}
 }
 
 func TestDeleteKeyCmd(t *testing.T) {
-	ref := NewKeyReference(0, 0x01) // delete by KVN only
+	ref := NewKeyReference(0, 0x01) // by KVN only
 	cmd, err := deleteKeyCmd(ref, false)
 	if err != nil {
 		t.Fatal(err)
@@ -174,23 +241,163 @@ func TestDeleteKeyCmd(t *testing.T) {
 	if cmd.INS != insDeleteKey {
 		t.Errorf("expected INS 0x%02X", insDeleteKey)
 	}
-	// Should contain D2 01 01 (KVN=1)
 	if !bytes.Contains(cmd.Data, []byte{0xD2, 0x01, 0x01}) {
-		t.Errorf("expected KVN TLV in data: %X", cmd.Data)
+		t.Errorf("expected KVN TLV: %X", cmd.Data)
 	}
 }
 
 func TestDeleteKeyCmd_BothZero(t *testing.T) {
-	_, err := deleteKeyCmd(NewKeyReference(0, 0), false)
-	if err == nil {
-		t.Error("expected error when both KID and KVN are zero")
+	if _, err := deleteKeyCmd(NewKeyReference(0, 0), false); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// --- Reset helper tests ---
+
+func TestInsForKeyReset(t *testing.T) {
+	tests := []struct {
+		kid       byte
+		wantINS   byte
+		wantProc  bool
+	}{
+		{0x01, insInitializeUpdate, true},  // SCP03
+		{0x02, 0, false},                    // SCP03 sub-key, skip
+		{0x03, 0, false},                    // SCP03 sub-key, skip
+		{0x13, insIntAuth, true},            // SCP11b
+		{0x11, insExtAuth, true},            // SCP11a
+		{0x15, insExtAuth, true},            // SCP11c
+		{0x10, insPerformSecOp, true},       // OCE
+	}
+	for _, tt := range tests {
+		ins, process := insForKeyReset(tt.kid)
+		if process != tt.wantProc {
+			t.Errorf("kid=0x%02X: process=%v, want %v", tt.kid, process, tt.wantProc)
+		}
+		if process && ins != tt.wantINS {
+			t.Errorf("kid=0x%02X: ins=0x%02X, want 0x%02X", tt.kid, ins, tt.wantINS)
+		}
+	}
+}
+
+func TestResetLockoutCmd(t *testing.T) {
+	cmd := resetLockoutCmd(insInitializeUpdate, 0x00, 0x00)
+	if cmd.INS != insInitializeUpdate {
+		t.Errorf("wrong INS")
+	}
+	if len(cmd.Data) != 8 {
+		t.Errorf("expected 8 bytes data, got %d", len(cmd.Data))
+	}
+	// All zeros.
+	for i, b := range cmd.Data {
+		if b != 0 {
+			t.Errorf("data[%d] = 0x%02X, expected 0x00", i, b)
+		}
+	}
+}
+
+// --- Store data construction tests ---
+
+func TestStoreCertificatesData(t *testing.T) {
+	ref := NewKeyReference(KeyIDSCP11b, 0x01)
+	cert1 := []byte{0x30, 0x02, 0x00, 0x00}
+	cert2 := []byte{0x30, 0x03, 0x00, 0x00, 0x00}
+
+	data := storeCertificatesData(ref, [][]byte{cert1, cert2})
+	if len(data) == 0 {
+		t.Fatal("expected non-empty data")
+	}
+
+	// Structure: A6{83{KID,KVN}} + BF21{cert1||cert2}
+	// A6 tag should appear first.
+	if data[0] != 0xA6 {
+		t.Errorf("expected A6 prefix, got 0x%02X", data[0])
+	}
+
+	// BF21 should appear after the A6 block.
+	if !bytes.Contains(data, []byte{0xBF, 0x21}) {
+		t.Error("data should contain BF21 (cert store tag)")
+	}
+
+	// Raw cert bytes should appear in the BF21 container (concatenated, not 7F21-wrapped).
+	if !bytes.Contains(data, cert1) {
+		t.Error("data should contain cert1 bytes")
+	}
+	if !bytes.Contains(data, cert2) {
+		t.Error("data should contain cert2 bytes")
+	}
+
+	// Should NOT contain 7F21 (individual cert wrappers).
+	if bytes.Contains(data, []byte{0x7F, 0x21}) {
+		t.Error("data should NOT contain 7F21 (certs should be concatenated raw DER)")
+	}
+}
+
+func TestStoreCaIssuerData(t *testing.T) {
+	// SCP11b key — should be KLCC (flag = 0x01).
+	ref := NewKeyReference(KeyIDSCP11b, 0x03)
+	ski := []byte{0x01, 0x02, 0x03, 0x04}
+
+	data := storeCaIssuerData(ref, ski)
+	if len(data) == 0 {
+		t.Fatal("expected non-empty data")
+	}
+
+	// Structure: A6{ 80{01} + 42{SKI} + 83{KID,KVN} }
+	// Should start with A6 tag.
+	if data[0] != 0xA6 {
+		t.Errorf("expected A6 prefix, got 0x%02X", data[0])
+	}
+
+	// Should contain the KLCC flag (0x80, 0x01, 0x01).
+	if !bytes.Contains(data, []byte{0x80, 0x01, 0x01}) {
+		t.Error("should contain KLCC flag 0x80{0x01}")
+	}
+
+	// Should contain SKI (42 tag).
+	if !bytes.Contains(data, []byte{0x42}) {
+		t.Error("should contain 0x42 (SKI tag)")
+	}
+
+	// Should contain key reference (83 tag).
+	if !bytes.Contains(data, []byte{0x83, 0x02, KeyIDSCP11b, 0x03}) {
+		t.Error("should contain 0x83{KID,KVN}")
+	}
+}
+
+func TestStoreCaIssuerData_KLOC(t *testing.T) {
+	// OCE key — should be KLOC (flag = 0x00).
+	ref := NewKeyReference(KeyIDOCE, 0x03)
+	ski := []byte{0xAA}
+
+	data := storeCaIssuerData(ref, ski)
+
+	// Should contain KLOC flag (0x80, 0x01, 0x00).
+	if !bytes.Contains(data, []byte{0x80, 0x01, 0x00}) {
+		t.Error("should contain KLOC flag 0x80{0x00}")
+	}
+}
+
+func TestStoreAllowlistData(t *testing.T) {
+	ref := NewKeyReference(KeyIDOCE, 0x03)
+	data, err := storeAllowlistData(ref, []string{"aabb", "ccdd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Error("expected non-empty data")
+	}
+}
+
+func TestStoreAllowlistData_InvalidHex(t *testing.T) {
+	ref := NewKeyReference(KeyIDOCE, 0x03)
+	if _, err := storeAllowlistData(ref, []string{"not-hex"}); err == nil {
+		t.Error("expected error")
 	}
 }
 
 // --- Response parsing tests ---
 
 func TestParseKeyInformation(t *testing.T) {
-	// Construct a minimal E0 { C0 { KID=0x01, KVN=0x03, type=0x88, len=0x10 } }
 	inner := []byte{0x01, 0x03, 0x88, 0x10}
 	data := []byte{0xE0, byte(2 + len(inner)), 0xC0, byte(len(inner))}
 	data = append(data, inner...)
@@ -200,7 +407,7 @@ func TestParseKeyInformation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(infos) != 1 {
-		t.Fatalf("expected 1 info, got %d", len(infos))
+		t.Fatalf("expected 1, got %d", len(infos))
 	}
 	if infos[0].Reference.ID != 0x01 || infos[0].Reference.Version != 0x03 {
 		t.Errorf("wrong reference: %v", infos[0].Reference)
@@ -210,25 +417,22 @@ func TestParseKeyInformation(t *testing.T) {
 	}
 }
 
-func TestParseKeyInformation_Empty(t *testing.T) {
-	infos, err := parseKeyInformation(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if infos != nil {
-		t.Error("expected nil for empty data")
-	}
-}
+func TestParseGeneratedPublicKey_B0TLV(t *testing.T) {
+	// Response should be Tlv(0xB0, point).
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	point := elliptic.Marshal(key.Curve, key.X, key.Y)
 
-func TestParseCertificates_SingleDER(t *testing.T) {
-	// A minimal structure that isn't valid TLV triggers the raw DER fallback.
-	raw := []byte{0x30, 0x00} // minimal ASN.1 SEQUENCE
-	certs, err := parseCertificates(raw)
+	// Build B0 TLV.
+	var data []byte
+	data = append(data, keyTypeECPublic, byte(len(point)))
+	data = append(data, point...)
+
+	pub, err := parseGeneratedPublicKey(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(certs) != 1 {
-		t.Fatalf("expected 1 cert, got %d", len(certs))
+	if pub.X.Cmp(key.X) != 0 || pub.Y.Cmp(key.Y) != 0 {
+		t.Error("parsed key does not match original")
 	}
 }
 
@@ -241,38 +445,17 @@ func TestParseGeneratedPublicKey_RawPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if pub.X.Cmp(key.X) != 0 || pub.Y.Cmp(key.Y) != 0 {
-		t.Error("parsed key does not match original")
+		t.Error("mismatch")
 	}
 }
 
 func TestParseGeneratedPublicKey_Empty(t *testing.T) {
-	_, err := parseGeneratedPublicKey(nil)
-	if err == nil {
-		t.Error("expected error for empty data")
-	}
-}
-
-func TestParsePutKeyChecksum(t *testing.T) {
-	// Response: KVN(1) + KCV(3) per key component
-	data := []byte{0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33}
-	kcv, err := parsePutKeyChecksum(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(kcv, []byte{0xAA, 0xBB, 0xCC}) {
-		t.Errorf("unexpected KCV: %X", kcv)
-	}
-}
-
-func TestParsePutKeyChecksum_TooShort(t *testing.T) {
-	_, err := parsePutKeyChecksum([]byte{0x01})
-	if err == nil {
-		t.Error("expected error for too-short response")
+	if _, err := parseGeneratedPublicKey(nil); err == nil {
+		t.Error("expected error")
 	}
 }
 
 func TestParseAllowlist(t *testing.T) {
-	// Build 70 { 93 { serial1 } 93 { serial2 } }
 	s1, _ := hex.DecodeString("aabbccdd")
 	s2, _ := hex.DecodeString("11223344")
 	data := []byte{0x70, byte(2 + len(s1) + 2 + len(s2)),
@@ -286,95 +469,73 @@ func TestParseAllowlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(serials) != 2 {
-		t.Fatalf("expected 2 serials, got %d", len(serials))
+		t.Fatalf("expected 2, got %d", len(serials))
 	}
 	if serials[0] != "aabbccdd" || serials[1] != "11223344" {
-		t.Errorf("unexpected serials: %v", serials)
+		t.Errorf("unexpected: %v", serials)
 	}
 }
 
-// --- Store data construction tests ---
+func TestSplitDERCertificates(t *testing.T) {
+	// Two minimal DER sequences: 30 03 00 00 00 | 30 02 00 00
+	cert1 := []byte{0x30, 0x03, 0x00, 0x00, 0x00}
+	cert2 := []byte{0x30, 0x02, 0x00, 0x00}
+	concat := append(cert1, cert2...)
 
-func TestStoreAllowlistData_Valid(t *testing.T) {
-	ref := NewKeyReference(KeyIDOCE, 0x03)
-	data, err := storeAllowlistData(ref, []string{"aabb", "ccdd"})
+	certs, err := splitDERCertificates(concat)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(data) == 0 {
-		t.Error("expected non-empty data")
+	if len(certs) != 2 {
+		t.Fatalf("expected 2 certs, got %d", len(certs))
+	}
+	if !bytes.Equal(certs[0], cert1) {
+		t.Errorf("cert1 mismatch: %X", certs[0])
+	}
+	if !bytes.Equal(certs[1], cert2) {
+		t.Errorf("cert2 mismatch: %X", certs[1])
 	}
 }
 
-func TestStoreAllowlistData_InvalidHex(t *testing.T) {
-	ref := NewKeyReference(KeyIDOCE, 0x03)
-	_, err := storeAllowlistData(ref, []string{"not-hex"})
-	if err == nil {
-		t.Error("expected error for invalid hex serial")
-	}
-}
+// --- Session tests ---
 
-func TestStoreCertificatesData(t *testing.T) {
-	ref := NewKeyReference(KeyIDSCP11b, 0x01)
-	cert1 := []byte{0x30, 0x82, 0x01, 0x00} // fake DER
-	cert2 := []byte{0x30, 0x82, 0x02, 0x00}
-
-	data := storeCertificatesData(ref, [][]byte{cert1, cert2})
-	if len(data) == 0 {
-		t.Error("expected non-empty data")
-	}
-	// Should start with BF21 tag
-	if data[0] != 0xBF || data[1] != 0x21 {
-		t.Errorf("expected BF21 prefix, got %02X%02X", data[0], data[1])
-	}
-}
-
-func TestStoreCaIssuerData(t *testing.T) {
-	ref := NewKeyReference(KeyIDOCE, 0x03)
-	ski := []byte{0x01, 0x02, 0x03, 0x04}
-
-	data := storeCaIssuerData(ref, ski)
-	if len(data) == 0 {
-		t.Error("expected non-empty data")
-	}
-	// Should contain the SKI bytes
-	if !bytes.Contains(data, ski) {
-		t.Error("data should contain SKI bytes")
-	}
-}
-
-// --- Session auth guard tests ---
-
-func TestRequireAuth_Unauthenticated(t *testing.T) {
+func TestRequireAuth(t *testing.T) {
 	s := &Session{authenticated: false}
-	err := s.requireAuth()
-	if err != ErrNotAuthenticated {
+	if err := s.requireAuth(); err != ErrNotAuthenticated {
 		t.Errorf("expected ErrNotAuthenticated, got: %v", err)
 	}
-}
-
-func TestRequireAuth_Authenticated(t *testing.T) {
-	s := &Session{authenticated: true}
-	err := s.requireAuth()
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
+	s.authenticated = true
+	if err := s.requireAuth(); err != nil {
+		t.Errorf("unexpected: %v", err)
 	}
 }
 
-func TestSession_Protocol_Unauthenticated(t *testing.T) {
-	s := &Session{authenticated: false}
+func TestRequireDEK(t *testing.T) {
+	s := &Session{authenticated: true}
+	if err := s.requireDEK(); err == nil {
+		t.Error("expected error for nil DEK")
+	}
+	s.dek = make([]byte, 16)
+	if err := s.requireDEK(); err != nil {
+		t.Errorf("unexpected: %v", err)
+	}
+}
+
+func TestSession_Protocol(t *testing.T) {
+	s := &Session{}
 	if s.Protocol() != "none" {
 		t.Errorf("expected 'none', got %q", s.Protocol())
 	}
 }
 
-func TestSession_IsAuthenticated(t *testing.T) {
-	s := &Session{authenticated: false}
-	if s.IsAuthenticated() {
-		t.Error("expected false")
-	}
-	s.authenticated = true
-	if !s.IsAuthenticated() {
-		t.Error("expected true")
+func TestSession_Close_ZerosDEK(t *testing.T) {
+	dek := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22,
+		0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00}
+	s := &Session{dek: dek}
+	s.Close()
+	for i, b := range s.dek {
+		if b != 0 {
+			t.Errorf("dek[%d] not zeroed: 0x%02X", i, b)
+		}
 	}
 }

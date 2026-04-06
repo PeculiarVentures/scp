@@ -17,12 +17,17 @@ import (
 )
 
 // AIDSecurityDomain is the GlobalPlatform Issuer Security Domain AID.
-// This is the target applet for all Security Domain management operations.
 var AIDSecurityDomain = []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00}
 
+// Status words used during reset lockout.
+const (
+	swAuthMethodBlocked    uint16 = 0x6983
+	swSecurityNotSatisfied uint16 = 0x6982
+	swIncorrectParameters  uint16 = 0x6A80
+)
+
 // Session provides typed management operations over an authenticated
-// Security Domain channel. It wraps either an SCP03 or SCP11 secure
-// session and exposes the complete Yubico Security Domain API surface.
+// Security Domain channel.
 //
 // Two construction modes are supported:
 //
@@ -30,28 +35,28 @@ var AIDSecurityDomain = []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00}
 //     All management operations are available.
 //
 //   - Unauthenticated: via OpenUnauthenticated.
-//     Only read-only introspection operations are available
-//     (GetKeyInformation, GetCardRecognitionData).
+//     Only read-only introspection operations are available.
 type Session struct {
 	scpSession    scp.Session
 	transport     transport.Transport
 	authenticated bool
+
+	// dek is the Data Encryption Key from the SCP03 key set used to
+	// authenticate this session. Required for PUT KEY operations that
+	// encrypt key material before transmission. Nil for SCP11 sessions.
+	dek []byte
 }
 
 // Open establishes an authenticated Security Domain session using SCP03.
-// This is the most common entry point — it opens an SCP03 channel to
-// the Security Domain and returns a Session ready for management operations.
 //
 //	sd, err := securitydomain.Open(ctx, t, scp03.DefaultKeys, 0x00)
-//	if err != nil { ... }
 //	defer sd.Close()
 func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, keyVersion byte) (*Session, error) {
 	cfg := &scp03.Config{
 		Keys:              keys,
 		KeyVersion:        keyVersion,
 		SecurityDomainAID: AIDSecurityDomain,
-		// No ApplicationAID — we stay on the Security Domain.
-		SecurityLevel: channel.LevelFull,
+		SecurityLevel:     channel.LevelFull,
 	}
 
 	scpSess, err := scp03.Open(ctx, t, cfg)
@@ -59,20 +64,23 @@ func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, key
 		return nil, fmt.Errorf("securitydomain: open SCP03 session: %w", err)
 	}
 
+	// Store the DEK for use in PUT KEY operations.
+	dek := make([]byte, len(keys.DEK))
+	copy(dek, keys.DEK)
+
 	return &Session{
 		scpSession:    scpSess,
 		transport:     t,
 		authenticated: true,
+		dek:           dek,
 	}, nil
 }
 
 // OpenSCP11 establishes an authenticated Security Domain session using SCP11.
-// The cfg must be configured to target the Security Domain (no ApplicationAID).
 func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) (*Session, error) {
 	if cfg == nil {
 		cfg = session.DefaultConfig()
 	}
-	// Override: always target the Security Domain, never redirect to an app.
 	cfg.SecurityDomainAID = AIDSecurityDomain
 	cfg.ApplicationAID = nil
 
@@ -88,22 +96,24 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 	}, nil
 }
 
-// OpenWithSession wraps an existing authenticated scp.Session that has
-// already been established to the Security Domain. The caller is
-// responsible for ensuring the session targets the Security Domain AID.
-func OpenWithSession(scpSess scp.Session, t transport.Transport) *Session {
-	return &Session{
+// OpenWithSession wraps an existing authenticated scp.Session.
+// If the session was established with SCP03, provide the static DEK
+// so that PUT KEY operations can encrypt key material.
+func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) *Session {
+	s := &Session{
 		scpSession:    scpSess,
 		transport:     t,
 		authenticated: true,
 	}
+	if len(dek) > 0 {
+		s.dek = make([]byte, len(dek))
+		copy(s.dek, dek)
+	}
+	return s
 }
 
-// OpenUnauthenticated opens a read-only session to the Security Domain
-// without SCP authentication. Only limited introspection operations are
-// available (GetKeyInformation, GetCardRecognitionData).
+// OpenUnauthenticated opens a read-only session to the Security Domain.
 func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, error) {
-	// SELECT the Security Domain.
 	cmd := apdu.NewSelect(AIDSecurityDomain)
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {
@@ -112,11 +122,7 @@ func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, 
 	if !resp.IsSuccess() {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", resp.Error())
 	}
-
-	return &Session{
-		transport:     t,
-		authenticated: false,
-	}, nil
+	return &Session{transport: t, authenticated: false}, nil
 }
 
 // Close terminates the session and zeros key material.
@@ -124,16 +130,15 @@ func (s *Session) Close() {
 	if s.scpSession != nil {
 		s.scpSession.Close()
 	}
+	for i := range s.dek {
+		s.dek[i] = 0
+	}
 }
 
-// IsAuthenticated reports whether this session has an established
-// secure channel.
-func (s *Session) IsAuthenticated() bool {
-	return s.authenticated
-}
+// IsAuthenticated reports whether this session has a secure channel.
+func (s *Session) IsAuthenticated() bool { return s.authenticated }
 
-// Protocol returns the secure channel protocol in use, or "none"
-// for unauthenticated sessions.
+// Protocol returns the secure channel protocol in use, or "none".
 func (s *Session) Protocol() string {
 	if s.scpSession != nil {
 		return s.scpSession.Protocol()
@@ -141,9 +146,7 @@ func (s *Session) Protocol() string {
 	return "none"
 }
 
-// transmit sends a command through the session. For authenticated sessions,
-// the command is sent through the SCP secure channel. For unauthenticated
-// sessions, the command is sent as plaintext directly to the transport.
+// transmit sends a command through the appropriate channel.
 func (s *Session) transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	if s.authenticated && s.scpSession != nil {
 		return s.scpSession.Transmit(ctx, cmd)
@@ -151,22 +154,22 @@ func (s *Session) transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 	return s.transport.Transmit(ctx, cmd)
 }
 
-// transmitCollectAll sends a command and collects the full response,
-// handling GET RESPONSE chaining (61xx status).
+// transmitRaw sends a command through the raw transport, bypassing
+// secure messaging. Used during reset where the SCP session is being
+// deliberately destroyed.
+func (s *Session) transmitRaw(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	return s.transport.Transmit(ctx, cmd)
+}
+
+// transmitCollectAll handles GET RESPONSE chaining.
 func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	if s.authenticated && s.scpSession != nil {
-		// For SCP-wrapped sessions, TransmitCollectAll needs to go
-		// through the secure channel for each chained command.
-		// The SCP session's Transmit handles wrapping, so we do
-		// manual chaining here.
 		resp, err := s.scpSession.Transmit(ctx, cmd)
 		if err != nil {
 			return nil, err
 		}
-
 		var allData []byte
 		allData = append(allData, resp.Data...)
-
 		for resp.IsMoreData() {
 			getResp := apdu.NewGetResponse(resp.SW2)
 			resp, err = s.scpSession.Transmit(ctx, getResp)
@@ -175,18 +178,11 @@ func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*a
 			}
 			allData = append(allData, resp.Data...)
 		}
-
-		return &apdu.Response{
-			Data: allData,
-			SW1:  resp.SW1,
-			SW2:  resp.SW2,
-		}, nil
+		return &apdu.Response{Data: allData, SW1: resp.SW1, SW2: resp.SW2}, nil
 	}
-
 	return transport.TransmitCollectAll(ctx, s.transport, cmd)
 }
 
-// requireAuth returns ErrNotAuthenticated if the session is unauthenticated.
 func (s *Session) requireAuth() error {
 	if !s.authenticated {
 		return ErrNotAuthenticated
@@ -194,12 +190,39 @@ func (s *Session) requireAuth() error {
 	return nil
 }
 
-// --- Introspection operations ---
+func (s *Session) requireDEK() error {
+	if len(s.dek) == 0 {
+		return fmt.Errorf("%w: session DEK not available (SCP03 session required for PUT KEY)", ErrNotAuthenticated)
+	}
+	return nil
+}
 
-// GetKeyInformation retrieves information about all keys installed
-// on the Security Domain. This corresponds to GET DATA with tag E0.
-//
-// Available on both authenticated and unauthenticated sessions.
+// transmitWithChaining handles command chaining for large payloads.
+func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	if len(cmd.Data) <= 255 {
+		return s.transmit(ctx, cmd)
+	}
+	cmds, err := apdu.ChainCommands(cmd)
+	if err != nil {
+		return nil, err
+	}
+	var lastResp *apdu.Response
+	for i, c := range cmds {
+		resp, err := s.transmit(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		if i < len(cmds)-1 && !resp.IsSuccess() {
+			return resp, resp.Error()
+		}
+		lastResp = resp
+	}
+	return lastResp, nil
+}
+
+// --- Introspection ---
+
+// GetKeyInformation retrieves information about all installed keys.
 func (s *Session) GetKeyInformation(ctx context.Context) ([]KeyInfo, error) {
 	cmd := getDataCmd(p1p2KeyInfo, nil)
 	resp, err := s.transmitCollectAll(ctx, cmd)
@@ -212,11 +235,7 @@ func (s *Session) GetKeyInformation(ctx context.Context) ([]KeyInfo, error) {
 	return parseKeyInformation(resp.Data)
 }
 
-// GetCardRecognitionData retrieves the card recognition data from the
-// device. This is a TLV-encoded structure containing information about
-// the card per GP Card Spec v2.3.1 §H.2.
-//
-// Available on both authenticated and unauthenticated sessions.
+// GetCardRecognitionData retrieves the card recognition data (GP §H.2).
 func (s *Session) GetCardRecognitionData(ctx context.Context) ([]byte, error) {
 	cmd := getDataCmd(p1p2CardData, nil)
 	resp, err := s.transmitCollectAll(ctx, cmd)
@@ -229,71 +248,64 @@ func (s *Session) GetCardRecognitionData(ctx context.Context) ([]byte, error) {
 	return resp.Data, nil
 }
 
-// GetSupportedCaIdentifiers retrieves the CA identifiers (Subject Key
-// Identifiers) configured on the Security Domain.
-//
-// kloc: retrieve Key Loading OCE Certificate identifiers
-// klcc: retrieve Key Loading Card Certificate identifiers
-//
-// Available on both authenticated and unauthenticated sessions.
+// GetSupportedCaIdentifiers retrieves CA identifiers (SKIs) configured
+// on the Security Domain.
 func (s *Session) GetSupportedCaIdentifiers(ctx context.Context, kloc, klcc bool) ([]CaIdentifier, error) {
 	if !kloc && !klcc {
-		return nil, fmt.Errorf("securitydomain: at least one of kloc or klcc must be true")
+		kloc = true
+		klcc = true
 	}
 
 	var result []CaIdentifier
-
-	if kloc {
-		cmd := getDataCmd(p1p2CaKlocID, nil)
+	for _, entry := range []struct {
+		fetch bool
+		tag   uint16
+	}{
+		{kloc, p1p2CaKlocID},
+		{klcc, p1p2CaKlccID},
+	} {
+		if !entry.fetch {
+			continue
+		}
+		cmd := getDataCmd(entry.tag, nil)
 		resp, err := s.transmitCollectAll(ctx, cmd)
 		if err != nil {
-			return nil, fmt.Errorf("securitydomain: get CA KLOC identifiers: %w", err)
+			return nil, fmt.Errorf("securitydomain: get CA identifiers: %w", err)
 		}
-		if resp.IsSuccess() {
-			ids, err := parseSupportedCaIdentifiers(resp.Data)
-			if err != nil {
-				return nil, err
+		if !resp.IsSuccess() {
+			// Reference data not found is not an error — just means
+			// no identifiers of that type are configured.
+			if resp.StatusWord() == 0x6A88 {
+				continue
 			}
-			result = append(result, ids...)
+			continue
 		}
-	}
-
-	if klcc {
-		cmd := getDataCmd(p1p2CaKlccID, nil)
-		resp, err := s.transmitCollectAll(ctx, cmd)
+		ids, err := parseSupportedCaIdentifiers(resp.Data)
 		if err != nil {
-			return nil, fmt.Errorf("securitydomain: get CA KLCC identifiers: %w", err)
+			return nil, err
 		}
-		if resp.IsSuccess() {
-			ids, err := parseSupportedCaIdentifiers(resp.Data)
-			if err != nil {
-				return nil, err
-			}
-			result = append(result, ids...)
-		}
+		result = append(result, ids...)
 	}
-
 	return result, nil
 }
 
 // --- SCP03 key management ---
 
-// PutSCP03Key installs or replaces an SCP03 key set on the Security Domain.
+// PutSCP03Key installs or replaces an SCP03 key set.
 //
-// ref identifies where to store the key set (KID should be KeyIDSCP03).
-// keys contains the three AES-128 keys (ENC, MAC, DEK).
-// replaceKvn is the KVN of the key set to replace, or 0 for a new key set.
+// Key material is encrypted with the session DEK before transmission.
+// replaceKvn is the KVN to replace, or 0 for a new key set.
 //
-// When installing the first custom key set on a device with default keys,
-// the default key set (KVN=0xFF) is automatically removed by the device.
-//
-// Requires an authenticated session.
+// Requires an SCP03-authenticated session (DEK must be available).
 func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.StaticKeys, replaceKvn byte) error {
 	if err := s.requireAuth(); err != nil {
 		return err
 	}
+	if err := s.requireDEK(); err != nil {
+		return err
+	}
 
-	cmd, expectedKCV, err := putKeySCP03Cmd(ref, keys.ENC, keys.MAC, keys.DEK, replaceKvn)
+	cmd, expectedResponse, err := putKeySCP03Cmd(ref, keys.ENC, keys.MAC, keys.DEK, s.dek, replaceKvn)
 	if err != nil {
 		return err
 	}
@@ -306,15 +318,9 @@ func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.
 		return fmt.Errorf("securitydomain: put SCP03 key: %w: %w", ErrCardStatus, resp.Error())
 	}
 
-	// Verify the KCV returned by the card.
-	if len(resp.Data) >= 4 && expectedKCV != nil {
-		returnedKCV, err := parsePutKeyChecksum(resp.Data)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(returnedKCV, expectedKCV) {
-			return fmt.Errorf("%w: expected %X, got %X", ErrChecksum, expectedKCV, returnedKCV)
-		}
+	// Verify checksum: response should be KVN + KCV_enc + KCV_mac + KCV_dek.
+	if !bytes.Equal(resp.Data, expectedResponse) {
+		return fmt.Errorf("%w: response %X, expected %X", ErrChecksum, resp.Data, expectedResponse)
 	}
 
 	return nil
@@ -322,15 +328,8 @@ func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.
 
 // --- SCP11 key management ---
 
-// GenerateECKey generates a new NIST P-256 key pair on the Security Domain
-// for the given key reference. The private key never leaves the device.
-//
-// replaceKvn is the KVN of an existing key to replace, or 0 for a new key.
-//
-// This is a Yubico extension (there is no standard GP command to generate
-// key pairs on-card).
-//
-// Requires an authenticated session.
+// GenerateECKey generates a new NIST P-256 key pair on the device.
+// The private key never leaves the device.
 func (s *Session) GenerateECKey(ctx context.Context, ref KeyReference, replaceKvn byte) (*ecdsa.PublicKey, error) {
 	if err := s.requireAuth(); err != nil {
 		return nil, err
@@ -348,18 +347,19 @@ func (s *Session) GenerateECKey(ctx context.Context, ref KeyReference, replaceKv
 	return parseGeneratedPublicKey(resp.Data)
 }
 
-// PutECPrivateKey imports an EC private key to the Security Domain.
-// Only NIST P-256 keys are supported.
+// PutECPrivateKey imports an EC private key (NIST P-256).
+// The key is encrypted with the session DEK before transmission.
 //
-// replaceKvn is the KVN of an existing key to replace, or 0 for a new key.
-//
-// Requires an authenticated session.
+// Requires an SCP03-authenticated session (DEK must be available).
 func (s *Session) PutECPrivateKey(ctx context.Context, ref KeyReference, key *ecdsa.PrivateKey, replaceKvn byte) error {
 	if err := s.requireAuth(); err != nil {
 		return err
 	}
+	if err := s.requireDEK(); err != nil {
+		return err
+	}
 
-	cmd, err := putKeyECPrivateCmd(ref, key, replaceKvn)
+	cmd, err := putKeyECPrivateCmd(ref, key, s.dek, replaceKvn)
 	if err != nil {
 		return err
 	}
@@ -375,13 +375,9 @@ func (s *Session) PutECPrivateKey(ctx context.Context, ref KeyReference, key *ec
 	return nil
 }
 
-// PutECPublicKey imports an EC public key to the Security Domain.
-// Typically used for importing OCE public keys for SCP11a/c.
-// Only NIST P-256 keys are supported.
-//
-// replaceKvn is the KVN of an existing key to replace, or 0 for a new key.
-//
-// Requires an authenticated session.
+// PutECPublicKey imports an EC public key (NIST P-256).
+// Typically used for OCE public keys in SCP11a/c.
+// Public keys are not encrypted.
 func (s *Session) PutECPublicKey(ctx context.Context, ref KeyReference, key *ecdsa.PublicKey, replaceKvn byte) error {
 	if err := s.requireAuth(); err != nil {
 		return err
@@ -405,15 +401,8 @@ func (s *Session) PutECPublicKey(ctx context.Context, ref KeyReference, key *ecd
 
 // --- Key deletion and reset ---
 
-// DeleteKey deletes one or more keys matching the specified reference.
-//
-// Keys are matched by KID and/or KVN where 0 acts as a wildcard.
-// For SCP03 keys, deletion is by KVN only.
-//
-// deleteLast must be true if deleting the final key on the device,
-// false otherwise.
-//
-// Requires an authenticated session.
+// DeleteKey deletes one or more keys matching the reference.
+// SCP03 keys can only be deleted by KVN.
 func (s *Session) DeleteKey(ctx context.Context, ref KeyReference, deleteLast bool) error {
 	if err := s.requireAuth(); err != nil {
 		return err
@@ -435,26 +424,61 @@ func (s *Session) DeleteKey(ctx context.Context, ref KeyReference, deleteLast bo
 	return nil
 }
 
-// Reset performs a factory reset of the Security Domain. This removes
-// all keys and associated data, restores the default SCP03 static keys,
-// and generates a new (attestable) SCP11b key.
+// Reset performs a factory reset of the Security Domain by blocking
+// all installed keys through repeated invalid authentication attempts.
 //
-// WARNING: This is a destructive operation. All custom keys, certificates,
-// allowlists, and CA issuer configurations will be permanently deleted.
+// This removes all keys and associated data, restores default SCP03
+// keys, and generates a new SCP11b key.
 //
-// Requires an authenticated session.
+// WARNING: destructive operation. All custom material is permanently deleted.
+//
+// The session is invalid after Reset returns — close it and open a new
+// one with default keys.
+//
+// Ref: Python SecurityDomainSession.reset(), C# SecurityDomainSession.Reset().
 func (s *Session) Reset(ctx context.Context) error {
 	if err := s.requireAuth(); err != nil {
 		return err
 	}
 
-	cmd := resetCmd()
-	resp, err := s.transmit(ctx, cmd)
+	// Get all installed keys.
+	keys, err := s.GetKeyInformation(ctx)
 	if err != nil {
-		return fmt.Errorf("securitydomain: reset: %w", err)
+		return fmt.Errorf("securitydomain: reset: get key info: %w", err)
 	}
-	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: reset: %w: %w", ErrCardStatus, resp.Error())
+
+	// For each key, determine the appropriate INS and send 65 invalid
+	// authentication attempts to trigger lockout.
+	for _, ki := range keys {
+		ins, shouldProcess := insForKeyReset(ki.Reference.ID)
+		if !shouldProcess {
+			continue
+		}
+
+		kvn := ki.Reference.Version
+		kid := ki.Reference.ID
+
+		// SCP03 special handling: use KID=0, KVN=0 to allow
+		// deleting the default keys (which have KVN=0xFF).
+		if ki.Reference.ID == KeyIDSCP03 {
+			kvn = 0
+			kid = 0
+		}
+
+		for attempt := 0; attempt < 65; attempt++ {
+			cmd := resetLockoutCmd(ins, kvn, kid)
+			resp, err := s.transmitRaw(ctx, cmd)
+			if err != nil {
+				// Transport errors during reset are not fatal —
+				// the device may be resetting.
+				break
+			}
+			sw := resp.StatusWord()
+			if sw == swAuthMethodBlocked || sw == swSecurityNotSatisfied {
+				break
+			}
+			// On INCORRECT_PARAMETERS or SUCCESS, continue attempting.
+		}
 	}
 
 	return nil
@@ -462,14 +486,8 @@ func (s *Session) Reset(ctx context.Context) error {
 
 // --- Certificate operations ---
 
-// StoreCertificates stores a list of X.509 certificates associated with
-// the given key reference using the GP STORE DATA command.
-//
-// Certificates are stored in the order provided. For SCP11 key pairs,
-// the leaf certificate (containing the device's public key) should
-// typically be last in the chain.
-//
-// Requires an authenticated session.
+// StoreCertificates stores X.509 certificates for the given key reference.
+// Certificates should be in order with the leaf certificate last.
 func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs []*x509.Certificate) error {
 	if err := s.requireAuth(); err != nil {
 		return err
@@ -494,13 +512,9 @@ func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs
 	return nil
 }
 
-// GetCertificates retrieves the X.509 certificates associated with the
-// given key reference. The leaf certificate is last in the returned slice,
-// matching the Yubico SDK convention.
-//
-// Available on both authenticated and unauthenticated sessions.
+// GetCertificates retrieves the certificates for the given key reference.
+// The leaf certificate is last in the returned slice.
 func (s *Session) GetCertificates(ctx context.Context, ref KeyReference) ([]*x509.Certificate, error) {
-	// Build key reference sub-TLV for the GET DATA command.
 	keyRefData := buildKeyRefTLV(ref)
 	cmd := getDataCmd(p1p2CertStore, keyRefData)
 
@@ -509,6 +523,10 @@ func (s *Session) GetCertificates(ctx context.Context, ref KeyReference) ([]*x50
 		return nil, fmt.Errorf("securitydomain: get certificates: %w", err)
 	}
 	if !resp.IsSuccess() {
+		// Reference data not found — no certificates stored.
+		if resp.StatusWord() == 0x6A88 {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("securitydomain: get certificates: %w: %w", ErrCardStatus, resp.Error())
 	}
 
@@ -529,11 +547,7 @@ func (s *Session) GetCertificates(ctx context.Context, ref KeyReference) ([]*x50
 	return certs, nil
 }
 
-// StoreCaIssuer stores the Subject Key Identifier (SKI) for the CA
-// associated with the given key reference. This is used in SCP11a/c
-// for off-card entity verification.
-//
-// Requires an authenticated session.
+// StoreCaIssuer stores the SKI for the CA associated with a key reference.
 func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byte) error {
 	if err := s.requireAuth(); err != nil {
 		return err
@@ -555,17 +569,8 @@ func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byt
 
 // --- Allowlist operations ---
 
-// StoreAllowlist stores a certificate serial number allowlist for the
-// given key reference. Serial numbers are hex-encoded strings.
-//
-// If an allowlist is stored, only certificates with matching serials
-// will be accepted for SCP11a/c authentication. If no allowlist is
-// stored, any certificate signed by the configured CA is accepted.
-//
-// This performs a full replacement — all existing serials for this
-// key reference are replaced.
-//
-// Requires an authenticated session.
+// StoreAllowlist stores a certificate serial number allowlist.
+// Serials are hex-encoded strings. Full replacement semantics.
 func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials []string) error {
 	if err := s.requireAuth(); err != nil {
 		return err
@@ -588,41 +593,15 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 	return nil
 }
 
-// ClearAllowlist removes the certificate serial number allowlist for
-// the given key reference. After clearing, any certificate signed by
-// the configured CA will be accepted.
-//
-// Requires an authenticated session.
+// ClearAllowlist removes the allowlist for the given key reference.
+// Ref: C# ClearAllowList calls StoreAllowlist with empty list.
 func (s *Session) ClearAllowlist(ctx context.Context, ref KeyReference) error {
-	if err := s.requireAuth(); err != nil {
-		return err
-	}
-
-	// Clearing the allowlist is done by storing an empty allowlist.
-	keyRefData := buildKeyRefTLV(ref)
-	emptyList := (&tlv.Node{Tag: tagAllowList}).Encode()
-
-	var payload []byte
-	payload = append(payload, keyRefData...)
-	payload = append(payload, emptyList...)
-
-	cmd := storeDataCmd(payload)
-	resp, err := s.transmit(ctx, cmd)
-	if err != nil {
-		return fmt.Errorf("securitydomain: clear allowlist: %w", err)
-	}
-	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: clear allowlist: %w: %w", ErrCardStatus, resp.Error())
-	}
-
-	return nil
+	return s.StoreAllowlist(ctx, ref, nil)
 }
 
 // --- Raw data operations ---
 
-// GetData sends a raw GET DATA command with the given tag and optional
-// request data. This is an escape hatch for operations not covered by
-// typed methods.
+// GetData sends a raw GET DATA command.
 func (s *Session) GetData(ctx context.Context, tag uint16, data []byte) ([]byte, error) {
 	cmd := getDataCmd(tag, data)
 	resp, err := s.transmitCollectAll(ctx, cmd)
@@ -635,16 +614,11 @@ func (s *Session) GetData(ctx context.Context, tag uint16, data []byte) ([]byte,
 	return resp.Data, nil
 }
 
-// StoreData sends a raw STORE DATA command with the given BER-TLV
-// encoded payload. This is an escape hatch for operations not covered
-// by typed methods.
-//
-// Requires an authenticated session.
+// StoreData sends a raw STORE DATA command. Requires authentication.
 func (s *Session) StoreData(ctx context.Context, data []byte) error {
 	if err := s.requireAuth(); err != nil {
 		return err
 	}
-
 	cmd := storeDataCmd(data)
 	resp, err := s.transmit(ctx, cmd)
 	if err != nil {
@@ -658,39 +632,9 @@ func (s *Session) StoreData(ctx context.Context, data []byte) error {
 
 // --- Internal helpers ---
 
-// buildKeyRefTLV builds the key reference sub-TLV used in GET DATA
-// and STORE DATA commands: A6 { 83 { KID, KVN } }
 func buildKeyRefTLV(ref KeyReference) []byte {
 	node := tlv.BuildConstructed(tagControlRef,
 		tlv.Build(tagKeyID, []byte{ref.ID, ref.Version}),
 	)
 	return node.Encode()
-}
-
-// transmitWithChaining sends a command that may exceed 255 bytes by
-// splitting it into chained APDUs via the secure channel.
-func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
-	// If data fits in a single APDU, send directly.
-	if len(cmd.Data) <= 255 {
-		return s.transmit(ctx, cmd)
-	}
-
-	// Split into chained commands.
-	cmds, err := apdu.ChainCommands(cmd)
-	if err != nil {
-		return nil, err
-	}
-
-	var lastResp *apdu.Response
-	for i, c := range cmds {
-		resp, err := s.transmit(ctx, c)
-		if err != nil {
-			return nil, err
-		}
-		if i < len(cmds)-1 && !resp.IsSuccess() {
-			return resp, resp.Error()
-		}
-		lastResp = resp
-	}
-	return lastResp, nil
 }

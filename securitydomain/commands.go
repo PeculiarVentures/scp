@@ -1,7 +1,14 @@
 package securitydomain
 
+// APDU construction and response parsing for Security Domain management.
+//
+// Encoding has been validated against two Yubico reference implementations:
+//   - Python: yubikey-manager/yubikit/securitydomain.py
+//   - C#:    Yubico.NET.SDK SecurityDomainSession.cs
+
 import (
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"encoding/hex"
@@ -15,46 +22,52 @@ import (
 
 // GlobalPlatform APDU instructions for Security Domain management.
 const (
-	insGetData    byte = 0xCA
-	insStoreData  byte = 0xE2
-	insPutKey     byte = 0xD8
-	insDeleteKey  byte = 0xE4
-	insGenAsymKey byte = 0xD8 // Same as PUT KEY, Yubico extension
+	insGetData     byte = 0xCA
+	insStoreData   byte = 0xE2
+	insPutKey      byte = 0xD8
+	insDeleteKey   byte = 0xE4
+	insGenerateKey byte = 0xF1 // Yubico extension — NOT 0xD8
+
+	// Instructions used by the reset/lockout mechanism.
+	insInitializeUpdate byte = 0x50
+	insExtAuth          byte = 0x82
+	insIntAuth          byte = 0x88
+	insPerformSecOp     byte = 0x2A
 
 	clsGP byte = 0x80 // GlobalPlatform class byte
+)
+
+// Key type constants for PUT KEY / GENERATE KEY TLV encoding.
+const (
+	keyTypeAES       byte = 0x88
+	keyTypeECPublic  byte = 0xB0
+	keyTypeECPrivate byte = 0xB1
+	keyTypeECParams  byte = 0xF0
 )
 
 // Tag constants for Security Domain TLV structures.
 const (
 	tagKeyInformation  tlv.Tag = 0xE0
 	tagKeyInfoTemplate tlv.Tag = 0xC0
-	tagKeyType         tlv.Tag = 0x80
-	tagKeyLength       tlv.Tag = 0x81
-	tagKeyData         tlv.Tag = 0xA6
-	tagKeyCheck        tlv.Tag = 0x86 // not tlv.TagReceipt; same value, different context
 	tagCertStore       tlv.Tag = 0xBF21
-	tagCertificate     tlv.Tag = 0x7F21
 	tagControlRef      tlv.Tag = 0xA6
 	tagKeyID           tlv.Tag = 0x83
+	tagCaKlocID        tlv.Tag = 0x42 // CA-KLOC/KLCC SKI
+	tagAllowList       tlv.Tag = 0x70
+	tagSerialNum       tlv.Tag = 0x93
 
-	// Tags for STORE DATA payloads.
-	tagCaKlocID   tlv.Tag = 0x42 // CA-KLOC identifier (SKI)
-	tagAllowList  tlv.Tag = 0x70 // Allow list container
-	tagSerialNum  tlv.Tag = 0x93 // Certificate serial number
+	// GET DATA P1P2 tags.
+	p1p2KeyInfo   uint16 = 0x00E0
+	p1p2CardData  uint16 = 0x0066
+	p1p2CertStore uint16 = 0xBF21
 
-	// GET DATA P1P2 tags (2-byte tag encoded in P1-P2).
-	p1p2KeyInfo     uint16 = 0x00E0
-	p1p2CardData    uint16 = 0x0066
-	p1p2CertStore   uint16 = 0xBF21
-	p1p2CaKlocID    uint16 = 0x0042
-	p1p2CaKlccID    uint16 = 0x1042
-	p1p2AllowList   uint16 = 0x0070
+	// CA identifier tags — ref: Python TAG_CA_KLOC_IDENTIFIERS / TAG_CA_KLCC_IDENTIFIERS
+	p1p2CaKlocID uint16 = 0xFF33
+	p1p2CaKlccID uint16 = 0xFF34
 )
 
 // --- APDU construction ---
 
-// getDataCmd builds a GET DATA command for the given P1-P2 tag,
-// with optional TLV-encoded request data.
 func getDataCmd(p1p2 uint16, data []byte) *apdu.Command {
 	return &apdu.Command{
 		CLA:  clsGP,
@@ -66,14 +79,6 @@ func getDataCmd(p1p2 uint16, data []byte) *apdu.Command {
 	}
 }
 
-// storeDataCmd builds a STORE DATA command. The data must be BER-TLV
-// encoded per GP Card Spec v2.3.1 §11.11.
-//
-// P1 encoding:
-//
-//	b8=1: last (or only) block
-//	b5-b4=10: BER-TLV encoded data
-//	b7-b6=00: no encryption
 func storeDataCmd(data []byte) *apdu.Command {
 	return &apdu.Command{
 		CLA:  clsGP,
@@ -84,34 +89,42 @@ func storeDataCmd(data []byte) *apdu.Command {
 	}
 }
 
-// putKeyCmd builds a PUT KEY command for SCP03 static keys.
+// putKeySCP03Cmd builds a PUT KEY command for SCP03 static keys.
 // GP Card Spec v2.3.1 §11.8.
 //
-// P1 = version number of key being replaced (0 = new key)
-// P2 = key ID | b8 set if more than one key in command
-func putKeySCP03Cmd(ref KeyReference, encKey, macKey, dekKey []byte, replaceKvn byte) (*apdu.Command, []byte, error) {
+// Key material is encrypted with the session DEK before transmission.
+// KCV = AES-CBC(key, IV=zeros, data=ones)[:3]
+//
+// Ref: Python put_key (StaticKeys branch) and C# PutKey(StaticKeys).
+func putKeySCP03Cmd(ref KeyReference, encKey, macKey, dekKey, sessionDEK []byte, replaceKvn byte) (*apdu.Command, []byte, error) {
 	if len(encKey) != 16 || len(macKey) != 16 || len(dekKey) != 16 {
 		return nil, nil, fmt.Errorf("%w: SCP03 keys must be 16 bytes (AES-128)", ErrInvalidKey)
 	}
-
-	// Each key component is encoded as:
-	//   key type (1) | key length (1) | key data (16) | KCV length (1) | KCV (3)
-	// Key type 0x88 = AES, length 0x10 = 16 bytes
-	encodeKey := func(key []byte) []byte {
-		kcv := computeAESKCV(key)
-		var b []byte
-		b = append(b, 0x88, 0x10) // AES, 16 bytes
-		b = append(b, key...)
-		b = append(b, 0x03) // KCV length
-		b = append(b, kcv...)
-		return b
+	if len(sessionDEK) != 16 {
+		return nil, nil, fmt.Errorf("%w: session DEK must be 16 bytes", ErrInvalidKey)
 	}
 
 	var data []byte
+	var expectedKCVs []byte
+
 	data = append(data, ref.Version) // new key version number
-	data = append(data, encodeKey(encKey)...)
-	data = append(data, encodeKey(macKey)...)
-	data = append(data, encodeKey(dekKey)...)
+	expectedKCVs = append(expectedKCVs, ref.Version)
+
+	for _, key := range [][]byte{encKey, macKey, dekKey} {
+		// Compute KCV: AES-CBC(key, IV=0x00*16, data=0x01*16)[:3]
+		kcv := computeAESKCV(key)
+
+		// Encrypt key with session DEK: AES-CBC(DEK, IV=0x00*16, key)
+		encryptedKey := aesCBCEncrypt(sessionDEK, key)
+
+		// Encode: Tlv(0x88, encrypted_key) + kcv_len(1) + kcv(3)
+		keyTLV := tlv.Build(tlv.Tag(keyTypeAES), encryptedKey)
+		data = append(data, keyTLV.Encode()...)
+		data = append(data, byte(len(kcv)))
+		data = append(data, kcv...)
+
+		expectedKCVs = append(expectedKCVs, kcv...)
+	}
 
 	p2 := ref.ID | 0x80 // b8 set: multiple keys in command
 
@@ -123,30 +136,41 @@ func putKeySCP03Cmd(ref KeyReference, encKey, macKey, dekKey []byte, replaceKvn 
 		Data: data,
 	}
 
-	// Expected KCV for verification (ENC key's KCV).
-	expectedKCV := computeAESKCV(encKey)
-	return cmd, expectedKCV, nil
+	return cmd, expectedKCVs, nil
 }
 
 // putKeyECPrivateCmd builds a PUT KEY command for an EC private key.
-// This is a Yubico extension to the GP PUT KEY command.
-func putKeyECPrivateCmd(ref KeyReference, key *ecdsa.PrivateKey, replaceKvn byte) (*apdu.Command, error) {
+// The private key bytes are encrypted with the session DEK.
+//
+// Ref: Python put_key (EllipticCurvePrivateKey branch), C# PutKey(ECPrivateKey).
+func putKeyECPrivateCmd(ref KeyReference, key *ecdsa.PrivateKey, sessionDEK []byte, replaceKvn byte) (*apdu.Command, error) {
 	if key.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("%w: only NIST P-256 keys are supported", ErrInvalidKey)
 	}
+	if len(sessionDEK) != 16 {
+		return nil, fmt.Errorf("%w: session DEK must be 16 bytes", ErrInvalidKey)
+	}
 
 	privBytes := key.D.Bytes()
-	// Pad to 32 bytes if needed.
 	for len(privBytes) < 32 {
 		privBytes = append([]byte{0x00}, privBytes...)
 	}
 
+	// Encrypt private key with session DEK.
+	encryptedPriv := aesCBCEncrypt(sessionDEK, privBytes)
+
 	var data []byte
 	data = append(data, ref.Version)
-	// EC private key: type 0xB1, length 0x20
-	data = append(data, 0xB1, byte(len(privBytes)))
-	data = append(data, privBytes...)
-	data = append(data, 0x00) // no KCV for EC keys
+
+	// B1 TLV with encrypted private key
+	privTLV := tlv.Build(tlv.Tag(keyTypeECPrivate), encryptedPriv)
+	data = append(data, privTLV.Encode()...)
+
+	// F0 TLV: EC key params (0x00 = SECP256R1)
+	paramsTLV := tlv.Build(tlv.Tag(keyTypeECParams), []byte{0x00})
+	data = append(data, paramsTLV.Encode()...)
+
+	data = append(data, 0x00) // no KCV
 
 	cmd := &apdu.Command{
 		CLA:  clsGP,
@@ -159,7 +183,9 @@ func putKeyECPrivateCmd(ref KeyReference, key *ecdsa.PrivateKey, replaceKvn byte
 }
 
 // putKeyECPublicCmd builds a PUT KEY command for an EC public key.
-// Used for importing OCE public keys.
+// Public keys are NOT encrypted (only private keys and symmetric keys are).
+//
+// Ref: Python put_key (EllipticCurvePublicKey branch), C# PutKey(ECPublicKey).
 func putKeyECPublicCmd(ref KeyReference, key *ecdsa.PublicKey, replaceKvn byte) (*apdu.Command, error) {
 	if key.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("%w: only NIST P-256 keys are supported", ErrInvalidKey)
@@ -169,9 +195,15 @@ func putKeyECPublicCmd(ref KeyReference, key *ecdsa.PublicKey, replaceKvn byte) 
 
 	var data []byte
 	data = append(data, ref.Version)
-	// EC public key: type 0xB0, length = uncompressed point size
-	data = append(data, 0xB0, byte(len(pubBytes)))
-	data = append(data, pubBytes...)
+
+	// B0 TLV with uncompressed public point
+	pubTLV := tlv.Build(tlv.Tag(keyTypeECPublic), pubBytes)
+	data = append(data, pubTLV.Encode()...)
+
+	// F0 TLV: EC key params (0x00 = SECP256R1)
+	paramsTLV := tlv.Build(tlv.Tag(keyTypeECParams), []byte{0x00})
+	data = append(data, paramsTLV.Encode()...)
+
 	data = append(data, 0x00) // no KCV
 
 	cmd := &apdu.Command{
@@ -184,19 +216,21 @@ func putKeyECPublicCmd(ref KeyReference, key *ecdsa.PublicKey, replaceKvn byte) 
 	return cmd, nil
 }
 
-// generateECKeyCmd builds the Yubico-specific GENERATE ASYMMETRIC KEY
-// command, which reuses the PUT KEY INS with a marker key type.
+// generateECKeyCmd builds the Yubico-specific GENERATE KEY command.
+// INS = 0xF1 (NOT 0xD8 PUT KEY). Data = KVN + Tlv(0xF0, [curve]).
+//
+// Ref: Python generate_ec_key, C# GenerateEcKey.
 func generateECKeyCmd(ref KeyReference, replaceKvn byte) *apdu.Command {
 	var data []byte
 	data = append(data, ref.Version)
-	// Key type 0xB0 (EC public key placeholder), length 0
-	// signals generation rather than import.
-	data = append(data, 0xB0, 0x00)
-	data = append(data, 0x00) // no KCV
+
+	// F0 TLV: EC key params (0x00 = SECP256R1)
+	paramsTLV := tlv.Build(tlv.Tag(keyTypeECParams), []byte{0x00})
+	data = append(data, paramsTLV.Encode()...)
 
 	return &apdu.Command{
 		CLA:  clsGP,
-		INS:  insGenAsymKey,
+		INS:  insGenerateKey,
 		P1:   replaceKvn,
 		P2:   ref.ID,
 		Data: data,
@@ -205,16 +239,12 @@ func generateECKeyCmd(ref KeyReference, replaceKvn byte) *apdu.Command {
 
 // deleteKeyCmd builds a DELETE KEY command.
 // GP Card Spec v2.3.1 §11.5.
-//
-// The data field contains TLV-encoded key identifiers.
-// Tag D0: key ID, Tag D2: key version number.
 func deleteKeyCmd(ref KeyReference, deleteLast bool) (*apdu.Command, error) {
 	if ref.ID == 0 && ref.Version == 0 {
 		return nil, errors.New("at least one of KID or KVN must be non-zero")
 	}
 
 	var data []byte
-
 	if ref.ID != 0 {
 		data = append(data, 0xD0, 0x01, ref.ID)
 	}
@@ -224,7 +254,7 @@ func deleteKeyCmd(ref KeyReference, deleteLast bool) (*apdu.Command, error) {
 
 	p2 := byte(0x00)
 	if deleteLast {
-		p2 = 0x01 // GP extension: acknowledge deleting last key
+		p2 = 0x01
 	}
 
 	return &apdu.Command{
@@ -236,67 +266,111 @@ func deleteKeyCmd(ref KeyReference, deleteLast bool) (*apdu.Command, error) {
 	}, nil
 }
 
-// resetCmd builds the Yubico Security Domain RESET command.
-// This is a proprietary command that restores factory defaults.
-func resetCmd() *apdu.Command {
+// resetLockoutCmd builds a command used during the reset/lockout process.
+// Reset works by sending invalid authentication data to each key 65 times
+// until it blocks. The INS depends on the key type.
+//
+// Ref: Python reset(), C# Reset().
+func resetLockoutCmd(ins byte, kvn, kid byte) *apdu.Command {
 	return &apdu.Command{
-		CLA: clsGP,
-		INS: insStoreData,
-		P1:  0x9A, // reset indicator
-		P2:  0xA0,
+		CLA:  clsGP,
+		INS:  ins,
+		P1:   kvn,
+		P2:   kid,
+		Data: make([]byte, 8), // 8 zero bytes as invalid auth data
 	}
 }
+
+// insForKeyReset returns the authentication INS to use when locking out
+// a key during reset, based on its KID.
+//
+// Ref: Python reset() switch, C# Reset() switch.
+func insForKeyReset(kid byte) (byte, bool) {
+	switch kid {
+	case 0x01: // SCP03
+		return insInitializeUpdate, true
+	case 0x02, 0x03: // SCP03 sub-keys, skip
+		return 0, false
+	case 0x11, 0x15: // SCP11a, SCP11c
+		return insExtAuth, true
+	case 0x13: // SCP11b
+		return insIntAuth, true
+	default: // 0x10, 0x20-0x2F (OCE keys)
+		return insPerformSecOp, true
+	}
+}
+
+// --- STORE DATA payload construction ---
 
 // storeCertificatesData builds the STORE DATA payload for certificate storage.
-// Certificates are wrapped in 7F21 tags inside a BF21 container,
-// keyed by a control reference template with the key reference.
+//
+// Format: A6{83{KID,KVN}} + BF21{concat(cert_DER_bytes)}
+// Note: certs are concatenated raw DER inside BF21, NOT individually 7F21-wrapped.
+//
+// Ref: Python store_certificate_bundle, C# StoreCertificates.
 func storeCertificatesData(ref KeyReference, certsDER [][]byte) []byte {
-	// Build key reference TLV: A6 { 83 { KID, KVN } }
 	keyRefTLV := tlv.BuildConstructed(tagControlRef,
 		tlv.Build(tagKeyID, []byte{ref.ID, ref.Version}),
 	)
 
-	// Build certificate entries: 7F21 { raw DER }
-	var certNodes []*tlv.Node
-	certNodes = append(certNodes, keyRefTLV)
+	// Concatenate raw DER certificates.
+	var certConcat []byte
 	for _, der := range certsDER {
-		certNodes = append(certNodes, tlv.Build(tagCertificate, der))
+		certConcat = append(certConcat, der...)
 	}
-
-	container := tlv.BuildConstructed(tagCertStore, certNodes...)
-	return container.Encode()
-}
-
-// storeCaIssuerData builds the STORE DATA payload for CA issuer (SKI).
-func storeCaIssuerData(ref KeyReference, ski []byte) []byte {
-	keyRefTLV := tlv.BuildConstructed(tagControlRef,
-		tlv.Build(tagKeyID, []byte{ref.ID, ref.Version}),
-	)
-	skiTLV := tlv.Build(tagCaKlocID, ski)
+	certStoreTLV := tlv.Build(tagCertStore, certConcat)
 
 	var data []byte
 	data = append(data, keyRefTLV.Encode()...)
-	data = append(data, skiTLV.Encode()...)
+	data = append(data, certStoreTLV.Encode()...)
 	return data
+}
+
+// storeCaIssuerData builds the STORE DATA payload for CA issuer (SKI).
+//
+// Format: A6{ 80{klcc_flag} + 42{SKI} + 83{KID,KVN} }
+// klcc_flag = 0x01 if key is KLCC (SCP11a/b/c), 0x00 if KLOC.
+//
+// Ref: Python store_ca_issuer, C# StoreCaIssuer.
+func storeCaIssuerData(ref KeyReference, ski []byte) []byte {
+	// Determine KLOC vs KLCC based on KID.
+	klcc := ref.ID == KeyIDSCP11a || ref.ID == KeyIDSCP11b || ref.ID == KeyIDSCP11c
+	var klccFlag byte
+	if klcc {
+		klccFlag = 0x01
+	}
+
+	caIssuerTLV := tlv.BuildConstructed(tagControlRef,
+		tlv.Build(tlv.Tag(0x80), []byte{klccFlag}),
+		tlv.Build(tagCaKlocID, ski),
+		tlv.Build(tagKeyID, []byte{ref.ID, ref.Version}),
+	)
+
+	return caIssuerTLV.Encode()
 }
 
 // storeAllowlistData builds the STORE DATA payload for a certificate
 // serial number allowlist.
+//
+// Format: A6{83{KID,KVN}} + 70{93{serial1} + 93{serial2} + ...}
+//
+// Ref: Python store_allowlist, C# StoreAllowlist.
 func storeAllowlistData(ref KeyReference, serials []string) ([]byte, error) {
 	keyRefTLV := tlv.BuildConstructed(tagControlRef,
 		tlv.Build(tagKeyID, []byte{ref.ID, ref.Version}),
 	)
 
-	var serialNodes []*tlv.Node
+	var serialData []byte
 	for _, s := range serials {
 		b, err := hex.DecodeString(s)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %q: %v", ErrInvalidSerial, s, err)
 		}
-		serialNodes = append(serialNodes, tlv.Build(tagSerialNum, b))
+		serialTLV := tlv.Build(tagSerialNum, b)
+		serialData = append(serialData, serialTLV.Encode()...)
 	}
 
-	allowlistTLV := tlv.BuildConstructed(tagAllowList, serialNodes...)
+	allowlistTLV := tlv.Build(tagAllowList, serialData)
 
 	var data []byte
 	data = append(data, keyRefTLV.Encode()...)
@@ -306,29 +380,18 @@ func storeAllowlistData(ref KeyReference, serials []string) ([]byte, error) {
 
 // --- Response parsing ---
 
-// parseKeyInformation parses a GET DATA [Key Information] response
-// into a slice of KeyInfo records.
-//
-// Response format (GP Card Spec v2.3.1 §11.3.3):
-//
-//	E0 {
-//	  C0 { KID(1) KVN(1) component-type(1) component-length(1) ... }
-//	  C0 { ... }
-//	}
 func parseKeyInformation(data []byte) ([]KeyInfo, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-
 	nodes, err := tlv.Decode(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: key information: %v", ErrInvalidResponse, err)
 	}
 
-	// Find E0 container.
+	// Parse C0 entries, possibly inside E0 container.
 	container := tlv.Find(nodes, tagKeyInformation)
 	if container == nil {
-		// Some cards return C0 entries directly without E0 wrapper.
 		container = &tlv.Node{Children: nodes}
 	}
 
@@ -344,7 +407,6 @@ func parseKeyInformation(data []byte) ([]KeyInfo, error) {
 			Reference:  NewKeyReference(child.Value[0], child.Value[1]),
 			Components: make(map[byte]byte),
 		}
-		// Remaining bytes are pairs: component-type, component-length
 		rest := child.Value[2:]
 		for len(rest) >= 2 {
 			info.Components[rest[0]] = rest[1]
@@ -355,99 +417,146 @@ func parseKeyInformation(data []byte) ([]KeyInfo, error) {
 	return infos, nil
 }
 
-// parseCertificates parses a GET DATA [Certificate Store] response
-// into a slice of raw DER-encoded certificates.
+// parseCertificates parses a GET DATA [Certificate Store] response.
+// The response is a TLV list of raw DER certificates (not 7F21-wrapped).
 //
-// Response format:
-//
-//	BF21 {
-//	  7F21 { cert DER }
-//	  7F21 { cert DER }
-//	}
+// Ref: Python get_certificate_bundle uses Tlv.parse_list on the response.
 func parseCertificates(data []byte) ([][]byte, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
 
+	// Try TLV parsing — each top-level TLV value is a DER certificate.
 	nodes, err := tlv.Decode(data)
 	if err != nil {
 		// Might be a single raw DER certificate.
 		return [][]byte{data}, nil
 	}
 
-	// Find BF21 container.
+	// If we have nodes, try to extract certificate data.
+	// The response format varies — could be raw TLV list or BF21-wrapped.
 	store := tlv.Find(nodes, tagCertStore)
-	if store == nil {
-		// Try to find 7F21 entries at top level.
-		store = &tlv.Node{Children: nodes}
+	if store != nil {
+		// Inside BF21, certificates may be raw DER or further TLV-wrapped.
+		if len(store.Value) > 0 {
+			return splitDERCertificates(store.Value)
+		}
 	}
 
-	certNodes := tlv.FindAll(store.Children, tagCertificate)
-	if len(certNodes) == 0 {
-		// Single cert without wrapper.
-		return [][]byte{data}, nil
-	}
-
+	// Try each top-level node's value as a certificate.
 	var certs [][]byte
-	for _, n := range certNodes {
-		certs = append(certs, n.Value)
+	for _, n := range nodes {
+		if len(n.Value) > 0 {
+			certs = append(certs, n.Value)
+		}
+	}
+	if len(certs) > 0 {
+		return certs, nil
+	}
+
+	return [][]byte{data}, nil
+}
+
+// splitDERCertificates splits concatenated DER-encoded certificates.
+// Each DER certificate starts with 0x30 (SEQUENCE tag).
+func splitDERCertificates(data []byte) ([][]byte, error) {
+	var certs [][]byte
+	for len(data) > 0 {
+		if data[0] != 0x30 {
+			// Not a SEQUENCE tag — treat remainder as single cert.
+			certs = append(certs, data)
+			break
+		}
+		// Parse DER length to find end of this certificate.
+		certLen, headerLen, err := parseDERLength(data[1:])
+		if err != nil {
+			certs = append(certs, data)
+			break
+		}
+		total := 1 + headerLen + certLen
+		if total > len(data) {
+			certs = append(certs, data)
+			break
+		}
+		certs = append(certs, data[:total])
+		data = data[total:]
 	}
 	return certs, nil
 }
 
-// parseSupportedCaIdentifiers parses the GET DATA response for
-// CA identifiers into a map of KeyReference -> SKI bytes.
+// parseDERLength reads a DER length encoding and returns the length value
+// and the number of bytes consumed by the length field.
+func parseDERLength(data []byte) (int, int, error) {
+	if len(data) == 0 {
+		return 0, 0, errors.New("empty DER length")
+	}
+	if data[0] < 0x80 {
+		return int(data[0]), 1, nil
+	}
+	numBytes := int(data[0] & 0x7F)
+	if numBytes == 0 || numBytes > 4 || len(data) < 1+numBytes {
+		return 0, 0, errors.New("invalid DER length encoding")
+	}
+	length := 0
+	for i := 0; i < numBytes; i++ {
+		length = (length << 8) | int(data[1+i])
+	}
+	return length, 1 + numBytes, nil
+}
+
 func parseSupportedCaIdentifiers(data []byte) ([]CaIdentifier, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-
 	nodes, err := tlv.Decode(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: CA identifiers: %v", ErrInvalidResponse, err)
 	}
 
+	// Response is pairs of TLVs: key-ref followed by SKI.
+	// Ref: Python parses as tlvs[i+1].value for key, tlvs[i].value for SKI.
 	var result []CaIdentifier
-	for _, n := range nodes {
-		if n.Tag == tagControlRef && len(n.Children) > 0 {
-			// Look for key ID and SKI within the control ref template.
-			kidNode := tlv.Find(n.Children, tagKeyID)
-			skiNode := tlv.Find(n.Children, tagCaKlocID)
-			if kidNode != nil && len(kidNode.Value) >= 2 && skiNode != nil {
-				result = append(result, CaIdentifier{
-					Reference: NewKeyReference(kidNode.Value[0], kidNode.Value[1]),
-					SKI:       skiNode.Value,
-				})
-			}
+	for i := 0; i+1 < len(nodes); i += 2 {
+		skiNode := nodes[i]
+		keyNode := nodes[i+1]
+		if len(keyNode.Value) >= 2 {
+			result = append(result, CaIdentifier{
+				Reference: NewKeyReference(keyNode.Value[0], keyNode.Value[1]),
+				SKI:       skiNode.Value,
+			})
 		}
 	}
 	return result, nil
 }
 
-// parseGeneratedPublicKey extracts the EC public key from a
-// GenerateEcKey response.
+// parseGeneratedPublicKey extracts the EC public key from a GenerateEcKey
+// response. Response is Tlv(0xB0, uncompressed_point).
+//
+// Ref: Python uses Tlv.unpack(KeyType.ECC_PUBLIC_KEY, resp).
 func parseGeneratedPublicKey(data []byte) (*ecdsa.PublicKey, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("%w: empty generate key response", ErrInvalidResponse)
 	}
 
-	// Response may contain:
-	// 1. Raw EC point (65 bytes, 0x04 prefix)
-	// 2. TLV-wrapped EC point
+	// Try TLV decoding — expect B0{point}.
+	nodes, err := tlv.Decode(data)
+	if err == nil {
+		pubNode := tlv.Find(nodes, tlv.Tag(keyTypeECPublic))
+		if pubNode != nil && len(pubNode.Value) == 65 {
+			return unmarshalP256Point(pubNode.Value)
+		}
+		// Search recursively.
+		if key, findErr := findPublicKeyInNodes(nodes); findErr == nil {
+			return key, nil
+		}
+	}
 
-	// Try raw point first.
+	// Fallback: raw 65-byte uncompressed point.
 	if len(data) >= 65 && data[0] == 0x04 {
 		return unmarshalP256Point(data[:65])
 	}
 
-	// Try TLV decoding.
-	nodes, err := tlv.Decode(data)
-	if err != nil {
-		return nil, fmt.Errorf("%w: generate key response: %v", ErrInvalidResponse, err)
-	}
-
-	// Search for a 65-byte uncompressed point in any node.
-	return findPublicKeyInNodes(nodes)
+	return nil, fmt.Errorf("%w: no EC public key in generate response", ErrInvalidResponse)
 }
 
 func findPublicKeyInNodes(nodes []*tlv.Node) (*ecdsa.PublicKey, error) {
@@ -461,7 +570,7 @@ func findPublicKeyInNodes(nodes []*tlv.Node) (*ecdsa.PublicKey, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("%w: no EC public key in response", ErrInvalidResponse)
+	return nil, fmt.Errorf("%w: no EC point found", ErrInvalidResponse)
 }
 
 func unmarshalP256Point(data []byte) (*ecdsa.PublicKey, error) {
@@ -472,22 +581,18 @@ func unmarshalP256Point(data []byte) (*ecdsa.PublicKey, error) {
 	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }
 
-// parseAllowlist parses an allowlist response into hex-encoded serial strings.
 func parseAllowlist(data []byte) ([]string, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-
 	nodes, err := tlv.Decode(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: allowlist: %v", ErrInvalidResponse, err)
 	}
-
 	container := tlv.Find(nodes, tagAllowList)
 	if container == nil {
 		container = &tlv.Node{Children: nodes}
 	}
-
 	var serials []string
 	for _, n := range container.Children {
 		if n.Tag == tagSerialNum {
@@ -497,47 +602,72 @@ func parseAllowlist(data []byte) ([]string, error) {
 	return serials, nil
 }
 
-// parsePutKeyChecksum extracts the KCV from a PUT KEY response.
 func parsePutKeyChecksum(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-
-	// Response is: KVN (1 byte) | KCV for each key component (3 bytes each)
-	// Minimum: 1 + 3 = 4 bytes for a single key
-	if len(data) < 4 {
-		return nil, fmt.Errorf("%w: PUT KEY response too short (%d bytes)", ErrInvalidResponse, len(data))
-	}
-
-	// Return the first KCV (3 bytes after the version byte).
-	return data[1:4], nil
+	return data, nil // Full response for comparison
 }
 
-// --- Key check value computation ---
+// --- Cryptographic helpers ---
 
 // computeAESKCV computes the Key Check Value for an AES key.
-// KCV = first 3 bytes of AES-ECB(key, 0x00...00).
-// GP Card Spec v2.3.1 §F.2.
+// KCV = AES-CBC(key, IV=0x00*16, data=0x01*16)[:3]
+//
+// Ref: Python _encrypt_cbc(k, _DEFAULT_KCV_IV) where _DEFAULT_KCV_IV = b"\1" * 16
+// Ref: C# kcvInput.Fill(1) then AesCbcEncrypt(key, kvcZeroIv, kcvInput)
 func computeAESKCV(key []byte) []byte {
 	if len(key) != 16 {
 		return nil
 	}
+	onesBlock := make([]byte, 16)
+	for i := range onesBlock {
+		onesBlock[i] = 0x01
+	}
+	encrypted := aesCBCEncrypt(key, onesBlock)
+	if encrypted == nil {
+		return nil
+	}
+	return encrypted[:3]
+}
+
+// aesCBCEncrypt performs AES-CBC encryption with a zero IV.
+// Used for KCV computation and key encryption in PUT KEY.
+func aesCBCEncrypt(key, data []byte) []byte {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil
 	}
-	out := make([]byte, aes.BlockSize)
-	block.Encrypt(out, make([]byte, aes.BlockSize))
-	return out[:3]
+	// Pad data to block size if needed.
+	padded := pkcs7Pad(data, aes.BlockSize)
+	iv := make([]byte, aes.BlockSize)
+	enc := cipher.NewCBCEncrypter(block, iv)
+	out := make([]byte, len(padded))
+	enc.CryptBlocks(out, padded)
+	return out
 }
 
-// parseSerialFromBigInt converts a *big.Int certificate serial to the
-// hex string format expected by the allowlist APIs.
+// pkcs7Pad pads data to a multiple of blockSize using PKCS#7.
+// If data is already a multiple, no padding is added.
+func pkcs7Pad(data []byte, blockSize int) []byte {
+	if len(data)%blockSize == 0 {
+		return data
+	}
+	padding := blockSize - (len(data) % blockSize)
+	padded := make([]byte, len(data)+padding)
+	copy(padded, data)
+	for i := len(data); i < len(padded); i++ {
+		padded[i] = byte(padding)
+	}
+	return padded
+}
+
+// --- Serial number conversion ---
+
 func SerialToHex(serial *big.Int) string {
 	return hex.EncodeToString(serial.Bytes())
 }
 
-// SerialFromHex converts a hex-encoded serial string to *big.Int.
 func SerialFromHex(s string) (*big.Int, error) {
 	b, err := hex.DecodeString(s)
 	if err != nil {
