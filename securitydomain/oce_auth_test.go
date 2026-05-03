@@ -15,23 +15,37 @@ import (
 // classification at Open time. SCP11b is the only variant where the
 // off-card entity is NOT authenticated to the card; everything else
 // authenticates both directions.
-func TestIsOCEAuthProtocol(t *testing.T) {
-	cases := []struct {
-		proto string
-		want  bool
-	}{
-		{"SCP03", true},
-		{"SCP11a", true},
-		{"SCP11c", true},
-		{"SCP11b", false},
-		{"none", false},
-		{"", false},
-		{"SCP99", false},
+// TestSessionOCEAuthenticated_RequiresTypedCapability covers the
+// strict gate at the construction-time classifier: a custom
+// scp.Session that does NOT implement oceAuthState is treated as
+// not-OCE-authenticated, regardless of what its Protocol() string
+// claims. Earlier versions had a string fallback that would accept
+// "SCP03" / "SCP11a" / "SCP11c" as OCE-authenticated based on the
+// protocol name; that was a soft guard a malicious or buggy custom
+// Session could bypass by lying about its protocol. The fallback is
+// gone; adapter authors must explicitly opt in.
+func TestSessionOCEAuthenticated_RequiresTypedCapability(t *testing.T) {
+	// Lying session: claims to be SCP03 but doesn't implement
+	// OCEAuthenticated(). MUST be treated as not-OCE-authenticated.
+	liar := &fakePlainSession{proto: "SCP03"}
+	if sessionOCEAuthenticated(liar) {
+		t.Error("session that doesn't implement oceAuthState must be treated as not-OCE-authenticated, " +
+			"even when Protocol() returns 'SCP03'")
 	}
-	for _, c := range cases {
-		if got := isOCEAuthProtocol(c.proto); got != c.want {
-			t.Errorf("isOCEAuthProtocol(%q) = %v, want %v", c.proto, got, c.want)
-		}
+
+	// Honest session: implements oceAuthState=true. Protocol() can
+	// return literally anything; the typed capability is the
+	// authoritative answer.
+	honest := &fakeOCESession{proto: "any-string", auth: true}
+	if !sessionOCEAuthenticated(honest) {
+		t.Error("session that implements oceAuthState=true must be treated as OCE-authenticated")
+	}
+
+	// Honest session reporting OCEAuthenticated()=false. Should be
+	// rejected even when Protocol() looks favourable.
+	hopeful := &fakeOCESession{proto: "SCP11a", auth: false}
+	if sessionOCEAuthenticated(hopeful) {
+		t.Error("typed oceAuthState=false must win over recognized protocol string")
 	}
 }
 

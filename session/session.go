@@ -479,6 +479,16 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 		return nil, fmt.Errorf("transmit: %w", err)
 	}
 
+	// GP SCP03 §6.2.4 (applied to SCP11 by Amendment F): R-MAC and
+	// R-ENC are applied only to responses with SW 9000 or warning SW1
+	// 62/63. Card-side error status words (6Axx, 6Bxx, ...) are
+	// returned unprotected and must pass through without R-MAC
+	// verification — otherwise legitimate card errors look like MAC
+	// failures and the session is needlessly torn down.
+	if !channel.ResponseIsSecureMessagingProtected(resp.SW1, resp.SW2) {
+		return resp, nil
+	}
+
 	// Unwrap the response.
 	unwrapped, err := s.channel.Unwrap(resp)
 	if err != nil {

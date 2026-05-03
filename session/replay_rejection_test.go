@@ -110,7 +110,16 @@ func TestSCP11_RelayReplayedResponse_Rejected(t *testing.T) {
 
 	// First post-handshake Transmit: pass through normally. The relay
 	// captures the response so it can replay it next time.
-	probe := &apdu.Command{CLA: 0x00, INS: 0xCA, P1: 0x00, P2: 0x00}
+	//
+	// Use mockcard's echo INS (0xFD), which returns SW=9000 with the
+	// data echoed back. R-MAC and R-ENC are applied per GP SCP03
+	// §6.2.4 only to 9000/62XX/63XX responses, so the replay-rejection
+	// test exercises the path the spec actually authenticates. Error
+	// status words (6Axx, 6Dxx, ...) are NOT R-MAC-protected per spec,
+	// so a replay of an error response is undetectable at the
+	// protocol layer — that's a known protocol-level limitation, not
+	// a library bug.
+	probe := &apdu.Command{CLA: 0x00, INS: 0xFD, P1: 0x00, P2: 0x00, Data: []byte{0xAA, 0xBB, 0xCC, 0xDD}}
 
 	resp1, err := sess.Transmit(ctx, probe)
 	if err != nil {
