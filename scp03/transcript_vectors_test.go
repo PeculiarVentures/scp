@@ -85,6 +85,18 @@ var samsungAES128Keys = StaticKeys{
 	DEK: hx("B4BDC610C3F6793708FF1132E2C5BF60"),
 }
 
+var samsungAES192Keys = StaticKeys{
+	ENC: hx("1D72CD9283FD55162722C6BEAA4DC1877F4C0CD0ECC15E05"),
+	MAC: hx("F4932BA02FFC3098D172790099D2838236F2E61068D56F44"),
+	DEK: hx("B4BDC610C3F6793708FF1132E2C5BF60523AEAC06B32F204"),
+}
+
+var samsungAES256Keys = StaticKeys{
+	ENC: hx("1D72CD9283FD55162722C6BEAA4DC1877F4C0CD0ECC15E052AAC39A99AF9AD72"),
+	MAC: hx("F4932BA02FFC3098D172790099D2838236F2E61068D56F4401CC0374C25AF8CB"),
+	DEK: hx("B4BDC610C3F6793708FF1132E2C5BF60523AEAC06B32F204B851B6CC007C8D3C"),
+}
+
 func hx(s string) []byte {
 	s = strings.ReplaceAll(s, " ", "")
 	s = strings.ReplaceAll(s, "\n", "")
@@ -188,6 +200,174 @@ func TestSCP03_SamsungOpenSCP_AES128_S16_FullTranscript(t *testing.T) {
 		KeyVersion:    0x30,
 		HostChallenge: hx("06F85B77251BF79406F85B77251BF794"),
 		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+	tt.expectConsumedAll()
+}
+
+// TestSCP03_SamsungOpenSCP_AES192_S8_FullTranscript imports the AES-192/S8
+// SCP03 transcript from Samsung OpenSCP-Java:
+//
+//	src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes192S8ModeEmulation.java
+//	src/test/java/com/samsung/openscp/testdata/InputTestData.java (static keys)
+//
+// This exercises AES-192 KDF, channel encryption, and CMAC end-to-end.
+// Without it, AES-192 support was a property of the type system
+// (StaticKeys accepts 24-byte slices) without actual proof the protocol
+// path worked.
+func TestSCP03_SamsungOpenSCP_AES192_S8_FullTranscript(t *testing.T) {
+	tt := newTranscriptTransport(t, []transcriptStep{
+		{
+			name:        "INITIALIZE UPDATE",
+			wantCAPDU:   hx("805030000806F85B77251BF79400"),
+			returnRAPDU: hx("A1A012430585513120853003709CE033FA78E6B10D6E7C64F962A822A400082A9000"),
+		},
+		{
+			name:        "EXTERNAL AUTHENTICATE",
+			wantCAPDU:   hx("848233001063B6CEFAC0EC098333860788C65220BA"),
+			returnRAPDU: hx("9000"),
+		},
+	})
+
+	sess, err := Open(context.Background(), tt, &Config{
+		Keys:          samsungAES192Keys,
+		KeyVersion:    0x30,
+		HostChallenge: hx("06F85B77251BF794"),
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+	tt.expectConsumedAll()
+}
+
+// TestSCP03_SamsungOpenSCP_AES256_S8_FullTranscript imports the AES-256/S8
+// SCP03 transcript from Samsung OpenSCP-Java:
+//
+//	src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes256S8ModeEmulation.java
+//
+// As with the AES-192 case, this is a byte-exact known-answer test that
+// proves the AES-256 path through KDF, AES-CBC, and AES-CMAC actually
+// works, not just that the parser accepts a 32-byte key.
+func TestSCP03_SamsungOpenSCP_AES256_S8_FullTranscript(t *testing.T) {
+	tt := newTranscriptTransport(t, []transcriptStep{
+		{
+			name:        "INITIALIZE UPDATE",
+			wantCAPDU:   hx("805030000806F85B77251BF79400"),
+			returnRAPDU: hx("A1A012430585513120853003709CE033FA78E6B10D8AFA7267CB63740E00082A9000"),
+		},
+		{
+			name:        "EXTERNAL AUTHENTICATE",
+			wantCAPDU:   hx("848233001050E003735F92228269A094FFC07429FD"),
+			returnRAPDU: hx("9000"),
+		},
+	})
+
+	sess, err := Open(context.Background(), tt, &Config{
+		Keys:          samsungAES256Keys,
+		KeyVersion:    0x30,
+		HostChallenge: hx("06F85B77251BF794"),
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+	tt.expectConsumedAll()
+}
+
+// TestSCP03_SamsungOpenSCP_AES192_S16_FullTranscript imports the AES-192/S16
+// SCP03 transcript from Samsung OpenSCP-Java. S16 mode uses 16-byte
+// challenges and 16-byte cryptograms/MACs, so this exercises the full
+// non-truncated path on top of AES-192 KDF.
+func TestSCP03_SamsungOpenSCP_AES192_S16_FullTranscript(t *testing.T) {
+	tt := newTranscriptTransport(t, []transcriptStep{
+		{
+			name:        "INITIALIZE UPDATE",
+			wantCAPDU:   hx("805030001006F85B77251BF79406F85B77251BF79400"),
+			returnRAPDU: hx("A1A012430585513120853003710617A2C34D50B562F7DECFC3DBF58A64A378671D41E7F6E3F5254CA9D4C481A400082A9000"),
+		},
+		{
+			name:        "EXTERNAL AUTHENTICATE",
+			wantCAPDU:   hx("848233002099033B5BB5246C859B9748E497EDAE8D9EBB7BD196CE4E3EBFC92343D69478AB"),
+			returnRAPDU: hx("9000"),
+		},
+	})
+
+	sess, err := Open(context.Background(), tt, &Config{
+		Keys:          samsungAES192Keys,
+		KeyVersion:    0x30,
+		HostChallenge: hx("06F85B77251BF79406F85B77251BF794"),
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+	tt.expectConsumedAll()
+}
+
+// TestSCP03_SamsungOpenSCP_AES256_S16_FullTranscript imports the AES-256/S16
+// transcript. Together with the four other Samsung transcripts above, this
+// closes out the SCP03 matrix: every (key size, S parameter) combination
+// — AES-128/192/256 × S8/S16 — has at least one byte-exact known-answer
+// test through it.
+func TestSCP03_SamsungOpenSCP_AES256_S16_FullTranscript(t *testing.T) {
+	tt := newTranscriptTransport(t, []transcriptStep{
+		{
+			name:        "INITIALIZE UPDATE",
+			wantCAPDU:   hx("805030001006F85B77251BF79406F85B77251BF79400"),
+			returnRAPDU: hx("A1A012430585513120853003710617A2C34D50B562F7DECFC3DBF58A6499D2966CF09C9201FDE8343E93FB18B400082A9000"),
+		},
+		{
+			name:        "EXTERNAL AUTHENTICATE",
+			wantCAPDU:   hx("848233002071D1A091C5D24AF177B00E69B1A32B4E30A5168CF8C86B19730DF915EF82D8A7"),
+			returnRAPDU: hx("9000"),
+		},
+	})
+
+	sess, err := Open(context.Background(), tt, &Config{
+		Keys:          samsungAES256Keys,
+		KeyVersion:    0x30,
+		HostChallenge: hx("06F85B77251BF79406F85B77251BF794"),
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+	tt.expectConsumedAll()
+}
+
+// TestSCP03_NoSELECT_WhenSelectAIDNil confirms that SelectAID = nil
+// causes Open to skip the initial SELECT entirely. The use case is
+// callers that have already SELECTed the target applet through some
+// other path (test harness, manual setup, applet-aware transport).
+func TestSCP03_NoSELECT_WhenSelectAIDNil(t *testing.T) {
+	tt := newTranscriptTransport(t, []transcriptStep{
+		// No SELECT step expected — the very first APDU is INITIALIZE UPDATE.
+		{
+			name:        "INITIALIZE UPDATE",
+			wantCAPDU:   hx("8050000008010203040506070800"),
+			returnRAPDU: hx("00003244342976208448010370734ECDCA19E446A30BC253BCE97DB9910004369000"),
+		},
+		{
+			name:        "EXTERNAL AUTHENTICATE",
+			wantCAPDU:   hx("8482010010A5E66CD1A836E3A47CD3B3F7B689AE8F"),
+			returnRAPDU: hx("9000"),
+		},
+	})
+
+	sess, err := Open(context.Background(), tt, &Config{
+		Keys:          DefaultKeys,
+		KeyVersion:    0x00,
+		HostChallenge: hx("0102030405060708"),
+		SecurityLevel: channel.LevelCMAC,
+		// SelectAID intentionally nil — caller has already selected.
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)

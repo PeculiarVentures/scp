@@ -75,12 +75,17 @@ type Config struct {
 	// selects S16. If nil, a random 8-byte challenge is generated.
 	HostChallenge []byte
 
-	// SecurityDomainAID is the AID to SELECT before the handshake.
-	// If nil, no SELECT is sent (assumes the SD is already selected).
-	SecurityDomainAID []byte
+	// SelectAID is the applet AID to SELECT before the handshake.
+	// The applet's SCP03 key set is what the handshake authenticates
+	// against — typically the Issuer Security Domain, but any applet
+	// holding an SCP03 key set is valid.
+	// If nil, no SELECT is sent (assumes the target is already selected).
+	SelectAID []byte
 
-	// ApplicationAID is the target applet to SELECT after the secure
-	// channel is established. If nil, no application SELECT is performed.
+	// ApplicationAID is an optional applet to SELECT through the
+	// secure channel after the handshake. Note: on YubiKey, doing
+	// this terminates the SCP session — set SelectAID instead and
+	// leave this nil.
 	ApplicationAID []byte
 
 	// SecurityLevel controls which secure messaging operations to apply.
@@ -113,8 +118,8 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 
 	// Step 1: SELECT Security Domain if configured.
-	if len(cfg.SecurityDomainAID) > 0 {
-		resp, err := t.Transmit(ctx, apdu.NewSelect(cfg.SecurityDomainAID))
+	if len(cfg.SelectAID) > 0 {
+		resp, err := t.Transmit(ctx, apdu.NewSelect(cfg.SelectAID))
 		if err != nil {
 			return nil, fmt.Errorf("select SD: %w", err)
 		}

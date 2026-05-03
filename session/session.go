@@ -66,20 +66,30 @@ type Config struct {
 	// Variant selects SCP11a, SCP11b, or SCP11c.
 	Variant Variant
 
-	// SecurityDomainAID is the AID of the GlobalPlatform Security Domain
-	// that holds the SCP11 keys. The handshake (GET DATA, INTERNAL AUTH)
-	// is performed against this applet.
-	// Default: GP ISD (A0000001510000)
-	SecurityDomainAID []byte
+	// SelectAID is the applet AID to SELECT (unwrapped) before the
+	// SCP handshake begins. The handshake (GET DATA, INTERNAL/MUTUAL
+	// AUTHENTICATE) authenticates against the SCP key set held by
+	// this applet:
+	//
+	//   - For Security Domain management: AIDSecurityDomain (default).
+	//   - For PIV provisioning over SCP on YubiKey: AIDPIV.
+	//
+	// If nil, no SELECT is sent — the caller is expected to have
+	// SELECTed the target applet through some other path (a test
+	// harness, a multiplexing transport, etc.).
+	//
+	// This field replaces the previous SecurityDomainAID, which had
+	// a misleading name: any applet's SCP key set can be the target,
+	// not just the Issuer Security Domain.
+	SelectAID []byte
 
-	// ApplicationAID is the target applet to SELECT after the secure
-	// channel is established. If set, Open() sends a wrapped SELECT
-	// for this AID as the final step. If nil, no application SELECT
-	// is performed and the caller must send their own. Some devices,
-	// including YubiKey, scope SCP sessions to the selected applet and
-	// terminate the session when another applet is selected, so this is
-	// nil by default.
-	// Example: PIV = A000000308
+	// ApplicationAID is an optional second applet to SELECT *through*
+	// the secure channel after the handshake completes. Note: on
+	// YubiKey, SCP is scoped to the SELECTed applet and selecting a
+	// different applet through the channel terminates the session.
+	// Set this to nil for YubiKey use; configure SelectAID instead.
+	// Example (non-YubiKey hardware that supports cross-applet SCP):
+	// AIDPIV = A000000308
 	ApplicationAID []byte
 
 	// KeyID and KeyVersion identify the key set on the card.
@@ -159,7 +169,7 @@ var (
 func DefaultConfig() *Config {
 	return &Config{
 		Variant:           SCP11b,
-		SecurityDomainAID: AIDSecurityDomain,
+		SelectAID:         AIDSecurityDomain,
 		ApplicationAID:    nil,
 		KeyID:             0x13,
 		KeyVersion:        0x01,
@@ -351,9 +361,17 @@ func (s *Session) Protocol() string {
 // --- Protocol Steps ---
 
 func (s *Session) selectSD(ctx context.Context) error {
-	// SELECT the Security Domain — this is UNENCRYPTED since we don't
-	// have a secure channel yet. The SD holds the SCP11 keys.
-	cmd := apdu.NewSelect(s.config.SecurityDomainAID)
+	// If SelectAID is nil, the caller has already SELECTed the
+	// target applet (e.g. through a test harness) and we just
+	// proceed with the handshake.
+	if len(s.config.SelectAID) == 0 {
+		s.state = StateSelected
+		return nil
+	}
+	// SELECT the target applet — UNENCRYPTED since we don't yet
+	// have a secure channel. That applet's SCP key set is what the
+	// handshake will authenticate against.
+	cmd := apdu.NewSelect(s.config.SelectAID)
 	resp, err := s.transport.Transmit(ctx, cmd)
 	if err != nil {
 		return err

@@ -65,7 +65,7 @@ func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, key
 	cfg := &scp03.Config{
 		Keys:              keys,
 		KeyVersion:        keyVersion,
-		SecurityDomainAID: AIDSecurityDomain,
+		SelectAID:         AIDSecurityDomain,
 		SecurityLevel:     channel.LevelFull,
 	}
 
@@ -91,7 +91,7 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 	if cfg == nil {
 		cfg = session.DefaultConfig()
 	}
-	cfg.SecurityDomainAID = AIDSecurityDomain
+	cfg.SelectAID = AIDSecurityDomain
 	cfg.ApplicationAID = nil
 
 	scpSess, err := session.Open(ctx, t, cfg)

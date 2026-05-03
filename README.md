@@ -138,10 +138,9 @@ SCP03 uses pre-shared symmetric keys. Most cards ship with well-known default ke
 
 ```go
 sess, err := scp03.Open(ctx, transport, &scp03.Config{
-    Keys:              scp03.DefaultKeys,  // TESTING ONLY
-    KeyVersion:        0x01,
-    SecurityDomainAID: session.AIDSecurityDomain,
-    ApplicationAID:    session.AIDPIV,
+    Keys:       scp03.DefaultKeys,  // TESTING ONLY
+    KeyVersion: 0x01,
+    SelectAID:  session.AIDSecurityDomain,
 })
 if err != nil {
     log.Fatal(err)
@@ -190,23 +189,24 @@ GP-proprietary SCP11 certificates are *parsed* but not chain-validated. Cards th
 
 ### Applet selection
 
-`session.Open` SELECTs `cfg.SecurityDomainAID` before the handshake — that's the AID that holds the SCP11 keys you want to authenticate against. On YubiKey, different applets hold different SCP11 key sets:
+`session.Open` SELECTs `cfg.SelectAID` before the handshake. The applet at that AID is the one whose SCP key set the handshake authenticates against. On YubiKey, different applets hold different SCP key sets:
 
-- **Issuer Security Domain** — for Security Domain management (the default, `session.AIDSecurityDomain`).
-- **PIV** — for PIV provisioning operations. Set `cfg.SecurityDomainAID = session.AIDPIV`.
+- **Issuer Security Domain** — for Security Domain management. Default in `DefaultConfig()`.
+- **PIV** — for PIV provisioning operations.
+- **OATH, OTP, etc.** — applet-specific.
 
 ```go
-// Open SCP11b against the PIV applet for PIV provisioning over SCP.
+// SCP11b against the PIV applet, for PIV provisioning over SCP.
 sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:           session.SCP11b,
-    SecurityDomainAID: session.AIDPIV, // PIV holds its own SCP11 key set on YubiKey
-    CardTrustPolicy:   &trust.Policy{Roots: rootPool},
+    Variant:         session.SCP11b,
+    SelectAID:       session.AIDPIV, // PIV holds its own SCP11 key set on YubiKey
+    CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 ```
 
-`DefaultConfig().ApplicationAID` is intentionally `nil`: a YubiKey SCP session is scoped to the SELECTed applet, so reselecting a different applet through the channel terminates the session. If you need to address two applets, open two sessions.
+If `cfg.SelectAID` is `nil`, no SELECT is sent — useful when the caller has already SELECTed the target applet through some other path (a test harness, an applet-aware transport, manual setup).
 
-`SecurityDomainAID` is not the cleanest name for "the AID where the SCP keys live" (it predates first-class non-SD usage). Treat it as that pragmatic meaning until the API gets refactored.
+`cfg.ApplicationAID` is a separate optional field that SELECTs a *second* applet through the secure channel after the handshake. Default is `nil`. On YubiKey this is a footgun — selecting a different applet through the channel terminates the SCP session. Set `SelectAID` to your target applet instead and leave `ApplicationAID` at `nil`. The field exists for non-YubiKey hardware that supports cross-applet SCP.
 
 ### Variant and curve support
 
@@ -217,7 +217,7 @@ This implementation targets YubiKey 5.x and similar P-256/AES-128 hardware. The 
 - AES-128 session keys only
 - Full security level (`C-MAC | C-DEC | R-MAC | R-ENC`) only
 
-GP Amendment F also defines P-384, Brainpool P-256, AES-192/256, and partial security levels. Those are out of scope for this implementation. SCP03 supports AES-128/192/256 in S8 and S16 modes, but only AES-128 is covered by the imported transcript vectors.
+GP Amendment F also defines P-384, Brainpool P-256, AES-192/256, and partial security levels for SCP11. Those are out of scope for the SCP11 implementation here. SCP03 supports AES-128/192/256 in S8 and S16 modes; all six combinations are validated against external Samsung OpenSCP transcript vectors.
 
 ### SCP11a/c key/certificate consistency
 
@@ -248,7 +248,7 @@ The suite covers protocol behavior end-to-end (handshake, encrypted echo, MAC ch
 Conformance is checked against external references rather than only against this library's own mock card:
 
 - **GlobalPlatformPro JCOP4** — real-card SCP03 INITIALIZE UPDATE and EXTERNAL AUTHENTICATE dump.
-- **Samsung OpenSCP-Java AES-128, S8 and S16 modes** — full SCP03 transcripts including the EXTERNAL AUTHENTICATE wrapping.
+- **Samsung OpenSCP-Java** — full SCP03 transcript matrix: AES-128, AES-192, AES-256 × S8 and S16 modes (all six cells), each a byte-exact known-answer test using the static keys and host challenges from the Samsung test fixtures.
 - **Yubico .NET SDK** — SCP03 KDF and channel MAC vectors; SCP11 reference test vectors; real Yubico OCE certificate chain.
 
 These are byte-exact known-answer tests using a recording transport, so they catch regressions a mock card couldn't.

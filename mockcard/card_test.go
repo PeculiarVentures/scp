@@ -54,7 +54,7 @@ func TestEndToEnd_SCP11b_EchoCommand(t *testing.T) {
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
 		Variant:                        session.SCP11b,
-		SecurityDomainAID:              session.AIDSecurityDomain,
+		SelectAID:                      session.AIDSecurityDomain,
 		ApplicationAID:                 nil, // Don't auto-select an app
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
@@ -99,7 +99,7 @@ func TestEndToEnd_SCP11b_MultipleCommands(t *testing.T) {
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
 		Variant:                        session.SCP11b,
-		SecurityDomainAID:              session.AIDSecurityDomain,
+		SelectAID:                      session.AIDSecurityDomain,
 		ApplicationAID:                 nil,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
@@ -184,7 +184,7 @@ func TestEndToEnd_SCP11b_EmptyPayload(t *testing.T) {
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
 		Variant:                        session.SCP11b,
-		SecurityDomainAID:              session.AIDSecurityDomain,
+		SelectAID:                      session.AIDSecurityDomain,
 		ApplicationAID:                 nil,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
@@ -239,7 +239,7 @@ func TestEndToEnd_SCP11b_NoReceipt(t *testing.T) {
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
 		Variant:                        session.SCP11b,
-		SecurityDomainAID:              session.AIDSecurityDomain,
+		SelectAID:                      session.AIDSecurityDomain,
 		ApplicationAID:                 nil,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
@@ -310,7 +310,7 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
 		Variant:                        session.SCP11a,
-		SecurityDomainAID:              session.AIDSecurityDomain,
+		SelectAID:                      session.AIDSecurityDomain,
 		ApplicationAID:                 nil,
 		KeyID:                          0x11, // SCP11a KID
 		KeyVersion:                     0x01,

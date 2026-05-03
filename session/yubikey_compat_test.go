@@ -31,7 +31,7 @@ func TestYubiKeyCompatibility_SCP11b_ProtocolTrace(t *testing.T) {
 	// GP ISD AID: A0 00 00 01 51 00 00 00
 	// Expected: 00 A4 04 00 08 A0 00 00 01 51 00 00 00 00
 	// =====================================================================
-	selectCmd := apdu.NewSelect(cfg.SecurityDomainAID)
+	selectCmd := apdu.NewSelect(cfg.SelectAID)
 	selectBytes, _ := selectCmd.Encode()
 
 	expectedSelect, _ := hex.DecodeString("00A4040008A000000151000000" + "00")
