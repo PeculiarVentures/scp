@@ -94,6 +94,17 @@ type Config struct {
 }
 
 // Session is an established SCP03 secure channel.
+//
+// A Session is NOT safe for concurrent use. The secure channel state
+// — the encryption counter and MAC chaining value — is mutated on
+// every Transmit. Concurrent calls would race the counter and produce
+// APDUs that the card rejects, and would race the MAC chain producing
+// observable corruption.
+//
+// If multiple goroutines need to send commands, serialize them
+// externally (e.g. with a sync.Mutex around the Session, or by funneling
+// commands through a single goroutine). For separate logical contexts,
+// open separate Sessions.
 type Session struct {
 	config      *Config
 	transport   transport.Transport
@@ -104,9 +115,20 @@ type Session struct {
 // Open establishes an SCP03 secure channel over the given Transport.
 // It performs the complete handshake: INITIALIZE UPDATE, session key
 // derivation, card cryptogram verification, and EXTERNAL AUTHENTICATE.
+//
+// cfg must be non-nil and cfg.Keys must be set explicitly. Earlier
+// versions of this function fell back to DefaultKeys (the well-known
+// 0x40..0x4F test keys shipped on factory-fresh cards) when cfg was
+// nil — that was a footgun: production code could open a "secure"
+// channel with publicly known keys and never notice. To use the test
+// keys on a factory-fresh card, set cfg.Keys = scp03.DefaultKeys
+// explicitly. The act of typing that name is the consent.
 func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, error) {
 	if cfg == nil {
-		cfg = &Config{Keys: DefaultKeys}
+		return nil, errors.New("scp03: Config is required (cfg.Keys cannot be nil)")
+	}
+	if len(cfg.Keys.ENC) == 0 || len(cfg.Keys.MAC) == 0 || len(cfg.Keys.DEK) == 0 {
+		return nil, errors.New("scp03: Config.Keys must be set; for factory-fresh cards explicitly use scp03.DefaultKeys (test keys, no security)")
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull
@@ -187,10 +209,21 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 
 	s.sessionKeys = &kdf.SessionKeys{
-		SENC:     senc,
-		SMAC:     smac,
-		SRMAC:    srmac,
-		DEK:      nil,              // SCP03 secure messaging does not derive a session DEK
+		SENC:  senc,
+		SMAC:  smac,
+		SRMAC: srmac,
+		// DEK in session keys is a clone of the *static* DEK from
+		// the config. SCP03 secure messaging itself does not derive
+		// a separate session DEK — but operations like PUT KEY that
+		// run on top of the channel need the static DEK to wrap key
+		// material before import. Yubico's yubikit does the same:
+		// it preserves key_dek through derive() so it's available
+		// for Security Domain operations.
+		// Earlier versions stored nil here, forcing callers to keep
+		// a separate copy or go through securitydomain.Open just to
+		// get at the DEK. That was a silent footgun for direct
+		// scp03 users.
+		DEK:      cloneBytes(cfg.Keys.DEK),
 		Receipt:  nil,              // SCP03 doesn't use receipts
 		MACChain: make([]byte, 16), // Start with zeros
 	}
@@ -501,4 +534,16 @@ func zeroBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+// cloneBytes returns a deep copy of b. Used so the SessionKeys
+// returned to callers don't alias the caller's StaticKeys.DEK,
+// preventing accidental mutation of the original key material.
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
 }

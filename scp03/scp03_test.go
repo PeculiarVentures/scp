@@ -218,3 +218,92 @@ func TestParseInitUpdateResponse_MinLength(t *testing.T) {
 		t.Errorf("sequenceCounter length: got %d, want 3", len(r.sequenceCounter))
 	}
 }
+
+// TestOpen_NilConfig_RejectsExplicitly confirms that scp03.Open(ctx, t, nil)
+// returns an error rather than silently using DefaultKeys (the well-known
+// 0x40..0x4F factory keys). Earlier behavior was to fall through to
+// DefaultKeys when cfg was nil, which made it possible for production code
+// to open a "secure" channel with publicly-known keys without ever naming
+// them. Now the caller has to type DefaultKeys themselves.
+func TestOpen_NilConfig_RejectsExplicitly(t *testing.T) {
+	_, err := Open(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("Open(nil cfg) should return an error, not silently use DefaultKeys")
+	}
+}
+
+// TestOpen_EmptyKeys_RejectsExplicitly confirms that a zero-valued
+// StaticKeys is also rejected — otherwise &Config{} (no Keys set) would
+// hit the same footgun via a different path.
+func TestOpen_EmptyKeys_RejectsExplicitly(t *testing.T) {
+	_, err := Open(context.Background(), nil, &Config{})
+	if err == nil {
+		t.Fatal("Open with empty Keys should return an error")
+	}
+}
+
+// TestOpen_ExplicitDefaultKeys_StillWorks confirms that callers who
+// genuinely want the test keys (factory-fresh card, lab work) can still
+// get them by typing scp03.DefaultKeys — the act of typing is the
+// consent. This is the intended escape hatch.
+func TestOpen_ExplicitDefaultKeys_StillWorks(t *testing.T) {
+	// Drive Open against a real mock card configured with DefaultKeys
+	// so we exercise the full handshake. Earlier the only test for
+	// DefaultKeys was the implicit nil-config fallback; that fallback
+	// is now gone, so we explicitly cover the supported lab-use path.
+	card := NewMockCard(DefaultKeys)
+	sess, err := Open(context.Background(), card.Transport(), &Config{
+		Keys:          DefaultKeys,
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open with explicit DefaultKeys should succeed: %v", err)
+	}
+	defer sess.Close()
+}
+
+// TestSessionKeys_PreservesStaticDEK confirms that the static DEK
+// from the caller's StaticKeys flows through to SessionKeys().DEK as
+// a clone, not nil and not the same backing array.
+//
+// Earlier this was nil with a comment "SCP03 secure messaging does
+// not derive a session DEK." That's true for the secure messaging
+// itself — DEK is not used by Wrap/Unwrap. But operations layered on
+// top, like PUT KEY, need the static DEK to wrap fresh key material
+// before import. Returning nil from SessionKeys() forced callers to
+// either keep their own copy or go through securitydomain.Open just
+// to access the DEK. Yubico's yubikit preserves it through derive()
+// for the same reason.
+func TestSessionKeys_PreservesStaticDEK(t *testing.T) {
+	dek := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11,
+		0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99}
+	keys := StaticKeys{
+		ENC: DefaultKeys.ENC,
+		MAC: DefaultKeys.MAC,
+		DEK: dek,
+	}
+	card := NewMockCard(keys)
+	sess, err := Open(context.Background(), card.Transport(), &Config{
+		Keys:          keys,
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+
+	got := sess.SessionKeys().DEK
+	if got == nil {
+		t.Fatal("SessionKeys().DEK is nil; expected a clone of the static DEK")
+	}
+	if !bytes.Equal(got, dek) {
+		t.Errorf("SessionKeys().DEK = %X, want %X", got, dek)
+	}
+
+	// Confirm it's a defensive copy: mutating the returned slice
+	// must not mutate the caller's original DEK.
+	got[0] ^= 0xFF
+	if dek[0] != 0xAA {
+		t.Errorf("mutating SessionKeys().DEK affected caller's static DEK: %X", dek)
+	}
+}

@@ -182,6 +182,17 @@ func DefaultConfig() *Config {
 }
 
 // Session manages an SCP11 secure channel over a Transport.
+//
+// A Session is NOT safe for concurrent use. The secure channel state
+// — the encryption counter and MAC chaining value — is mutated on
+// every Transmit. Concurrent calls would race the counter and produce
+// APDUs the card rejects, and would race the MAC chain producing
+// observable corruption.
+//
+// If multiple goroutines need to send commands, serialize them
+// externally (e.g. with a sync.Mutex around the Session, or by funneling
+// commands through a single goroutine). For separate logical contexts,
+// open separate Sessions.
 type Session struct {
 	config    *Config
 	transport transport.Transport
