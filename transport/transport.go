@@ -80,7 +80,7 @@ func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*a
 		if i >= MaxGetResponseIterations {
 			return nil, fmt.Errorf("GET RESPONSE exceeded %d iterations", MaxGetResponseIterations)
 		}
-		if len(allData) > MaxCollectedResponseBytes {
+		if len(allData) >= MaxCollectedResponseBytes {
 			return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", MaxCollectedResponseBytes)
 		}
 		getResp := apdu.NewGetResponse(resp.SW2)
@@ -89,6 +89,13 @@ func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*a
 			return nil, err
 		}
 		allData = append(allData, resp.Data...)
+		// Recheck after the append — earlier this only checked before
+		// the call, so a card returning a final fat chunk could push
+		// the buffer past the cap by up to 256 bytes (or however large
+		// the chunk is). Verify on both sides of the append.
+		if len(allData) > MaxCollectedResponseBytes {
+			return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", MaxCollectedResponseBytes)
+		}
 	}
 
 	return &apdu.Response{

@@ -113,6 +113,25 @@ type Config struct {
 	// "Insecure" prefix convention used elsewhere in this library
 	// for opt-in defeat-the-defaults knobs.
 	InsecureAllowPartialSecurityLevel bool
+
+	// EmptyDataEncryption controls how the C-DECRYPT step handles a
+	// command APDU with no data field. Two interpretations exist:
+	//
+	//   - channel.EmptyDataYubico (default): pad empty data with
+	//     0x80 || 0x00*15 and encrypt as one block. Matches Yubico's
+	//     yubikit and works against YubiKey 5.x.
+	//
+	//   - channel.EmptyDataGPLiteral: skip encryption entirely when
+	//     data is empty (counter still increments). Matches a literal
+	//     reading of GP Amendment D §6.2.4 and is the right choice
+	//     for cards that strictly implement that text.
+	//
+	// Mismatched policy across host/card silently corrupts every
+	// empty-data command (the card decrypts to garbage and either
+	// rejects the APDU or, worse, executes a different operation).
+	// If the card returns 6F xx for empty-data commands but works
+	// for non-empty commands, try toggling this field.
+	EmptyDataEncryption channel.EmptyDataPolicy
 }
 
 // Session is an established SCP03 secure channel.
@@ -319,6 +338,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 
 	s.channel = channel.NewWithMACSize(s.sessionKeys, cfg.SecurityLevel, iur.macSize)
+	s.channel.EmptyDataEncryption = cfg.EmptyDataEncryption
 
 	// Step 9: SELECT application if configured.
 	// Routed through Session.Transmit so R-MAC is verified on the

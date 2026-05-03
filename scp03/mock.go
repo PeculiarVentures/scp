@@ -137,7 +137,7 @@ func (c *MockCard) doExternalAuthenticate(cmd *apdu.Command) (*apdu.Response, er
 	c.session.ch = channel.New(c.session.keys, channel.LevelFull)
 
 	data := cmd.Data
-	macSize := c.session.ch.MACSize
+	macSize := c.session.ch.MACSize()
 	if len(data) < macSize+8 {
 		c.session = nil
 		return &apdu.Response{SW1: 0x6A, SW2: 0x80}, nil
@@ -197,7 +197,7 @@ func (c *MockCard) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	}
 
 	data := cmd.Data
-	macSize := sess.ch.MACSize
+	macSize := sess.ch.MACSize()
 	if len(data) < macSize {
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil
 	}

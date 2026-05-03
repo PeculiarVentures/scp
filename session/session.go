@@ -167,12 +167,22 @@ type Config struct {
 	// HostID is the optional OCE identifier included in the KDF shared
 	// info per GP SCP11 §3.1.2. If set, it is appended to the shared
 	// info as a length-value pair: len(HostID) || HostID.
-	// Used in SCP11a/b/c. If nil, not included (the common case for
-	// default behavior).
+	//
+	// NOTE: SUPPORT IS INCOMPLETE. The KDF appends HostID to SharedInfo,
+	// but the AUTHENTICATE command does NOT set the SCP11 parameter
+	// bit indicating identifiers are included, and does NOT include
+	// tag 0x84 Host ID in the control reference template. Setting
+	// this field would derive a different key schedule than the card,
+	// so Open fails closed when this field is non-empty. A complete
+	// implementation needs the parameter bit, the 0x84 TLV, and (for
+	// SCP11a/b) SIN/SDIN inclusion in SharedInfo per GP §3.1.2.
 	HostID []byte
 
 	// CardGroupID is the optional card group identifier for SCP11c.
 	// Included in the KDF shared info after HostID if set.
+	//
+	// NOTE: SUPPORT IS INCOMPLETE — same caveat as HostID above.
+	// Open rejects sessions with this field set.
 	CardGroupID []byte
 
 	// SecurityLevel controls which secure messaging operations to apply.
@@ -199,6 +209,35 @@ type Config struct {
 	//
 	// Must be a P-256 ECDH private key (curve enforced at Open time).
 	InsecureTestOnlyEphemeralKey *ecdh.PrivateKey
+
+	// InsecureAllowSCP11bWithoutReceipt permits SCP11b sessions where
+	// the card's INTERNAL AUTHENTICATE response omits tag 0x86
+	// (the receipt). By default, the library requires a receipt for
+	// ALL SCP11 variants — matching Yubico's yubikit reference
+	// implementation, which unconditionally extracts and verifies
+	// tag 0x86 across SCP11a/b/c, and matching GP Amendment F v1.4,
+	// which specifies receipts for all variants.
+	//
+	// Earlier Amendment F revisions did not require a receipt for
+	// SCP11b. Accepting a missing receipt against a modern card is
+	// both a security regression (the MAC chain seeds from zero
+	// rather than from a verified key-confirmation value) and an
+	// interop break with current YubiKey behavior. Default-fail-closed
+	// is the right posture; this flag exists only for the narrow case
+	// of older SCP11b cards that genuinely omit the receipt.
+	//
+	// Has no effect on SCP11a or SCP11c — those always require a
+	// receipt because mutual authentication depends on it.
+	InsecureAllowSCP11bWithoutReceipt bool
+
+	// EmptyDataEncryption controls how the C-DECRYPT step handles a
+	// command APDU with no data field. Default is
+	// channel.EmptyDataYubico (pad-and-encrypt) which matches Yubico
+	// yubikit and works against YubiKey 5.x. Set to
+	// channel.EmptyDataGPLiteral for cards that strictly implement
+	// the GP Amendment D §6.2.4 reading (skip encryption when data
+	// is empty). See scp03.Config for fuller context.
+	EmptyDataEncryption channel.EmptyDataPolicy
 }
 
 // Common AIDs.
@@ -327,6 +366,15 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 			"the key usage qualifier 0x3C negotiated with the card requires it")
 	}
 
+	// HostID and CardGroupID are partially implemented: the KDF
+	// appends them to SharedInfo, but AUTHENTICATE doesn't set the
+	// SCP11 parameter bit nor include tag 0x84. Opening with these
+	// set would silently derive different keys than the card. Fail
+	// closed until the wire side is implemented.
+	if len(cfg.HostID) > 0 || len(cfg.CardGroupID) > 0 {
+		return nil, errors.New("SCP11 HostID/CardGroupID identifiers are not fully implemented (KDF inclusion is wired but the AUTHENTICATE parameter bit and tag 0x84 are not); leave both nil")
+	}
+
 	s := &Session{
 		config:    cfg,
 		transport: t,
@@ -389,6 +437,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 
 	// Step 5: Create the secure channel wrapper.
 	s.channel = channel.New(s.sessionKeys, cfg.SecurityLevel)
+	s.channel.EmptyDataEncryption = cfg.EmptyDataEncryption
 	s.state = StateAuthenticated
 
 	// Step 6: If the caller explicitly set ApplicationAID, SELECT the
@@ -749,20 +798,24 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	//   5F49 { ePK.OCE uncompressed point }
 	//
 	// GP §7.6.2.3 / §7.7.2.3: key params in A6 control reference template.
-	// The TagKeyInfo TLV (0x90) carries [KID, params_byte], where:
-	//   - KID is the SCP key set being authenticated against (the same
-	//     value that goes in P2 of this AUTHENTICATE command).
-	//   - params varies by variant: SCP11a=0x01, SCP11b=0x00, SCP11c=0x03
-	//     (per GPC v2.3 Amendment F §7.1.1).
+	// The TagKeyInfo TLV (0x90) carries [0x11, params_byte], where:
+	//   - 0x11 is a fixed protocol/family identifier in this position
+	//     (NOT the card's SCP key reference KID — that is sent in
+	//     APDU P2 below). The Yubico yubikit reference implementation
+	//     hardcodes 0x11 here for ALL SCP11 variants:
+	//       Tlv(0x90, bytes([0x11, params]))
+	//     and we match that for cross-implementation interop.
+	//   - params encodes the variant per GPC v2.3 Amendment F §7.1.1:
+	//     SCP11a=0x01, SCP11b=0x00, SCP11c=0x03.
 	//
-	// Yubico's scp.py builds this exactly the same way:
-	//   bytes([key_params.ref.kid]) + params
-	//
-	// Earlier this code hardcoded 0x11 for the KID byte, which silently
-	// "worked" against any card whose SCP key set happens to be at KID
-	// 0x11 (Samsung's reference vectors and some YubiKey configurations)
-	// but would have failed against any other KID — including YubiKey's
-	// SCP11b at KID 0x13.
+	// History note: an intermediate version of this code put
+	// cfg.KeyID in this byte under the (incorrect) assumption that
+	// the byte was the card's key reference. That happened to "work"
+	// against any card whose SCP key set is at KID 0x11 (Samsung's
+	// reference SCP11a vectors, lab cards) but would have produced
+	// the wrong wire bytes against a YubiKey running SCP11b at KID
+	// 0x13. The byte is now hardcoded back to 0x11 to match yubikit
+	// and the byte-exact Samsung transcript (which is also 0x11).
 	var params byte
 	switch s.config.Variant {
 	case SCP11a:
@@ -774,7 +827,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	}
 
 	controlRef := tlv.BuildConstructed(tlv.TagControlRef,
-		tlv.Build(tlv.TagKeyInfo, []byte{s.config.KeyID, params}),
+		tlv.Build(tlv.TagKeyInfo, []byte{0x11, params}),
 		tlv.Build(tlv.TagKeyUsage, []byte{kdf.KeyUsage}),
 		tlv.Build(tlv.TagKeyType, []byte{kdf.KeyTypeAES}),
 		tlv.Build(tlv.TagKeyLength, []byte{kdf.SessionKeyLen}),
@@ -872,30 +925,32 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	//
 	// GP SCP11 §3.1.2: receipt = AES-CMAC(receipt_key, command_data || ePK.SD.TLV)
 	//
-	// Authority for "always verify when present":
+	// Default policy: require receipt for ALL variants (a/b/c).
+	// Authority:
 	//
-	//   - GP Amendment F v1.4 specifies receipts for ALL SCP11 variants
-	//     (a/b/c). Newer YubiKey firmware (5.7.2+) follows this profile.
-	//   - Yubico's reference implementation in yubikit's scp.py
-	//     unconditionally unpacks tag 0x86 from the response and verifies
-	//     it via AES-CMAC, regardless of variant.
+	//   - GP Amendment F v1.4 specifies receipts for all SCP11
+	//     variants. Earlier revisions did not for SCP11b.
+	//   - Yubico's yubikit (yubikey-manager) reference implementation
+	//     unconditionally unpacks tag 0x86 from the INTERNAL/MUTUAL
+	//     AUTHENTICATE response and verifies it via AES-CMAC,
+	//     regardless of variant. Modern YubiKey firmware (5.7.2+)
+	//     follows this profile.
+	//   - Without a receipt, the MAC chain seeds from zero — which
+	//     means there is no key confirmation and a card can return
+	//     arbitrary ephemeral material without proving it derived
+	//     the same shared secret.
 	//
-	// Behavior here:
-	//
-	//   - SCP11a/c: receipt is REQUIRED. A missing receipt means mutual
-	//     auth wasn't actually performed; we fail closed.
-	//   - SCP11b: receipt is OPTIONAL on the wire (older Amendment F
-	//     versions did not include one) but if the card sent one, we
-	//     MUST verify it. Earlier code used the receipt bytes as the
-	//     MAC chain seed without any verification — which would have
-	//     let a card forge MAC chain state by returning arbitrary
-	//     bytes as the receipt.
-	//
-	// Either way: if receipt is present, it is verified before being
-	// used to seed the MAC chain.
-	if s.config.Variant == SCP11a || s.config.Variant == SCP11c {
-		if receipt == nil {
-			return errors.New("expected receipt for SCP11a/c but none received")
+	// Escape hatch: Config.InsecureAllowSCP11bWithoutReceipt
+	// (SCP11b only). For older SCP11b cards that genuinely don't
+	// include a receipt; never appropriate for SCP11a/c.
+	if receipt == nil {
+		switch s.config.Variant {
+		case SCP11a, SCP11c:
+			return errors.New("expected receipt for SCP11a/c but none received (mutual auth requires it)")
+		case SCP11b:
+			if !s.config.InsecureAllowSCP11bWithoutReceipt {
+				return errors.New("expected receipt for SCP11b but none received; modern cards (Amendment F v1.4, YubiKey 5.7.2+) include one. Set Config.InsecureAllowSCP11bWithoutReceipt=true only for legacy SCP11b cards that omit it")
+			}
 		}
 	}
 	if receipt != nil {
@@ -914,7 +969,8 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	s.sessionKeys = keys
 
 	// MAC chain initialization. If a (now-verified) receipt was
-	// returned, the chain seeds from it; otherwise zeros.
+	// returned, the chain seeds from it; otherwise zeros (only
+	// reachable via InsecureAllowSCP11bWithoutReceipt).
 	if receipt != nil {
 		s.sessionKeys.MACChain = make([]byte, len(receipt))
 		copy(s.sessionKeys.MACChain, receipt)

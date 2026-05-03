@@ -26,9 +26,15 @@ import (
 type Card struct {
 	mu sync.Mutex
 
-	// Variant controls whether the card sends a receipt.
-	// SCP11b: no receipt. SCP11a/c: receipt included.
-	Variant int // 0=SCP11b (default), 1=SCP11a, 2=SCP11c
+	// Variant controls the SCP11 mode the card responds to.
+	// 0=SCP11b (default), 1=SCP11a, 2=SCP11c.
+	Variant int
+
+	// LegacySCP11bNoReceipt models pre-Amendment-F-v1.4 SCP11b cards
+	// that did not return a receipt in tag 0x86. Default false:
+	// modern behavior (matches YubiKey 5.7.2+ and yubikit). Set true
+	// only to exercise the legacy compatibility path.
+	LegacySCP11bNoReceipt bool
 
 	staticKey *ecdsa.PrivateKey
 	certDER   []byte
@@ -228,13 +234,17 @@ func (c *Card) doInternalAuth(cmd *apdu.Command) (*apdu.Response, error) {
 		return nil, err
 	}
 
-	// SCP11b: macChain starts at zeros, no receipt in response.
-	// SCP11a/c: macChain starts at receipt, receipt included in response.
-	if c.Variant == 0 { // SCP11b
-		keys.MACChain = make([]byte, 16)
-	} else {
+	// SCP11b modern (Amendment F v1.4 / YubiKey 5.7.2+): macChain
+	//   seeds from receipt, receipt included in response.
+	// SCP11b legacy (pre-Amendment-F-v1.4): macChain seeds from
+	//   zeros, no receipt in response. Modeled by LegacySCP11bNoReceipt.
+	// SCP11a/c: macChain seeds from receipt, receipt included.
+	includeReceipt := !(c.Variant == 0 && c.LegacySCP11bNoReceipt)
+	if includeReceipt {
 		keys.MACChain = make([]byte, len(receipt))
 		copy(keys.MACChain, receipt)
+	} else {
+		keys.MACChain = make([]byte, 16)
 	}
 	c.session = &cardSession{
 		keys: keys,
@@ -244,7 +254,7 @@ func (c *Card) doInternalAuth(cmd *apdu.Command) (*apdu.Response, error) {
 	// Build response.
 	var respData []byte
 	respData = append(respData, cardEphPubTLV.Encode()...)
-	if c.Variant != 0 { // SCP11a/c: include receipt
+	if includeReceipt {
 		respData = append(respData, tlv.Build(tlv.TagReceipt, receipt).Encode()...)
 	}
 
@@ -258,7 +268,7 @@ func (c *Card) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	}
 
 	data := cmd.Data
-	macSize := sess.ch.MACSize
+	macSize := sess.ch.MACSize()
 	if len(data) < macSize {
 		return mkSW(0x6982), nil
 	}
