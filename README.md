@@ -287,9 +287,11 @@ type Transport interface {
 }
 ```
 
-Both `scp03.Open` and `session.Open` accept any `Transport`. Whether it's a local PC/SC reader, a remote gRPC relay, or a mock card, the protocol code is identical.
+Both `scp03.Open` and `session.Open` accept any `Transport`. Whether it's a local PC/SC reader, a remote APDU relay, or a mock card, the protocol code is identical.
 
 A reference PC/SC transport ships in [`transport/pcsc/`](./transport/pcsc) for USB CCID and NFC readers (YubiKey, JCOP, generic GP cards). It's a separate Go module so the main `scp` library stays CGO-free for consumers that bring their own transport. See that subpackage's README for platform setup (`pcsclite` on Linux/macOS, built-in on Windows).
+
+For deployments where the card is physically attached to one machine and SCP11 is driven from another (a server-side controller talking through an endpoint agent that forwards APDUs), see [`docs/remote-apdu-transport.md`](./docs/remote-apdu-transport.md). The library treats the remote bus as just another `Transport` implementation; the doc covers what the bus must guarantee and where the trust split lies.
 
 ## Testing
 
