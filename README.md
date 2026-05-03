@@ -185,7 +185,7 @@ sess, err := session.Open(ctx, transport, &session.Config{
 
 This is intentional: an SCP11b session against an unauthenticated card is not authenticated key agreement — it is opportunistic encryption against whoever answered the SELECT. Treat the difference as load-bearing.
 
-GP-proprietary SCP11 certificates are *parsed* but not chain-validated. Cards that return GP-proprietary certs only authenticate when paired with `InsecureSkipCardAuthentication = true`, or when `CardTrustPolicy` is configured with a custom validator that handles them.
+GP-proprietary SCP11 certificates are *parsed* (the public key extraction works) but not chain-validated by this library — `trust.Policy` only validates X.509 chains. Cards that return GP-proprietary certs only authenticate when paired with `InsecureSkipCardAuthentication = true` (lab use), or by extending the trust path in your own fork. A future API may expose a custom validator hook for GP-proprietary certificates; today no such hook exists.
 
 ### Applet selection
 

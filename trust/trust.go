@@ -144,9 +144,19 @@ func ValidateSCP11Chain(certs []*x509.Certificate, policy Policy) (*Result, erro
 		CurrentTime:   now,
 	}
 
-	// If specific EKUs are required, set them.
+	// EKU handling. Go's x509.VerifyOptions has a load-bearing default
+	// here: leaving KeyUsages empty does NOT mean "no EKU check" — the
+	// stdlib treats empty as []ExtKeyUsage{ExtKeyUsageServerAuth}, which
+	// silently rejects any cert whose EKU set doesn't include serverAuth.
+	// SCP11 card and OCE certs frequently have EKU=clientAuth or no EKU
+	// at all, so the implicit serverAuth requirement breaks valid chains.
+	// To honor the policy comment ("If empty, EKU is not checked"), we
+	// must explicitly opt into ExtKeyUsageAny when the caller didn't
+	// constrain EKUs.
 	if len(policy.ExpectedEKUs) > 0 {
 		opts.KeyUsages = policy.ExpectedEKUs
+	} else {
+		opts.KeyUsages = []x509.ExtKeyUsage{x509.ExtKeyUsageAny}
 	}
 
 	// Verify the chain.

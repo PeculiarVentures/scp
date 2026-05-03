@@ -34,6 +34,14 @@ func extractCardPublicKey(data []byte, trustAnchors *x509.CertPool) (*ecdh.Publi
 		if storeNode != nil && len(storeNode.Children) > 0 {
 			certNodes = tlv.FindAll(storeNode.Children, tlv.TagCertificate)
 		}
+		// Samsung-style BF21 stores embed a raw DER X.509 certificate
+		// directly, with no inner 7F21 wrapper. If the BF21 was parsed
+		// as a leaf TLV with no decodable children, try the BF21 value
+		// as a DER cert. This is the format Samsung's OpenSCP-Java
+		// reference vectors use, as well as some smaller OEM cards.
+		if len(certNodes) == 0 && storeNode != nil {
+			return parseRawCert(storeNode.Value, trustAnchors, nil)
+		}
 	}
 
 	if len(certNodes) == 0 {
@@ -92,6 +100,14 @@ func parseRawCert(data []byte, trustAnchors, intermediates *x509.CertPool) (*ecd
 		opts := x509.VerifyOptions{
 			Roots:         trustAnchors,
 			Intermediates: intermediates,
+			// Go's stdlib uses []ExtKeyUsage{ExtKeyUsageServerAuth}
+			// when KeyUsages is empty, which silently rejects SCP11
+			// card certs (typically clientAuth or no EKU at all).
+			// Set ExtKeyUsageAny to actually mean "no EKU check"
+			// here — the legacy CardTrustAnchors path doesn't expose
+			// EKU configuration, so callers using it expect basic
+			// chain validation only.
+			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 		}
 		if _, err := cert.Verify(opts); err != nil {
 			return nil, fmt.Errorf("card certificate validation: %w", err)
@@ -240,8 +256,24 @@ func extractECDHKeyFromSPKI(data []byte) (*ecdh.PublicKey, error) {
 func parseKeyAgreementResponse(data []byte) (ephPubKey []byte, receipt []byte, err error) {
 	nodes, err := tlv.Decode(data)
 	if err != nil {
-		// Some cards return the public key directly without TLV.
-		if len(data) >= 65 && data[0] == 0x04 {
+		// Some cards return the public key directly without TLV. Three
+		// shapes are possible here:
+		//
+		//   - len == 65, starts with 0x04: bare uncompressed P-256 point,
+		//     no receipt → return (point, nil, nil). Returning data[65:]
+		//     would yield an empty-BUT-non-nil slice, which the caller's
+		//     "verify any non-nil receipt" logic then runs through CMAC
+		//     and rejects. That converted valid bare-key SCP11b responses
+		//     into spurious receipt-verification failures.
+		//
+		//   - len > 65, starts with 0x04: bare point followed by a 16-byte
+		//     receipt → split at offset 65.
+		//
+		//   - anything else: malformed.
+		if len(data) == 65 && data[0] == 0x04 {
+			return data, nil, nil
+		}
+		if len(data) > 65 && data[0] == 0x04 {
 			return data[:65], data[65:], nil
 		}
 		return nil, nil, fmt.Errorf("parse key agreement response: %w", err)

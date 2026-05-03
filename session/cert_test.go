@@ -466,3 +466,61 @@ func TestExtractCardPublicKey_ChainWithoutIntermediateFails(t *testing.T) {
 		t.Fatal("leaf-only bundle should not validate when intermediate is required")
 	}
 }
+
+// TestParseKeyAgreementResponse_BarePubkey_NoSpuriousReceipt confirms
+// that a 65-byte bare uncompressed P-256 point (no TLV wrapper) is
+// returned with a NIL receipt, not an empty-but-non-nil slice.
+//
+// Background: an empty-but-non-nil receipt was getting fed into the
+// "verify any non-nil receipt" path added by the SCP11b receipt
+// hardening, turning valid bare-pubkey responses into AES-CMAC
+// verification failures. The fix returns nil receipt for the 65-byte
+// case explicitly.
+func TestParseKeyAgreementResponse_BarePubkey_NoSpuriousReceipt(t *testing.T) {
+	// 65-byte uncompressed P-256 point (made-up coordinates — we
+	// don't need a real one; we just need the leading 0x04 and the
+	// length to trigger the bare-pubkey fallback).
+	bare := make([]byte, 65)
+	bare[0] = 0x04
+	for i := 1; i < 65; i++ {
+		bare[i] = byte(i)
+	}
+
+	pk, receipt, err := parseKeyAgreementResponse(bare)
+	if err != nil {
+		t.Fatalf("parseKeyAgreementResponse: %v", err)
+	}
+	if len(pk) != 65 {
+		t.Errorf("returned pubkey len = %d, want 65", len(pk))
+	}
+	if receipt != nil {
+		t.Errorf("returned receipt = %X (len=%d), want nil — empty-but-non-nil receipts get re-verified and fail spuriously",
+			receipt, len(receipt))
+	}
+}
+
+// TestParseKeyAgreementResponse_BarePubkeyPlusReceipt_SplitsAtOffset65
+// confirms the inverse: a bare pubkey followed by extra bytes returns
+// the trailing bytes as the receipt (so SCP11a/c-style bare responses
+// still work).
+func TestParseKeyAgreementResponse_BarePubkeyPlusReceipt_SplitsAtOffset65(t *testing.T) {
+	bare := make([]byte, 65+16)
+	bare[0] = 0x04
+	for i := 1; i < 65; i++ {
+		bare[i] = byte(i)
+	}
+	for i := 0; i < 16; i++ {
+		bare[65+i] = 0xCC
+	}
+
+	pk, receipt, err := parseKeyAgreementResponse(bare)
+	if err != nil {
+		t.Fatalf("parseKeyAgreementResponse: %v", err)
+	}
+	if len(pk) != 65 {
+		t.Errorf("returned pubkey len = %d, want 65", len(pk))
+	}
+	if len(receipt) != 16 {
+		t.Errorf("returned receipt len = %d, want 16", len(receipt))
+	}
+}
