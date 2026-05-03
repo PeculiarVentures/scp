@@ -4,8 +4,8 @@ A Go implementation of GlobalPlatform Secure Channel Protocols for establishing 
 
 Two protocols are supported through a unified API:
 
-- **SCP03** (Amendment D) — Symmetric key protocol using pre-shared AES keys
-- **SCP11** (Amendment F) — Asymmetric protocol using ECDH key agreement and X.509 certificates, with variants SCP11a, SCP11b, and SCP11c
+- **SCP03** (Amendment D) — Symmetric key protocol using pre-shared AES keys (AES-128/192/256, S8 and S16 modes)
+- **SCP11** (Amendment F) — Asymmetric protocol using ECDH key agreement and X.509 certificates, with variants SCP11a, SCP11b, and SCP11c. **YubiKey-compatible full-security profile only**: NIST P-256, AES-128 session keys, and `C-MAC | C-DEC | R-MAC | R-ENC`. Other GP Amendment F security levels and curves are out of scope; see the [Profile and limitations](#profile-and-limitations) section for specifics.
 
 Both protocols produce a `scp.Session` with the same `Transmit` method. The consumer writes protocol-agnostic code after the initial `Open` call.
 
@@ -129,6 +129,17 @@ sess, err := session.Open(ctx, transport, &session.Config{
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 ```
+
+### What "trust" means here
+
+`CardTrustAnchors` and `CardTrustPolicy.Roots` mean **chain valid against this root** at the time of session establishment. They do **not** mean "the card has not been revoked." Go's standard `x509.Verify` (which backs the built-in path) does not perform CRL or OCSP checks. A card whose certificate was issued from a trusted root and is still within its validity window will pass even if the issuer has since revoked it.
+
+For deployments that need stronger device identity than "issued by the right CA," combine `Roots` with one or more of:
+
+- `AllowedSerials` — explicit allowlist of card serials. Strongest option for fixed device fleets.
+- `ExpectedSKI` — pin a specific Subject Key Identifier.
+- `ExpectedEKUs` — narrow what the leaf is allowed to be used for.
+- `CustomValidator` — your own logic, including CRL/OCSP, hardware registry lookups, or per-device attestation. When set, the library skips all built-in trust checks and trusts what the validator returns (subject only to the protocol-required P-256 / valid-curve checks). See the godoc on `Policy.CustomValidator` for the exact contract.
 
 ## SCP03 Usage
 
@@ -302,7 +313,7 @@ These are byte-exact known-answer tests using a recording transport, so they cat
 |---|---|
 | GP Card Spec v2.3.1 §11 | Security Domain APDU commands: PUT KEY, DELETE, STORE DATA, GET DATA |
 | GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE, session key derivation, secure messaging, S8 and S16 modes |
-| GP Amendment F (SCP11) v1.3 | SCP11a, SCP11b, SCP11c; ECKA; X9.63 KDF; receipt verification (all variants) |
+| GP Amendment F (SCP11) v1.3 | SCP11a, SCP11b, SCP11c; ECKA; X9.63 KDF; receipt verification (all variants). **Subset only** — full-security profile, P-256, AES-128 session keys; other security levels, curves, and v1.4 features (extended X.509 handling, additional auth-rule options) are out of scope. |
 | GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC |
 | NIST SP 800-108 | KDF in counter mode with AES-CMAC |
 | NIST SP 800-38B | AES-CMAC |
