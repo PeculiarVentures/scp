@@ -9,6 +9,7 @@ package securitydomain
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"encoding/hex"
@@ -229,7 +230,14 @@ func putKeyECPublicCmd(ref KeyReference, key *ecdsa.PublicKey, replaceKvn byte) 
 		return nil, fmt.Errorf("%w: only NIST P-256 keys are supported", ErrInvalidKey)
 	}
 
-	pubBytes := elliptic.Marshal(key.Curve, key.X, key.Y)
+	// Convert to crypto/ecdh and serialize: same SEC1 uncompressed
+	// encoding as the deprecated elliptic.Marshal, with point-on-curve
+	// validation built in.
+	ecdhKey, err := key.ECDH()
+	if err != nil {
+		return nil, fmt.Errorf("%w: convert ECDSA to ECDH: %w", ErrInvalidKey, err)
+	}
+	pubBytes := ecdhKey.Bytes()
 
 	var data []byte
 	data = append(data, ref.Version)
@@ -612,10 +620,19 @@ func findPublicKeyInNodes(nodes []*tlv.Node) (*ecdsa.PublicKey, error) {
 }
 
 func unmarshalP256Point(data []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(elliptic.P256(), data)
-	if x == nil {
-		return nil, fmt.Errorf("%w: invalid P-256 point", ErrInvalidKey)
+	// crypto/ecdh.NewPublicKey accepts the same SEC1 uncompressed
+	// encoding as the deprecated elliptic.Unmarshal, but additionally
+	// validates that the point is on the curve and not the identity.
+	pub, err := ecdh.P256().NewPublicKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid P-256 point: %w", ErrInvalidKey, err)
 	}
+	// Convert back to *ecdsa.PublicKey for the rest of the call sites
+	// that still take that type. The bytes round-trip exactly: 0x04 ||
+	// X (32 bytes) || Y (32 bytes).
+	raw := pub.Bytes()
+	x := new(big.Int).SetBytes(raw[1:33])
+	y := new(big.Int).SetBytes(raw[33:65])
 	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }
 
@@ -638,13 +655,6 @@ func parseAllowlist(data []byte) ([]string, error) {
 		}
 	}
 	return serials, nil
-}
-
-func parsePutKeyChecksum(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	return data, nil // Full response for comparison
 }
 
 // --- Cryptographic helpers ---

@@ -425,7 +425,11 @@ func TestParseKeyInformation(t *testing.T) {
 func TestParseGeneratedPublicKey_B0TLV(t *testing.T) {
 	// Response should be Tlv(0xB0, point).
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	point := elliptic.Marshal(key.Curve, key.X, key.Y)
+	ecdhPub, err := key.PublicKey.ECDH()
+	if err != nil {
+		t.Fatal(err)
+	}
+	point := ecdhPub.Bytes()
 
 	// Build B0 TLV.
 	var data []byte
@@ -443,7 +447,11 @@ func TestParseGeneratedPublicKey_B0TLV(t *testing.T) {
 
 func TestParseGeneratedPublicKey_RawPoint(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	point := elliptic.Marshal(key.Curve, key.X, key.Y)
+	ecdhPub, err := key.PublicKey.ECDH()
+	if err != nil {
+		t.Fatal(err)
+	}
+	point := ecdhPub.Bytes()
 
 	pub, err := parseGeneratedPublicKey(point)
 	if err != nil {

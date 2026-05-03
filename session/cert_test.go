@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -141,7 +142,7 @@ func TestSCP11_RejectsNonFullSecurityLevel(t *testing.T) {
 			Variant:       SCP11b,
 			SecurityLevel: level,
 		}
-		_, err := Open(nil, nil, cfg)
+		_, err := Open(context.Background(), nil, cfg)
 		if err == nil {
 			t.Errorf("SecurityLevel 0x%02X should be rejected", level)
 		}
