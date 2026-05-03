@@ -7,11 +7,13 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -211,33 +213,91 @@ func TestParseMutualAuthResponse_SCP11c(t *testing.T) {
 }
 
 func TestGetDataAPDUConstruction(t *testing.T) {
-	// Verify our GET DATA command matches the reference expected CAPDU.
-	// the reference expected: 00 CA BF 21 06 A6 04 83 02 11 03 00
-	// That's: CLA=00, INS=CA, P1=BF, P2=21, Lc=06, data=A6048302110300, Le=00
+	// Verify the GET DATA command our session code sends on the wire
+	// matches Samsung's reference vector for SCP11a (KID=0x11, KVN=0x03):
 	//
-	// The data is: A6 { 83 { 11, 03 } } — control ref template with KID=0x11, KVN=0x03.
-	keyRef := tlv.BuildConstructed(tlv.TagControlRef,
-		tlv.Build(tlv.TagKeyID, []byte{0x11, 0x03}),
-	)
+	//   00 CA BF 21 06 A6{04 83{02 11 03}} 00
+	//
+	// This is a full code-path test, not a hand-rolled APDU comparison.
+	// Earlier this test built the expected APDU directly and asserted
+	// it matched the reference, which only proved our TLV builders
+	// worked. Meanwhile session.go was sending CLA=0x80, so the
+	// production code path was NOT what the test verified. Now we
+	// drive session.Open() against a recording transport and read out
+	// what it actually sent.
 
-	cmd := &apdu.Command{
-		CLA:  0x00,
-		INS:  0xCA,
-		P1:   0xBF,
-		P2:   0x21,
-		Data: keyRef.Encode(),
-		Le:   0,
+	// Recording transport: captures sent APDUs, returns a canned error
+	// after GET DATA so the handshake aborts predictably.
+	rt := &recordingTransport{
+		responses: [][]byte{
+			// Status word that aborts cert parsing without any data.
+			{0x6A, 0x82}, // FILE_NOT_FOUND
+		},
 	}
 
-	encoded, err := cmd.Encode()
-	if err != nil {
-		t.Fatalf("encode: %v", err)
+	_, err := Open(context.Background(), rt, &Config{
+		Variant:                        SCP11b,
+		SelectAID:                      nil, // skip SELECT, go straight to GET DATA
+		KeyID:                          0x11,
+		KeyVersion:                     0x03,
+		InsecureSkipCardAuthentication: true,
+	})
+	// We expect Open to fail (we returned 6A82). What matters is that
+	// it sent the right GET DATA bytes before failing.
+	if err == nil {
+		t.Fatal("expected Open to fail because the canned response is 6A82")
 	}
 
-	if !bytes.Equal(encoded, refGetDataCAPDU) {
-		t.Errorf("GET DATA CAPDU mismatch:\n  got:  %X\n  want: %X", encoded, refGetDataCAPDU)
+	if len(rt.sent) != 1 {
+		t.Fatalf("expected 1 APDU sent (GET DATA), got %d", len(rt.sent))
+	}
+
+	if !bytes.Equal(rt.sent[0], refGetDataCAPDU) {
+		t.Errorf("production GET DATA CAPDU does not match reference:\n  got:  %X\n  want: %X",
+			rt.sent[0], refGetDataCAPDU)
 	}
 }
+
+// recordingTransport captures every APDU the caller sends and replays
+// canned response bytes in order. Used to verify byte-level wire format
+// produced by the session code.
+type recordingTransport struct {
+	sent      [][]byte
+	responses [][]byte
+	idx       int
+}
+
+func (r *recordingTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	encoded, err := cmd.Encode()
+	if err != nil {
+		return nil, err
+	}
+	r.sent = append(r.sent, encoded)
+	return r.fetchResponse()
+}
+
+func (r *recordingTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+	r.sent = append(r.sent, raw)
+	resp, err := r.fetchResponse()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(resp.Data)+2)
+	out = append(out, resp.Data...)
+	out = append(out, resp.SW1, resp.SW2)
+	return out, nil
+}
+
+func (r *recordingTransport) fetchResponse() (*apdu.Response, error) {
+	if r.idx >= len(r.responses) {
+		return nil, errors.New("recordingTransport: no more canned responses")
+	}
+	raw := r.responses[r.idx]
+	r.idx++
+	return apdu.ParseResponse(raw)
+}
+
+func (r *recordingTransport) Close() error { return nil }
 
 func TestECDHWithReferenceKeys(t *testing.T) {
 	// Parse the OCE ephemeral private key from the reference PKCS#8 DER.

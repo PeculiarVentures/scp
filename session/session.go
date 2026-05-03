@@ -140,6 +140,27 @@ type Config struct {
 	// SecurityLevel controls which secure messaging operations to apply.
 	// Default: full security (C-MAC + C-DEC + R-MAC + R-ENC).
 	SecurityLevel channel.SecurityLevel
+
+	// InsecureTestOnlyEphemeralKey, if non-nil, overrides random
+	// ephemeral ECDH key generation in the SCP11 handshake.
+	//
+	// SCP11's security depends on the ephemeral key being unique per
+	// session and unpredictable. Setting this field DEFEATS that
+	// property and reduces SCP11 to long-term-key-only authentication.
+	// A static or known ephemeral key allows an attacker who has ever
+	// observed it (or simply guessed it from the source) to recover
+	// every session's traffic — past, present, and future.
+	//
+	// Production code MUST leave this nil. The only legitimate use is
+	// byte-exact transcript tests against external implementations
+	// (e.g. Samsung OpenSCP) where the published wire bytes are
+	// computed from a known fixed ephemeral key. The field is named
+	// "InsecureTestOnlyEphemeralKey" so that callers must explicitly
+	// type "Insecure" and "TestOnly" to use it; the same prefix
+	// convention is used by InsecureSkipCardAuthentication above.
+	//
+	// Must be a P-256 ECDH private key (curve enforced at Open time).
+	InsecureTestOnlyEphemeralKey *ecdh.PrivateKey
 }
 
 // Common AIDs.
@@ -422,7 +443,15 @@ func (s *Session) getCardCertificate(ctx context.Context) error {
 
 	certStoreTag := uint16(tlv.TagCertStore)
 	cmd := &apdu.Command{
-		CLA:  0x80,
+		// CLA 0x00 = ISO interindustry GET DATA. This matches Yubico's
+		// own SecurityDomainSession.java (which uses class 0 for
+		// INS_GET_DATA), Samsung's reference SCP11 transcripts, and
+		// the GP Card Spec ISO mode for pre-secure-channel commands.
+		// Earlier this code sent 0x80 (GP proprietary), which worked
+		// against this library's own mock card but diverged from real
+		// implementations — including our own reference vector test
+		// at TestGetDataAPDUConstruction.
+		CLA:  0x00,
 		INS:  0xCA, // GET DATA
 		P1:   byte(certStoreTag >> 8),
 		P2:   byte(certStoreTag),
@@ -552,11 +581,27 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 }
 
 func (s *Session) performKeyAgreement(ctx context.Context) error {
-	// Generate OCE ephemeral ECDH key pair (P-256).
-	curve := ecdh.P256()
-	ephKey, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("generate ephemeral key: %w", err)
+	// Generate or accept the OCE ephemeral ECDH key pair (P-256).
+	// In production, InsecureTestOnlyEphemeralKey is nil and we
+	// generate fresh randomness. Test transcripts inject a known
+	// fixed key to make wire bytes deterministic for byte-exact
+	// known-answer comparison.
+	var ephKey *ecdh.PrivateKey
+	if s.config.InsecureTestOnlyEphemeralKey != nil {
+		// Validate the injected key is on P-256 — anything else
+		// will produce a malformed EPK.OCE that the card rejects
+		// after the host has already sent it on the wire.
+		// Better to fail before APDU construction.
+		if s.config.InsecureTestOnlyEphemeralKey.Curve() != ecdh.P256() {
+			return errors.New("InsecureTestOnlyEphemeralKey must be a P-256 ECDH private key (this implementation supports P-256 only)")
+		}
+		ephKey = s.config.InsecureTestOnlyEphemeralKey
+	} else {
+		var err error
+		ephKey, err = ecdh.P256().GenerateKey(rand.Reader)
+		if err != nil {
+			return fmt.Errorf("generate ephemeral key: %w", err)
+		}
 	}
 	s.oceEphemeralKey = ephKey
 
@@ -620,7 +665,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 		return fmt.Errorf("parse response: %w", err)
 	}
 
-	cardEphPub, err := curve.NewPublicKey(cardEphPubBytes)
+	cardEphPub, err := ecdh.P256().NewPublicKey(cardEphPubBytes)
 	if err != nil {
 		return fmt.Errorf("invalid card ephemeral key: %w", err)
 	}
