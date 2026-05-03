@@ -105,6 +105,21 @@ type Policy struct {
 	// chain validation, it can call ValidateSCP11Chain itself with
 	// a Policy that has CustomValidator unset.
 	//
+	// Two invariants are still enforced after the validator returns,
+	// because the rest of the SCP11 protocol cannot function
+	// without them:
+	//
+	//   - The returned PublicKey must be on the NIST P-256 curve
+	//     (SCP11 mandates P-256, GP Amendment F §1.3.2).
+	//   - The PublicKey must be ECDH-convertible (i.e. a real
+	//     point on the curve, not nil or a malformed value).
+	//
+	// These are not "policy" — they are protocol preconditions, so
+	// they apply regardless of what the validator decides about
+	// trust. Everything else (chain validity, EKU, revocation,
+	// serial allowlists, SKI pinning, name constraints) is solely
+	// the validator's responsibility when set.
+	//
 	// Returning a non-nil error fails closed: the session will not
 	// be opened.
 	CustomValidator func(rawCardResponse []byte) (*Result, error)
