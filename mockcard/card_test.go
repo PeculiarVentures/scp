@@ -227,41 +227,44 @@ func TestEndToEnd_SCP11b_EmptyPayload(t *testing.T) {
 }
 
 func TestEndToEnd_SCP11b_NoReceipt(t *testing.T) {
-	// SCP11b specifically: the card does NOT send a receipt.
-	// The session must handle this — no receipt verification,
-	// and macChain starts at zeros.
+	// Legacy SCP11b path: pre-Amendment-F-v1.4 cards that omit the
+	// receipt. The host must opt in via InsecureAllowSCP11bWithoutReceipt
+	// and the card must be configured to model the legacy behavior;
+	// macChain seeds from zeros instead of the receipt.
 	card, err := New()
 	if err != nil {
 		t.Fatalf("create mock card: %v", err)
 	}
 	card.Variant = 0 // SCP11b
+	card.LegacySCP11bNoReceipt = true
 
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:                        session.SCP11b,
-		SelectAID:                      session.AIDSecurityDomain,
-		ApplicationAID:                 nil,
-		KeyID:                          0x13,
-		KeyVersion:                     0x01,
-		InsecureSkipCardAuthentication: true,
+		Variant:                           session.SCP11b,
+		SelectAID:                         session.AIDSecurityDomain,
+		ApplicationAID:                    nil,
+		KeyID:                             0x13,
+		KeyVersion:                        0x01,
+		InsecureSkipCardAuthentication:    true,
+		InsecureAllowSCP11bWithoutReceipt: true,
 	})
 	if err != nil {
 		t.Fatalf("session.Open (SCP11b, no receipt): %v", err)
 	}
 	defer sess.Close()
 
-	// Verify macChain is zeros (not receipt).
+	// Verify macChain is zeros (not receipt) in the legacy path.
 	if sess.InsecureExportSessionKeysForTestOnly().MACChain == nil {
 		t.Fatal("macChain is nil")
 	}
 	for _, b := range sess.InsecureExportSessionKeysForTestOnly().MACChain {
 		if b != 0 {
-			t.Fatalf("SCP11b macChain should be zeros, got %X", sess.InsecureExportSessionKeysForTestOnly().MACChain)
+			t.Fatalf("legacy SCP11b macChain should be zeros, got %X", sess.InsecureExportSessionKeysForTestOnly().MACChain)
 		}
 	}
 
 	// Encrypted echo should still work.
-	testData := []byte("SCP11b no-receipt test")
+	testData := []byte("SCP11b legacy no-receipt test")
 	resp, err := sess.Transmit(ctx, &apdu.Command{
 		CLA: 0x80, INS: 0xFD, P1: 0x00, P2: 0x00,
 		Data: testData, Le: -1,
@@ -273,7 +276,7 @@ func TestEndToEnd_SCP11b_NoReceipt(t *testing.T) {
 		t.Errorf("echo mismatch:\n  got:  %s\n  want: %s", resp.Data, testData)
 	}
 
-	t.Log("SCP11b (no receipt) session + encrypted echo verified")
+	t.Log("SCP11b legacy (no receipt) session + encrypted echo verified")
 }
 
 func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {

@@ -44,7 +44,14 @@ type SecureChannel struct {
 
 	// MACSize is the truncated MAC length appended to APDUs.
 	// S8 mode = 8 bytes (default), S16 mode = 16 bytes.
-	MACSize int
+	//
+	// Field is unexported because the only legal values are 8 and 16
+	// and the surrounding code slices into both directions of the
+	// channel using this length. A 0 disables MAC verification (a
+	// silent security regression); a value above 16 panics on slice.
+	// Construct via New, NewS16, or NewWithMACSize so the value is
+	// validated up front. Read via the MACSize() accessor.
+	macSize int
 
 	// EmptyDataEncryption controls whether C-DECRYPTION encrypts an
 	// empty command data field. Two interpretations exist in the wild:
@@ -106,8 +113,18 @@ func NewS16(keys *kdf.SessionKeys, level SecurityLevel) *SecureChannel {
 	return NewWithMACSize(keys, level, FullMACLen)
 }
 
-// NewWithMACSize creates a SecureChannel with a specific MAC truncation length.
+// NewWithMACSize creates a SecureChannel with a specific MAC truncation
+// length. macSize must be 8 (S8 mode) or 16 (S16 mode); GP SCP03
+// Amendment D defines no other valid values, and the wrap/unwrap code
+// slices APDUs based on this length, so an out-of-range value either
+// silently disables authentication (macSize=0) or panics on slice
+// (macSize>16). Both are programmer errors, so this function panics
+// rather than returning an error — there is no recovery path for a
+// channel constructed with an impossible MAC length.
 func NewWithMACSize(keys *kdf.SessionKeys, level SecurityLevel, macSize int) *SecureChannel {
+	if macSize != MACLen && macSize != FullMACLen {
+		panic(fmt.Sprintf("channel: NewWithMACSize requires macSize 8 or 16, got %d", macSize))
+	}
 	macChain := make([]byte, 16)
 	if keys.MACChain != nil {
 		copy(macChain, keys.MACChain)
@@ -117,9 +134,14 @@ func NewWithMACSize(keys *kdf.SessionKeys, level SecurityLevel, macSize int) *Se
 		encCounter:    1,
 		macChain:      macChain,
 		SecurityLevel: level,
-		MACSize:       macSize,
+		macSize:       macSize,
 	}
 }
+
+// MACSize returns the MAC truncation length in bytes (8 for S8, 16 for
+// S16). Exposed read-only because some test/mock helpers need to know
+// how many trailing bytes of an APDU represent the MAC.
+func (sc *SecureChannel) MACSize() int { return sc.macSize }
 
 // Wrap applies SCP11 secure messaging to a command APDU.
 // Returns a new command with encrypted data, appended MAC, and
@@ -157,6 +179,9 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 			payload = encrypted
 		} else {
 			// GP-literal: skip encryption entirely; counter still advances.
+			if sc.encCounter == 0xFFFFFFFF {
+				return nil, errors.New("channel: encryption counter exhausted; reopen secure channel")
+			}
 			sc.encCounter++
 		}
 	}
@@ -169,8 +194,8 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 	if sc.SecurityLevel&LevelCMAC != 0 {
 		newCLA := cmd.CLA | 0x04 // Set secure messaging bit
 
-		// Lc will be: len(payload) + sc.MACSize (for the MAC that will be appended)
-		lc := len(payload) + sc.MACSize
+		// Lc will be: len(payload) + sc.macSize (for the MAC that will be appended)
+		lc := len(payload) + sc.macSize
 
 		// Build MAC input: macChain || APDU_header || encoded Lc' || payload.
 		// Extended APDUs must MAC the extended length form, not byte(lc).
@@ -198,7 +223,7 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 		// Build the wrapped command: encrypted_data || truncated_mac
 		var wrappedData []byte
 		wrappedData = append(wrappedData, payload...)
-		wrappedData = append(wrappedData, mac[:sc.MACSize]...)
+		wrappedData = append(wrappedData, mac[:sc.macSize]...)
 
 		return &apdu.Command{
 			CLA:            newCLA,
@@ -233,13 +258,13 @@ func (sc *SecureChannel) Unwrap(resp *apdu.Response) (*apdu.Response, error) {
 
 	// Step 1: Verify R-MAC if active.
 	if sc.SecurityLevel&LevelRMAC != 0 {
-		if len(data) < sc.MACSize {
+		if len(data) < sc.macSize {
 			return nil, errors.New("response too short for R-MAC")
 		}
 
 		// R-MAC is the last 8 bytes of the response data.
-		receivedMAC := data[len(data)-sc.MACSize:]
-		responseData := data[:len(data)-sc.MACSize]
+		receivedMAC := data[len(data)-sc.macSize:]
+		responseData := data[:len(data)-sc.macSize]
 
 		// R-MAC input: mac_chain || response_data || SW1 || SW2
 		// R-MAC input: macChain || responseData || SW1 || SW2
@@ -253,7 +278,7 @@ func (sc *SecureChannel) Unwrap(resp *apdu.Response) (*apdu.Response, error) {
 			return nil, fmt.Errorf("compute R-MAC: %w", err)
 		}
 
-		if !constantTimeEqual(expectedMAC[:sc.MACSize], receivedMAC) {
+		if !constantTimeEqual(expectedMAC[:sc.macSize], receivedMAC) {
 			return nil, errors.New("R-MAC verification failed: response may be tampered")
 		}
 
@@ -279,6 +304,15 @@ func (sc *SecureChannel) Unwrap(resp *apdu.Response) (*apdu.Response, error) {
 // encryptPayload encrypts command data using AES-CBC with an IV derived
 // from the encryption counter and S-ENC key.
 func (sc *SecureChannel) encryptPayload(data []byte) ([]byte, error) {
+	// IV uniqueness is a cryptographic invariant for AES-CBC — reusing
+	// an IV under the same key is a key-recovery hazard. The counter
+	// is uint32 so wraparound is unrealistic in any normal smart-card
+	// session (4 billion APDUs), but a host bug or a long-running
+	// relay could still hit it. Fail closed rather than silently
+	// reuse counter=0.
+	if sc.encCounter == 0xFFFFFFFF {
+		return nil, errors.New("channel: encryption counter exhausted; reopen secure channel")
+	}
 	iv, err := sc.deriveIV()
 	if err != nil {
 		return nil, err
@@ -467,7 +501,7 @@ func (sc *SecureChannel) WrapResponse(resp *apdu.Response) (*apdu.Response, erro
 
 		var wrappedData []byte
 		wrappedData = append(wrappedData, data...)
-		wrappedData = append(wrappedData, mac[:sc.MACSize]...)
+		wrappedData = append(wrappedData, mac[:sc.macSize]...)
 
 		return &apdu.Response{Data: wrappedData, SW1: resp.SW1, SW2: resp.SW2}, nil
 	}

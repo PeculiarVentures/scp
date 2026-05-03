@@ -339,11 +339,15 @@ func pkixName(cn string) (n pkix.Name) {
 func TestSCP11b_ForgedReceipt_Rejected(t *testing.T) {
 	// Build a transport that wraps the mock and injects a fake
 	// receipt TLV (0x86 || 0x10 || 16 bytes of 0xAB) into the
-	// INTERNAL AUTHENTICATE response. Everything else passes through.
+	// INTERNAL AUTHENTICATE response. The card is configured in
+	// legacy (no-receipt) mode so the injected receipt is the only
+	// one in the response — otherwise the wrapper would append a
+	// second receipt and the session would parse the real one.
 	card, err := New()
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	card.LegacySCP11bNoReceipt = true
 	wrap := &receiptInjector{inner: card.Transport()}
 
 	_, err = session.Open(context.Background(), wrap, &session.Config{
