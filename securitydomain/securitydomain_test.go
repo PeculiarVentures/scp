@@ -616,7 +616,10 @@ func TestStoreDataChained_MultipleBlocks(t *testing.T) {
 	rt := &recordingTransport{}
 	s := &Session{transport: rt, authenticated: true}
 
-	// 600 bytes -> 3 blocks: 255 + 255 + 90.
+	// 600 bytes -> 3 blocks at the secure-wrap-safe size (223 each):
+	// 223 + 223 + 154. The chunk size is chosen so the on-wire APDU
+	// stays within short Lc (≤ 255) even after AES-CBC padding plus
+	// a 16-byte MAC inflate the wrapped form.
 	payload := make([]byte, 600)
 	for i := range payload {
 		payload[i] = byte(i)
@@ -633,7 +636,7 @@ func TestStoreDataChained_MultipleBlocks(t *testing.T) {
 		t.Fatalf("expected 3 APDUs, got %d", len(rt.commands))
 	}
 
-	wantSizes := []int{255, 255, 90}
+	wantSizes := []int{223, 223, 154}
 	for i, cmd := range rt.commands {
 		if cmd.CLA != clsGP {
 			t.Errorf("block %d: CLA = %02X, want %02X", i, cmd.CLA, clsGP)
@@ -731,5 +734,115 @@ func TestSCPCollectAll_ByteCap(t *testing.T) {
 	_, err := s.transmitCollectAll(context.Background(), cmd)
 	if err == nil {
 		t.Fatal("expected byte cap to fire on large-chunk infinite loop")
+	}
+}
+
+// --- OpenWithSession DEK validation ---
+
+func TestOpenWithSession_RejectsAllZeroDEK(t *testing.T) {
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	if _, err := OpenWithSession(scpSess, rt, make([]byte, 16)); err == nil {
+		t.Fatal("expected error: all-zero DEK must be rejected at construction")
+	}
+}
+
+func TestOpenWithSession_RejectsBadDEKLength(t *testing.T) {
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	if _, err := OpenWithSession(scpSess, rt, []byte{0x01, 0x02, 0x03}); err == nil {
+		t.Fatal("expected error: 3-byte DEK is not a valid AES key length")
+	}
+}
+
+func TestOpenWithSession_AcceptsValidDEK(t *testing.T) {
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	dek := []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10}
+	s, err := OpenWithSession(scpSess, rt, dek)
+	if err != nil {
+		t.Fatalf("valid DEK rejected: %v", err)
+	}
+	if s == nil {
+		t.Fatal("expected non-nil session")
+	}
+	if !s.authenticated {
+		t.Error("session should be marked authenticated")
+	}
+}
+
+func TestOpenWithSession_AcceptsNilDEK(t *testing.T) {
+	// A caller that does not need PUT KEY may pass dek=nil. PUT KEY
+	// will then fail with ErrNotAuthenticated, but the session is
+	// otherwise usable.
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	s, err := OpenWithSession(scpSess, rt, nil)
+	if err != nil {
+		t.Fatalf("nil DEK rejected: %v", err)
+	}
+	if s == nil {
+		t.Fatal("expected non-nil session")
+	}
+	if len(s.dek) != 0 {
+		t.Errorf("expected empty DEK, got %d bytes", len(s.dek))
+	}
+}
+
+// --- Chained APDU chunk-size invariant ---
+
+// TestChainCommandsAt_ChunkSize confirms chainCommandsAt splits at the
+// requested boundary and sets the chaining bit only on intermediates.
+func TestChainCommandsAt_ChunkSize(t *testing.T) {
+	cmd := &apdu.Command{
+		CLA:  0x80,
+		INS:  0xD8,
+		P1:   0x00,
+		P2:   0x00,
+		Data: make([]byte, 600),
+		Le:   0,
+	}
+	// secureWrapSafeBlock-sized chunks: 600 -> 223 + 223 + 154.
+	cmds := chainCommandsAt(cmd, secureWrapSafeBlock)
+	if len(cmds) != 3 {
+		t.Fatalf("expected 3 chained APDUs, got %d", len(cmds))
+	}
+	wantSizes := []int{secureWrapSafeBlock, secureWrapSafeBlock, 600 - 2*secureWrapSafeBlock}
+	for i, c := range cmds {
+		if len(c.Data) != wantSizes[i] {
+			t.Errorf("APDU %d: data size = %d, want %d", i, len(c.Data), wantSizes[i])
+		}
+		isLast := i == len(cmds)-1
+		hasChainingBit := c.CLA&0x10 != 0
+		if isLast && hasChainingBit {
+			t.Errorf("APDU %d (last): chaining bit must be CLEAR", i)
+		}
+		if !isLast && !hasChainingBit {
+			t.Errorf("APDU %d (intermediate): chaining bit must be SET", i)
+		}
+	}
+}
+
+// TestSecureWrapSafeBlock_FitsShortLc is a documentation test asserting
+// the math behind secureWrapSafeBlock: a plaintext of that size, after
+// AES-CBC encryption with ISO 9797-1 method-2 padding plus the largest
+// MAC truncation we use (16 bytes / S16), still produces a wrapped
+// payload that fits in a short-Lc APDU (≤ 255 bytes).
+func TestSecureWrapSafeBlock_FitsShortLc(t *testing.T) {
+	const macSize = 16 // worst case
+	padded := ((secureWrapSafeBlock + 1 + 15) / 16) * 16
+	wireLen := padded + macSize
+	if wireLen > 255 {
+		t.Errorf("secureWrapSafeBlock=%d: wrapped wire len = %d, exceeds short-Lc 255",
+			secureWrapSafeBlock, wireLen)
+	}
+	// And one more byte should NOT fit — verifying the bound is tight.
+	N := secureWrapSafeBlock + 1
+	padded = ((N + 1 + 15) / 16) * 16
+	wireLen = padded + macSize
+	if wireLen <= 255 {
+		t.Errorf("secureWrapSafeBlock could be larger: N=%d still fits (%d ≤ 255)",
+			N, wireLen)
 	}
 }

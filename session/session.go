@@ -147,8 +147,15 @@ var (
 )
 
 // DefaultConfig returns a Config for SCP11b with standard defaults.
-// The handshake targets the GP Security Domain, then SELECTs the
-// PIV applet over the secure channel.
+//
+// The handshake targets the GP Issuer Security Domain. ApplicationAID
+// is left nil — callers should SELECT their target applet before
+// calling Open, since some platforms (notably YubiKey) terminate an
+// SCP session when a different applet is selected mid-channel.
+//
+// Trust is also unconfigured by default; the caller must set
+// CardTrustPolicy, CardTrustAnchors, or InsecureSkipCardAuthentication
+// before Open will agree to a key with the card.
 func DefaultConfig() *Config {
 	return &Config{
 		Variant:           SCP11b,

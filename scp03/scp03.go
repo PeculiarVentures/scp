@@ -10,8 +10,8 @@
 // # Protocol Flow
 //
 //	Host                              Card
-//	 │── INITIALIZE UPDATE ──────────>│  host challenge (8 bytes)
-//	 │<─ card challenge + cryptogram ─│  key diversification data
+//	 │── INITIALIZE UPDATE ──────────>│  host challenge (8 bytes S8 / 16 bytes S16)
+//	 │<─ card challenge + cryptogram ─│  key diversification data, iParam selects S8/S16
 //	 │                                │
 //	 │   derive session keys (S-ENC, S-MAC, S-RMAC)
 //	 │   verify card cryptogram
@@ -70,8 +70,9 @@ type Config struct {
 	// Default: 0x00 (card chooses first available).
 	KeyVersion byte
 
-	// HostChallenge is the 8-byte random value used in INITIALIZE UPDATE.
-	// If nil, a random challenge is generated.
+	// HostChallenge is the random value used in INITIALIZE UPDATE.
+	// 8 bytes selects S8 (8-byte cryptograms and MACs); 16 bytes
+	// selects S16. If nil, a random 8-byte challenge is generated.
 	HostChallenge []byte
 
 	// SecurityDomainAID is the AID to SELECT before the handshake.
@@ -239,18 +240,16 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	s.channel = channel.NewWithMACSize(s.sessionKeys, cfg.SecurityLevel, iur.macSize)
 
 	// Step 9: SELECT application if configured.
+	// Routed through Session.Transmit so R-MAC is verified on the
+	// response when negotiated — the post-auth SELECT response is
+	// part of the authenticated channel and must not bypass the
+	// secure-messaging unwrap.
 	if len(cfg.ApplicationAID) > 0 {
-		selectCmd := apdu.NewSelect(cfg.ApplicationAID)
-		wrappedSelect, err := s.channel.Wrap(selectCmd)
-		if err != nil {
-			return nil, fmt.Errorf("wrap SELECT app: %w", err)
-		}
-		resp, err = t.Transmit(ctx, wrappedSelect)
+		resp, err = s.Transmit(ctx, apdu.NewSelect(cfg.ApplicationAID))
 		if err != nil {
 			return nil, fmt.Errorf("SELECT app: %w", err)
 		}
 		if !resp.IsSuccess() {
-			// Unwrap to get the real error
 			return nil, fmt.Errorf("SELECT app: %w", resp.Error())
 		}
 	}
@@ -333,9 +332,9 @@ type initUpdateResponse struct {
 	keyDiversificationData []byte // 10 bytes
 	keyVersion             byte
 	scpID                  byte   // Should be 0x03
-	iParam                 byte   // Implementation options
-	cardChallenge          []byte // 8 bytes
-	cardCryptogram         []byte // 8 bytes
+	iParam                 byte   // Implementation options (b1 = S16 if set)
+	cardChallenge          []byte // 8 bytes (S8) or 16 bytes (S16)
+	cardCryptogram         []byte // 8 bytes (S8) or 16 bytes (S16)
 	sequenceCounter        []byte // 3 bytes (optional)
 	macSize                int    // 8 for S8, 16 for S16
 }
@@ -418,7 +417,8 @@ func deriveSCP03Key(staticKey []byte, derivConst byte, context []byte, keyLen in
 // GP Amendment D §6.2.2: The authentication cryptograms are computed
 // using the data derivation scheme with S-MAC as the base key.
 // Derivation constant 0x00 = card cryptogram, 0x01 = host cryptogram.
-// The output is L=64 bits (8 bytes) for S8 mode.
+// Output is L=64 bits (8 bytes) for S8 mode, L=128 bits (16 bytes) for
+// S16 mode, selected by macSize.
 func calculateCryptogram(smac []byte, derivConst byte, context []byte, macSize int) ([]byte, error) {
 	if macSize != 8 && macSize != 16 {
 		return nil, fmt.Errorf("unsupported cryptogram length: %d", macSize)
