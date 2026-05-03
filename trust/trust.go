@@ -74,6 +74,40 @@ type Policy struct {
 	// on the NIST P-256 curve. Defaults to true when zero-valued
 	// (since SCP11 mandates P-256).
 	RequireP256 *bool
+
+	// CustomValidator, if non-nil, is called instead of the built-in
+	// X.509 chain validator. The card response bytes (the BF21 cert
+	// store, exactly as returned by GET DATA) are passed in; the
+	// validator is responsible for parsing, chain validation, and
+	// returning the card's static public key as an ECDSA *PublicKey.
+	//
+	// Use cases:
+	//
+	//   - GP-proprietary SCP11 certificates (GP §7F21 format, not X.509).
+	//     The built-in validator only handles X.509 chains; cards that
+	//     return GP-proprietary certs need a custom validator that
+	//     understands the proprietary encoding and applies whatever
+	//     trust model the deployment uses (issuer SKI pinning, signature
+	//     verification against a known issuer key, etc.).
+	//
+	//   - Custom corporate PKI rules: certificate-policy OIDs, name
+	//     constraints, CRL/OCSP, revocation lookups, hardware-backed
+	//     anchor verification.
+	//
+	//   - Mixed deployments where some cards return X.509 and some
+	//     return proprietary; the custom validator can dispatch on the
+	//     leading byte and call the built-in path for X.509 inputs.
+	//
+	// When CustomValidator is set, all other Policy fields (Roots,
+	// Intermediates, EKUs, serials, SKI, RequireP256) are ignored —
+	// the custom validator owns the trust decision in full. If the
+	// validator wants to combine its own logic with the built-in
+	// chain validation, it can call ValidateSCP11Chain itself with
+	// a Policy that has CustomValidator unset.
+	//
+	// Returning a non-nil error fails closed: the session will not
+	// be opened.
+	CustomValidator func(rawCardResponse []byte) (*Result, error)
 }
 
 // Result holds the output of a successful chain validation.

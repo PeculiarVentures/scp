@@ -600,12 +600,35 @@ func (s *Session) legacyExtractAndStoreKey(data []byte) error {
 	return nil
 }
 
-// validateCardCertChain parses all certificates from the card's cert
-// store response and validates them using the trust package. This is
-// the preferred path when CardTrustPolicy is configured — it enforces
-// P-256, chain validation, and optional serial/SKI constraints before
-// allowing the card's public key to be used for key agreement.
+// validateCardCertChain handles the trust-policy path when
+// CardTrustPolicy is configured. Two routes:
+//
+//   - Policy.CustomValidator set: hand the raw BF21 store bytes to
+//     the caller's validator and use whatever public key it returns.
+//     The library does no parsing, no chain checks, no EKU/serial/SKI
+//     filtering — the validator owns the trust decision in full.
+//     This is the path GP-proprietary cards take.
+//
+//   - Otherwise: parse as X.509, run ValidateSCP11Chain (P-256, chain,
+//     EKU, serials, SKI, time), use the validated leaf's public key.
 func (s *Session) validateCardCertChain(data []byte) error {
+	if s.config.CardTrustPolicy.CustomValidator != nil {
+		result, err := s.config.CardTrustPolicy.CustomValidator(data)
+		if err != nil {
+			return fmt.Errorf("custom card validator: %w", err)
+		}
+		if result == nil || result.PublicKey == nil {
+			return errors.New("custom card validator returned nil PublicKey")
+		}
+		ecdhKey, err := result.PublicKey.ECDH()
+		if err != nil {
+			return fmt.Errorf("convert custom-validated key to ECDH: %w", err)
+		}
+		s.cardStaticPubKey = ecdhKey
+		s.state = StateCertRetrieved
+		return nil
+	}
+
 	certs, err := parseCertsFromStore(data)
 	if err != nil {
 		return fmt.Errorf("parse card certificates: %w", err)

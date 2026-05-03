@@ -90,7 +90,29 @@ type Config struct {
 
 	// SecurityLevel controls which secure messaging operations to apply.
 	// Default: full security (C-MAC + C-DEC + R-MAC + R-ENC).
+	//
+	// Open rejects dangerous combinations by default — see
+	// InsecureAllowPartialSecurityLevel below for the escape hatch.
 	SecurityLevel channel.SecurityLevel
+
+	// InsecureAllowPartialSecurityLevel disables the safety check on
+	// SecurityLevel that rejects encryption-without-authentication
+	// combinations (C-DEC without C-MAC, or R-ENC without R-MAC).
+	//
+	// Those combinations exist in the GP spec for completeness — a
+	// client can technically negotiate "encrypt commands but don't
+	// MAC them" — but they create real attack surface: encrypted
+	// commands that aren't authenticated can be replayed or
+	// blockwise-tampered, and the channel layer's CBC padding errors
+	// become a side channel. Production callers want full security.
+	//
+	// The only legitimate use of this field is conformance testing
+	// against the GP spec, where you're driving the card through
+	// every spec-defined level to verify its parser. Real deployments
+	// MUST leave this false. The deliberately ugly name matches the
+	// "Insecure" prefix convention used elsewhere in this library
+	// for opt-in defeat-the-defaults knobs.
+	InsecureAllowPartialSecurityLevel bool
 }
 
 // Session is an established SCP03 secure channel.
@@ -132,6 +154,26 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull
+	}
+
+	// Reject dangerous SecurityLevel combinations: encryption without
+	// authentication is a real attack surface (replay, blockwise
+	// tampering, CBC padding side channel) and is almost never what a
+	// caller actually wants. The GP spec allows them for completeness,
+	// but production deployments should run at full security. Gate
+	// them behind InsecureAllowPartialSecurityLevel for spec
+	// conformance testing.
+	if !cfg.InsecureAllowPartialSecurityLevel {
+		hasCDEC := cfg.SecurityLevel&channel.LevelCDEC != 0
+		hasCMAC := cfg.SecurityLevel&channel.LevelCMAC != 0
+		hasRENC := cfg.SecurityLevel&channel.LevelRENC != 0
+		hasRMAC := cfg.SecurityLevel&channel.LevelRMAC != 0
+		if hasCDEC && !hasCMAC {
+			return nil, errors.New("scp03: SecurityLevel includes C-DEC without C-MAC; encryption without authentication is unsafe (set InsecureAllowPartialSecurityLevel for spec conformance testing only)")
+		}
+		if hasRENC && !hasRMAC {
+			return nil, errors.New("scp03: SecurityLevel includes R-ENC without R-MAC; encryption without authentication is unsafe (set InsecureAllowPartialSecurityLevel for spec conformance testing only)")
+		}
 	}
 
 	s := &Session{
