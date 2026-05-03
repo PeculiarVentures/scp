@@ -12,6 +12,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/kdf"
+	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -795,6 +796,38 @@ func TestOpenWithSession_AcceptsNilDEK(t *testing.T) {
 	}
 	if len(s.dek) != 0 {
 		t.Errorf("expected empty DEK, got %d bytes", len(s.dek))
+	}
+}
+
+// TestOpen_RejectsAllZeroStaticDEK confirms that the SCP03 entry-point
+// Open() applies the same DEK validation as OpenWithSession. A bogus
+// static DEK (all-zero or wrong length) must fail here before any
+// network I/O — the previous behavior deferred the failure to PUT KEY.
+func TestOpen_RejectsAllZeroStaticDEK(t *testing.T) {
+	keys := scp03.StaticKeys{
+		ENC: bytes.Repeat([]byte{0x40}, 16),
+		MAC: bytes.Repeat([]byte{0x41}, 16),
+		DEK: make([]byte, 16), // all-zero
+	}
+	// Transport is unused — validation must fire before scp03.Open is
+	// invoked. Pass a nil transport to make that explicit; if the code
+	// reached scp03.Open, the panic from the nil deref would be the
+	// failure mode instead of the validation error we want.
+	_, err := Open(context.Background(), nil, keys, 0x00)
+	if err == nil {
+		t.Fatal("expected error: all-zero static DEK must be rejected at construction")
+	}
+}
+
+func TestOpen_RejectsBadStaticDEKLength(t *testing.T) {
+	keys := scp03.StaticKeys{
+		ENC: bytes.Repeat([]byte{0x40}, 16),
+		MAC: bytes.Repeat([]byte{0x41}, 16),
+		DEK: []byte{0x01, 0x02, 0x03}, // wrong length
+	}
+	_, err := Open(context.Background(), nil, keys, 0x00)
+	if err == nil {
+		t.Fatal("expected error: 3-byte DEK is not a valid AES key length")
 	}
 }
 

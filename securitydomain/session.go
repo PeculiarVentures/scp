@@ -53,6 +53,15 @@ type Session struct {
 //	sd, err := securitydomain.Open(ctx, t, scp03.DefaultKeys, 0x00)
 //	defer sd.Close()
 func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, keyVersion byte) (*Session, error) {
+	// Validate the static DEK at the API boundary so configuration
+	// mistakes (all-zero key, wrong length) surface here rather than
+	// at the first PUT KEY call. The same helper backs OpenWithSession
+	// and requireDEK so all three paths agree on what a usable DEK
+	// looks like.
+	if err := validateDEK(keys.DEK); err != nil {
+		return nil, fmt.Errorf("securitydomain: %w", err)
+	}
+
 	cfg := &scp03.Config{
 		Keys:              keys,
 		KeyVersion:        keyVersion,
@@ -248,15 +257,13 @@ func (s *Session) requireDEK() error {
 	if len(s.dek) == 0 {
 		return fmt.Errorf("%w: session DEK not available (SCP03 session required for PUT KEY)", ErrNotAuthenticated)
 	}
-	allZero := true
-	for _, b := range s.dek {
-		if b != 0 {
-			allZero = false
-			break
-		}
-	}
-	if allZero {
-		return fmt.Errorf("%w: refusing to use all-zero SCP03 DEK", ErrNotAuthenticated)
+	// Re-validate at use time. Construction-time validation in Open
+	// and OpenWithSession should already have caught a bad DEK, but
+	// running the same checks here means construction and use cannot
+	// drift if validateDEK gets stricter in the future, and it
+	// defends against any later mutation of s.dek.
+	if err := validateDEK(s.dek); err != nil {
+		return fmt.Errorf("%w: %w", ErrNotAuthenticated, err)
 	}
 	return nil
 }
