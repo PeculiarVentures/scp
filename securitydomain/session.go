@@ -600,10 +600,23 @@ func (s *Session) PutECPublicKey(ctx context.Context, ref KeyReference, key *ecd
 // --- Key deletion and reset ---
 
 // DeleteKey deletes one or more keys matching the reference.
-// SCP03 keys can only be deleted by KVN.
+//
+// SCP03 special case: SCP03 keys (KID 0x01, 0x02, 0x03) MUST be
+// deleted by KVN only — yubikit's reference implementation rejects
+// KID-bearing DELETE for SCP03 outright. Cards typically reject too.
+// If ref.ID is an SCP03 KID, this method clears it before building
+// the command so only the 0xD2 (KVN) tag is sent. ref.Version must
+// be set in that case.
 func (s *Session) DeleteKey(ctx context.Context, ref KeyReference, deleteLast bool) error {
 	if err := s.requireAuth(); err != nil {
 		return err
+	}
+
+	if isSCP03KeyID(ref.ID) {
+		if ref.Version == 0 {
+			return errors.New("securitydomain: SCP03 keys can only be deleted by KVN; set ref.Version to the key set version")
+		}
+		ref = NewKeyReference(0, ref.Version)
 	}
 
 	cmd, err := deleteKeyCmd(ref, deleteLast)
@@ -620,6 +633,14 @@ func (s *Session) DeleteKey(ctx context.Context, ref KeyReference, deleteLast bo
 	}
 
 	return nil
+}
+
+// isSCP03KeyID reports whether the given KID belongs to an SCP03
+// static key set. GP defines KIDs 0x01, 0x02, 0x03 for the three
+// SCP03 keys (ENC, MAC, DEK) within a key set; cards address the
+// set as a whole by KVN.
+func isSCP03KeyID(kid byte) bool {
+	return kid == 0x01 || kid == 0x02 || kid == 0x03
 }
 
 // Reset performs a factory reset of the Security Domain by blocking

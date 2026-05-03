@@ -61,13 +61,49 @@ var DefaultKeys = StaticKeys{
 	DEK: []byte{0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F},
 }
 
+// YubiKey factory and GP-spec defaults for KeyVersion. See the
+// README factory-keys table for vendor-by-vendor specifics.
+const (
+	// YubiKeyFactoryKeyVersion is the KVN YubiKey 5.3+ ships with
+	// for SCP03 (per Yubico tech manual §SCP specifics). Always
+	// pair with DefaultKeys; replace the key set immediately after
+	// first connection.
+	YubiKeyFactoryKeyVersion byte = 0xFF
+)
+
+// FactoryYubiKeyConfig returns an SCP03 Config wired up for a
+// factory-fresh YubiKey: DefaultKeys at KVN 0xFF, full security
+// level. The session it produces has NO security (the keys are
+// publicly known); the only legitimate use is the first session
+// against a brand-new card so you can rotate the key set.
+//
+// Don't use this in production code paths. The deliberately verbose
+// name is the consent: typing "Factory" + "YubiKey" is the
+// acknowledgment that you're knowingly using publicly known keys.
+func FactoryYubiKeyConfig() *Config {
+	return &Config{
+		Keys:       DefaultKeys,
+		KeyVersion: YubiKeyFactoryKeyVersion,
+	}
+}
+
 // Config holds the parameters for establishing an SCP03 session.
 type Config struct {
 	// Keys is the pre-shared static key set.
 	Keys StaticKeys
 
-	// KeyVersion identifies which key set to use on the card.
-	// Default: 0x00 (card chooses first available).
+	// KeyVersion identifies which key set to use on the card. The
+	// correct value is vendor-specific:
+	//
+	//   - YubiKey factory:                       0xFF
+	//   - Most GP-spec test/factory cards:       0x00 or 0x01
+	//   - User-imported sets:                    1..3 typically
+	//
+	// Zero value (0x00) is sent on the wire as P1=0x00, which most
+	// cards interpret as "first available key set." YubiKey rejects
+	// this with 6A88 because the factory KVN is 0xFF; using
+	// scp03.DefaultKeys against a factory YubiKey requires KeyVersion=0xFF.
+	// See the README factory-keys table.
 	KeyVersion byte
 
 	// HostChallenge is the random value used in INITIALIZE UPDATE.
@@ -170,6 +206,20 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 	if len(cfg.Keys.ENC) == 0 || len(cfg.Keys.MAC) == 0 || len(cfg.Keys.DEK) == 0 {
 		return nil, errors.New("scp03: Config.Keys must be set; for factory-fresh cards explicitly use scp03.DefaultKeys (test keys, no security)")
+	}
+
+	// All three SCP03 static keys must be the same AES size (16, 24,
+	// or 32 bytes). Allowing mixed sizes was non-standard and silently
+	// derived MAC session keys at the ENC key length rather than the
+	// MAC key length — confusing, non-interoperable cryptography.
+	// Cards reject mixed sizes too; failing fast here gives a useful
+	// error rather than an opaque card-side rejection later.
+	encLen, macLen, dekLen := len(cfg.Keys.ENC), len(cfg.Keys.MAC), len(cfg.Keys.DEK)
+	if encLen != 16 && encLen != 24 && encLen != 32 {
+		return nil, fmt.Errorf("scp03: Keys.ENC length %d invalid (must be 16, 24, or 32 for AES-128/192/256)", encLen)
+	}
+	if macLen != encLen || dekLen != encLen {
+		return nil, fmt.Errorf("scp03: Keys.ENC, Keys.MAC, Keys.DEK must all be the same length (got %d/%d/%d)", encLen, macLen, dekLen)
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull
