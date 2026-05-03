@@ -51,13 +51,13 @@ type SecureChannel struct {
 type SecurityLevel uint8
 
 const (
-	LevelCMAC        SecurityLevel = 0x01 // Command MAC
-	LevelCDEC        SecurityLevel = 0x02 // Command decryption (encryption)
-	LevelRMAC        SecurityLevel = 0x10 // Response MAC
-	LevelRENC        SecurityLevel = 0x20 // Response encryption
-	LevelFull        SecurityLevel = LevelCMAC | LevelCDEC | LevelRMAC | LevelRENC
-	MACLen                         = 8 // Truncated MAC length appended to APDUs
-	FullMACLen                     = 16
+	LevelCMAC  SecurityLevel = 0x01 // Command MAC
+	LevelCDEC  SecurityLevel = 0x02 // Command decryption (encryption)
+	LevelRMAC  SecurityLevel = 0x10 // Response MAC
+	LevelRENC  SecurityLevel = 0x20 // Response encryption
+	LevelFull  SecurityLevel = LevelCMAC | LevelCDEC | LevelRMAC | LevelRENC
+	MACLen                   = 8 // Truncated MAC length appended to APDUs
+	FullMACLen               = 16
 )
 
 // Byte encodes the SecurityLevel as the P1 byte for EXTERNAL AUTHENTICATE.
@@ -127,12 +127,19 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 		// Lc will be: len(payload) + sc.MACSize (for the MAC that will be appended)
 		lc := len(payload) + sc.MACSize
 
-		// Build MAC input: macChain || APDU_header || payload
-		
+		// Build MAC input: macChain || APDU_header || encoded Lc' || payload.
+		// Extended APDUs must MAC the extended length form, not byte(lc).
 		var macInput []byte
 		macInput = append(macInput, sc.macChain...)
 		macInput = append(macInput, newCLA, cmd.INS, cmd.P1, cmd.P2)
-		macInput = append(macInput, byte(lc))
+		if cmd.ExtendedLength || lc > 255 {
+			if lc > 65535 {
+				return nil, fmt.Errorf("wrapped APDU data exceeds extended Lc: %d bytes", lc)
+			}
+			macInput = append(macInput, 0x00, byte(lc>>8), byte(lc))
+		} else {
+			macInput = append(macInput, byte(lc))
+		}
 		macInput = append(macInput, payload...)
 
 		mac, err := cmac.AESCMAC(sc.keys.SMAC, macInput)
@@ -276,7 +283,8 @@ func (sc *SecureChannel) decryptPayload(data []byte) ([]byte, error) {
 
 // deriveIV builds the command encryption IV by encrypting the counter
 // with S-ENC. GP SCP03 §6.2.2 / SCP11 §5.3.2:
-//   AES-ECB(SENC, 00...00 || counter)  — no 0x80 prefix for commands
+//
+//	AES-ECB(SENC, 00...00 || counter)  — no 0x80 prefix for commands
 func (sc *SecureChannel) deriveIV() ([]byte, error) {
 	block, err := aes.NewCipher(sc.keys.SENC)
 	if err != nil {
@@ -295,7 +303,9 @@ func (sc *SecureChannel) deriveIV() ([]byte, error) {
 
 // deriveResponseIV builds the response decryption IV.
 // Response IV uses encCounter - 1 (matching the preceding encrypt):
-//   AES-ECB(SENC, 80 00...00 || (encCounter-1))
+//
+//	AES-ECB(SENC, 80 00...00 || (encCounter-1))
+//
 // This gets the IV matching the preceding encrypt call.
 func (sc *SecureChannel) deriveResponseIV() ([]byte, error) {
 	block, err := aes.NewCipher(sc.keys.SENC)

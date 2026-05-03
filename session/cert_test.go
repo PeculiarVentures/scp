@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -38,7 +39,7 @@ func TestTrustAnchorBypass_RawKeyRejected(t *testing.T) {
 
 	// With trust anchors set, raw key data (not a valid X.509 cert)
 	// should be rejected, NOT silently accepted.
-	_, err = parseRawCert(rawPoint, trustAnchors)
+	_, err = parseRawCert(rawPoint, trustAnchors, nil)
 	if err == nil {
 		t.Fatal("raw EC point should be rejected when trust anchors are configured")
 	}
@@ -54,7 +55,7 @@ func TestTrustAnchorBypass_RawKeyAcceptedWithoutAnchors(t *testing.T) {
 	}
 	rawPoint := privKey.PublicKey().Bytes()
 
-	key, err := parseRawCert(rawPoint, nil)
+	key, err := parseRawCert(rawPoint, nil, nil)
 	if err != nil {
 		t.Fatalf("raw key should be accepted without trust anchors: %v", err)
 	}
@@ -68,12 +69,12 @@ func TestTrustAnchorBypass_ValidCertAccepted(t *testing.T) {
 	// Generate a self-signed cert and add it as its own trust anchor.
 	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "Test CA"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyAgreement,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyAgreement,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &caKey.PublicKey, caKey)
@@ -86,7 +87,7 @@ func TestTrustAnchorBypass_ValidCertAccepted(t *testing.T) {
 	trustAnchors.AddCert(caCert)
 
 	// Valid X.509 cert with matching trust anchor should succeed.
-	key, err := parseRawCert(certDER, trustAnchors)
+	key, err := parseRawCert(certDER, trustAnchors, nil)
 	if err != nil {
 		t.Fatalf("valid cert should be accepted: %v", err)
 	}
@@ -100,12 +101,12 @@ func TestTrustAnchorBypass_UntrustedCertRejected(t *testing.T) {
 	// Generate a self-signed cert but DON'T add it to the trust pool.
 	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "Untrusted CA"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Untrusted CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	certDER, _ := x509.CreateCertificate(rand.Reader, template, template, &caKey.PublicKey, caKey)
@@ -113,7 +114,7 @@ func TestTrustAnchorBypass_UntrustedCertRejected(t *testing.T) {
 	// Use an empty trust pool — the cert should be rejected.
 	trustAnchors := x509.NewCertPool()
 
-	_, err := parseRawCert(certDER, trustAnchors)
+	_, err := parseRawCert(certDER, trustAnchors, nil)
 	if err == nil {
 		t.Fatal("untrusted cert should be rejected")
 	}
@@ -141,12 +142,56 @@ func TestSCP11_RejectsNonFullSecurityLevel(t *testing.T) {
 			Variant:       SCP11b,
 			SecurityLevel: level,
 		}
-		_, err := Open(nil, nil, cfg)
+		_, err := Open(context.Background(), nil, cfg)
 		if err == nil {
 			t.Errorf("SecurityLevel 0x%02X should be rejected", level)
 		}
 	}
 	t.Log("Non-full security levels correctly rejected")
+}
+
+// ============================================================
+// Regression: SCP11 must fail closed when no trust anchors and no
+// explicit InsecureSkipCardAuthentication flag are configured.
+//
+// Before the fix, a nil CardTrustAnchors silently fell through to
+// extractCardPublicKey which would accept raw EC points and GP
+// proprietary encodings without any chain validation — turning
+// SCP11b into "encrypted to whoever answered first." The fix in
+// getCardCertificate must reject that path explicitly.
+// ============================================================
+
+func TestSCP11_FailsClosedWithoutTrustAnchorsOrOptIn(t *testing.T) {
+	// Config that matches DefaultConfig() except for the trust fields:
+	// no CardTrustAnchors, no CardTrustPolicy, no InsecureSkipCardAuthentication.
+	cfg := DefaultConfig()
+	// Construct a minimal session where getCardCertificate has already
+	// retrieved data — we drive the legacy path directly.
+	s := &Session{config: cfg}
+
+	// Make a self-signed cert as plausible card response data. The
+	// validation must reject the operation regardless of whether the
+	// data parses, because no trust anchors are configured.
+	cert := generateSelfSignedCert(t)
+
+	err := s.legacyExtractAndStoreKey(cert.Raw)
+	if err == nil {
+		t.Fatal("expected error: SCP11 with no trust anchors and no opt-in must fail closed")
+	}
+	t.Logf("Correctly failed closed: %v", err)
+}
+
+func TestSCP11_OptInBypassWorks(t *testing.T) {
+	// With InsecureSkipCardAuthentication = true, the legacy fallback
+	// is permitted (intended only for tests/labs).
+	cfg := DefaultConfig()
+	cfg.InsecureSkipCardAuthentication = true
+	s := &Session{config: cfg}
+
+	cert := generateSelfSignedCert(t)
+	if err := s.legacyExtractAndStoreKey(cert.Raw); err != nil {
+		t.Fatalf("opt-in bypass should permit unauthenticated key extraction: %v", err)
+	}
 }
 
 // --- parseCertsFromStore tests ---
@@ -218,4 +263,206 @@ func generateSelfSignedCert(t *testing.T) *x509.Certificate {
 		t.Fatal(err)
 	}
 	return cert
+}
+
+// ============================================================
+// Regression: OCE private key must correspond to OCE certificate.
+//
+// Configuration mistakes where the private key and the certificate
+// are unrelated would otherwise be caught only by the card during
+// MUTUAL AUTHENTICATE — which is too late, and on a permissive card
+// could complete a session under a fundamentally different identity
+// than the host believes it is presenting.
+// ============================================================
+
+func TestVerifyOCEKeyMatchesCert_Match(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "OCE"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyAgreement,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	cert, _ := x509.ParseCertificate(der)
+	if err := verifyOCEKeyMatchesCert(priv, cert); err != nil {
+		t.Errorf("matching key/cert rejected: %v", err)
+	}
+}
+
+func TestVerifyOCEKeyMatchesCert_Mismatch(t *testing.T) {
+	keyA, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	keyB, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "OCE"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyAgreement,
+		BasicConstraintsValid: true,
+	}
+	// Cert holds keyA's public key; we pass keyB as the private key.
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &keyA.PublicKey, keyA)
+	cert, _ := x509.ParseCertificate(der)
+
+	if err := verifyOCEKeyMatchesCert(keyB, cert); err == nil {
+		t.Error("mismatched key/cert should be rejected")
+	}
+}
+
+func TestVerifyOCEKeyMatchesCert_NilInputs(t *testing.T) {
+	if err := verifyOCEKeyMatchesCert(nil, nil); err == nil {
+		t.Error("nil inputs should be rejected")
+	}
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err := verifyOCEKeyMatchesCert(priv, nil); err == nil {
+		t.Error("nil cert should be rejected")
+	}
+}
+
+func TestVerifyOCEKeyMatchesCert_CurveMismatch(t *testing.T) {
+	// Private key on P-256, cert on P-384.
+	privP256, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caP384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "OCE"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+	}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caP384.PublicKey, caP384)
+	cert, _ := x509.ParseCertificate(der)
+
+	if err := verifyOCEKeyMatchesCert(privP256, cert); err == nil {
+		t.Error("curve-mismatched key/cert should be rejected")
+	}
+}
+
+// ============================================================
+// Regression: CardTrustAnchors validates chains with intermediates.
+//
+// Earlier the code only verified the leaf against trustAnchors with
+// no Intermediates pool, so a leaf signed by an intermediate (signed
+// by the trusted root) failed validation. extractCardPublicKey now
+// builds an intermediates pool from the non-leaf entries in the
+// BF21 cert store and passes it to x509.Verify.
+// ============================================================
+
+// makeChain builds a [root, intermediate, leaf] x509 chain on P-256.
+func makeChain(t *testing.T) (rootDER, interDER, leafDER []byte) {
+	t.Helper()
+	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	rootDER, _ = x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	rootCert, _ := x509.ParseCertificate(rootDER)
+
+	interKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	interTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "Intermediate"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	interDER, _ = x509.CreateCertificate(rand.Reader, interTmpl, rootCert, &interKey.PublicKey, rootKey)
+	interCert, _ := x509.ParseCertificate(interDER)
+
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(3),
+		Subject:               pkix.Name{CommonName: "Card"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyAgreement,
+		BasicConstraintsValid: true,
+	}
+	leafDER, _ = x509.CreateCertificate(rand.Reader, leafTmpl, interCert, &leafKey.PublicKey, interKey)
+	return
+}
+
+// buildBF21 wraps a sequence of DER certificates in BF21 (cert store)
+// containing 7F21 (single certificate) entries — same shape the card
+// returns from GET DATA on the cert store.
+func buildBF21(certs ...[]byte) []byte {
+	var children []byte
+	for _, c := range certs {
+		// 7F21 with cert DER
+		children = append(children, 0x7F, 0x21)
+		if len(c) < 0x80 {
+			children = append(children, byte(len(c)))
+		} else if len(c) < 0x100 {
+			children = append(children, 0x81, byte(len(c)))
+		} else {
+			children = append(children, 0x82, byte(len(c)>>8), byte(len(c)))
+		}
+		children = append(children, c...)
+	}
+	// Wrap in BF21
+	var out []byte
+	out = append(out, 0xBF, 0x21)
+	if len(children) < 0x80 {
+		out = append(out, byte(len(children)))
+	} else if len(children) < 0x100 {
+		out = append(out, 0x81, byte(len(children)))
+	} else {
+		out = append(out, 0x82, byte(len(children)>>8), byte(len(children)))
+	}
+	out = append(out, children...)
+	return out
+}
+
+func TestExtractCardPublicKey_ChainWithIntermediate(t *testing.T) {
+	rootDER, interDER, leafDER := makeChain(t)
+	rootCert, _ := x509.ParseCertificate(rootDER)
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+
+	// Bundle ordered root, intermediate, leaf — leaf is last.
+	bundle := buildBF21(rootDER, interDER, leafDER)
+
+	key, err := extractCardPublicKey(bundle, roots)
+	if err != nil {
+		t.Fatalf("chain with intermediate should validate: %v", err)
+	}
+	if key == nil {
+		t.Fatal("expected non-nil ECDH key")
+	}
+}
+
+func TestExtractCardPublicKey_ChainWithoutIntermediateFails(t *testing.T) {
+	// Sanity: a leaf signed by an intermediate but presented WITHOUT
+	// the intermediate in the bundle must NOT validate against the
+	// root alone — that's exactly the case x509.Verify can't bridge,
+	// so we confirm the test setup is meaningful (otherwise the
+	// positive test above would prove nothing).
+	rootDER, _, leafDER := makeChain(t)
+	rootCert, _ := x509.ParseCertificate(rootDER)
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+
+	bundle := buildBF21(leafDER) // intermediate intentionally omitted
+
+	if _, err := extractCardPublicKey(bundle, roots); err == nil {
+		t.Fatal("leaf-only bundle should not validate when intermediate is required")
+	}
 }

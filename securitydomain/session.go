@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
+	"errors"
 	"fmt"
 
 	scp "github.com/PeculiarVentures/scp"
@@ -52,10 +53,19 @@ type Session struct {
 //	sd, err := securitydomain.Open(ctx, t, scp03.DefaultKeys, 0x00)
 //	defer sd.Close()
 func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, keyVersion byte) (*Session, error) {
+	// Validate the static DEK at the API boundary so configuration
+	// mistakes (all-zero key, wrong length) surface here rather than
+	// at the first PUT KEY call. The same helper backs OpenWithSession
+	// and requireDEK so all three paths agree on what a usable DEK
+	// looks like.
+	if err := validateDEK(keys.DEK); err != nil {
+		return nil, fmt.Errorf("securitydomain: %w", err)
+	}
+
 	cfg := &scp03.Config{
 		Keys:              keys,
 		KeyVersion:        keyVersion,
-		SecurityDomainAID: AIDSecurityDomain,
+		SelectAID:         AIDSecurityDomain,
 		SecurityLevel:     channel.LevelFull,
 	}
 
@@ -81,7 +91,7 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 	if cfg == nil {
 		cfg = session.DefaultConfig()
 	}
-	cfg.SecurityDomainAID = AIDSecurityDomain
+	cfg.SelectAID = AIDSecurityDomain
 	cfg.ApplicationAID = nil
 
 	scpSess, err := session.Open(ctx, t, cfg)
@@ -97,19 +107,61 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 }
 
 // OpenWithSession wraps an existing authenticated scp.Session.
-// If the session was established with SCP03, provide the static DEK
-// so that PUT KEY operations can encrypt key material.
-func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) *Session {
+//
+// If the session was established with SCP03 and the caller intends to
+// perform PUT KEY operations, supply the static DEK so key material can
+// be encrypted before transmission. The DEK is validated at construction
+// time — an all-zero or oversized DEK is rejected immediately rather
+// than at first use, so configuration mistakes surface at the API
+// boundary.
+//
+// Pass dek=nil if the caller will not invoke PUT KEY (or is using
+// SCP11, where there is no separate DEK). PUT KEY will then return
+// ErrNotAuthenticated.
+func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) (*Session, error) {
+	if scpSess == nil {
+		return nil, errors.New("securitydomain: scp.Session is required")
+	}
+	if t == nil {
+		return nil, errors.New("securitydomain: transport is required")
+	}
 	s := &Session{
 		scpSession:    scpSess,
 		transport:     t,
 		authenticated: true,
 	}
 	if len(dek) > 0 {
+		if err := validateDEK(dek); err != nil {
+			return nil, fmt.Errorf("securitydomain: %w", err)
+		}
 		s.dek = make([]byte, len(dek))
 		copy(s.dek, dek)
 	}
-	return s
+	return s, nil
+}
+
+// validateDEK enforces the structural and security requirements on a
+// session DEK supplied at the API boundary. The same check is reapplied
+// at use time by requireDEK to defend against later mutation, but
+// catching it here means callers see the failure where they made it.
+func validateDEK(dek []byte) error {
+	switch len(dek) {
+	case 16, 24, 32:
+		// AES-128 / AES-192 / AES-256.
+	default:
+		return fmt.Errorf("DEK must be 16, 24, or 32 bytes; got %d", len(dek))
+	}
+	allZero := true
+	for _, b := range dek {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return errors.New("DEK is all zero; refusing to use a known key")
+	}
+	return nil
 }
 
 // OpenUnauthenticated opens a read-only session to the Security Domain.
@@ -161,7 +213,12 @@ func (s *Session) transmitRaw(ctx context.Context, cmd *apdu.Command) (*apdu.Res
 	return s.transport.Transmit(ctx, cmd)
 }
 
-// transmitCollectAll handles GET RESPONSE chaining.
+// transmitCollectAll handles GET RESPONSE chaining through the secure
+// channel when authenticated, or via the unauthenticated transport path
+// otherwise. Both paths share the same iteration- and byte-count caps
+// from the transport package — a hostile or buggy card cannot loop the
+// host indefinitely or coerce unbounded memory growth, regardless of
+// whether secure messaging is engaged.
 func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	if s.authenticated && s.scpSession != nil {
 		resp, err := s.scpSession.Transmit(ctx, cmd)
@@ -170,7 +227,13 @@ func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*a
 		}
 		var allData []byte
 		allData = append(allData, resp.Data...)
-		for resp.IsMoreData() {
+		for i := 0; resp.IsMoreData(); i++ {
+			if i >= transport.MaxGetResponseIterations {
+				return nil, fmt.Errorf("GET RESPONSE exceeded %d iterations", transport.MaxGetResponseIterations)
+			}
+			if len(allData) > transport.MaxCollectedResponseBytes {
+				return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", transport.MaxCollectedResponseBytes)
+			}
 			getResp := apdu.NewGetResponse(resp.SW2)
 			resp, err = s.scpSession.Transmit(ctx, getResp)
 			if err != nil {
@@ -194,18 +257,47 @@ func (s *Session) requireDEK() error {
 	if len(s.dek) == 0 {
 		return fmt.Errorf("%w: session DEK not available (SCP03 session required for PUT KEY)", ErrNotAuthenticated)
 	}
+	// Re-validate at use time. Construction-time validation in Open
+	// and OpenWithSession should already have caught a bad DEK, but
+	// running the same checks here means construction and use cannot
+	// drift if validateDEK gets stricter in the future, and it
+	// defends against any later mutation of s.dek.
+	if err := validateDEK(s.dek); err != nil {
+		return fmt.Errorf("%w: %w", ErrNotAuthenticated, err)
+	}
 	return nil
 }
 
-// transmitWithChaining handles command chaining for large payloads.
+// transmitWithChaining handles large payloads using ISO 7816-4 APDU
+// chaining (CLA bit 5).
+//
+// For payloads ≤ chunkBudget bytes, transmits as-is. For larger
+// payloads, splits into chained APDUs whose wrapped on-wire form stays
+// within short-Lc (≤ 255 bytes):
+//
+//   - When authenticated through SCP, each chunk is sized to
+//     secureWrapSafeBlock (223) so that AES-CBC padding + MAC still
+//     fits in a short APDU after channel.Wrap.
+//   - When unauthenticated, each chunk is sized to 255 bytes; nothing
+//     inflates the wire size.
+//
+// STORE DATA is explicitly refused — it has its own application-level
+// chaining protocol; callers must use transmitStoreDataChained.
 func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
-	if len(cmd.Data) <= 255 {
+	if cmd.INS == insStoreData {
+		return nil, fmt.Errorf("transmitWithChaining must not be used for STORE DATA; use transmitStoreDataChained")
+	}
+
+	chunkBudget := 255
+	if s.authenticated && s.scpSession != nil {
+		chunkBudget = secureWrapSafeBlock
+	}
+
+	if len(cmd.Data) <= chunkBudget {
 		return s.transmit(ctx, cmd)
 	}
-	cmds, err := apdu.ChainCommands(cmd)
-	if err != nil {
-		return nil, err
-	}
+
+	cmds := chainCommandsAt(cmd, chunkBudget)
 	var lastResp *apdu.Response
 	for i, c := range cmds {
 		resp, err := s.transmit(ctx, c)
@@ -214,6 +306,103 @@ func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (
 		}
 		if i < len(cmds)-1 && !resp.IsSuccess() {
 			return resp, resp.Error()
+		}
+		lastResp = resp
+	}
+	return lastResp, nil
+}
+
+// chainCommandsAt splits cmd.Data into ISO 7816-4 chained APDUs whose
+// data fields are at most chunkSize bytes. Intermediate APDUs have
+// CLA bit 5 set; the final APDU keeps the original CLA and Le.
+func chainCommandsAt(cmd *apdu.Command, chunkSize int) []*apdu.Command {
+	if chunkSize <= 0 {
+		chunkSize = 255
+	}
+	if len(cmd.Data) <= chunkSize {
+		return []*apdu.Command{cmd}
+	}
+	var cmds []*apdu.Command
+	data := cmd.Data
+	for len(data) > chunkSize {
+		cmds = append(cmds, &apdu.Command{
+			CLA:  cmd.CLA | 0x10, // chaining bit
+			INS:  cmd.INS,
+			P1:   cmd.P1,
+			P2:   cmd.P2,
+			Data: data[:chunkSize],
+			Le:   -1,
+		})
+		data = data[chunkSize:]
+	}
+	cmds = append(cmds, &apdu.Command{
+		CLA:  cmd.CLA,
+		INS:  cmd.INS,
+		P1:   cmd.P1,
+		P2:   cmd.P2,
+		Data: data,
+		Le:   cmd.Le,
+	})
+	return cmds
+}
+
+// secureWrapSafeBlock is the largest plaintext payload that, after
+// AES-CBC encryption with ISO/IEC 9797-1 method-2 padding plus a
+// 16-byte C-MAC, still fits in a short-form APDU (Lc ≤ 255):
+//
+//	max wire bytes = ceil((N + 1) / 16) * 16 + macSize ≤ 255
+//
+// For macSize = 16 (S16, the worst case), the largest N that satisfies
+// the inequality is 223: padded(223) = 224, plus 16-byte MAC = 240,
+// which fits. For macSize = 8 the safe value is 239; we pick the
+// universal-safe value so the chunk size is independent of the
+// negotiated SCP mode and the on-wire APDU stays short even under
+// full secure messaging.
+//
+// Cards without extended-length APDU support (e.g. older YubiKey
+// firmware) accept short APDUs only, so honoring this bound is what
+// keeps chained management commands portable across hardware.
+const secureWrapSafeBlock = 223
+
+// storeDataMaxBlock is the maximum plaintext per STORE DATA block.
+// Set to secureWrapSafeBlock so the on-wire APDU stays ≤ 255 bytes
+// after secure-messaging wrap.
+const storeDataMaxBlock = secureWrapSafeBlock
+
+// transmitStoreDataChained sends a STORE DATA payload that may exceed a
+// single APDU using GP application-level chaining (§11.11). The payload
+// is split into ≤255-byte blocks, each block is sent as an individual
+// STORE DATA APDU with P2 = block number, P1 b8 = 0 for all but the last.
+// Each block goes through secure messaging individually (no plaintext
+// pre-splitting after wrapping).
+func (s *Session) transmitStoreDataChained(ctx context.Context, payload []byte) (*apdu.Response, error) {
+	if len(payload) == 0 {
+		return s.transmit(ctx, storeDataCmd(nil))
+	}
+	if len(payload) <= storeDataMaxBlock {
+		return s.transmit(ctx, storeDataCmd(payload))
+	}
+
+	totalBlocks := (len(payload) + storeDataMaxBlock - 1) / storeDataMaxBlock
+	if totalBlocks > 256 {
+		return nil, fmt.Errorf("STORE DATA payload requires %d blocks; P2 block number exceeds 0xFF", totalBlocks)
+	}
+
+	var lastResp *apdu.Response
+	for i := 0; i < totalBlocks; i++ {
+		start := i * storeDataMaxBlock
+		end := start + storeDataMaxBlock
+		if end > len(payload) {
+			end = len(payload)
+		}
+		isLast := i == totalBlocks-1
+		cmd := storeDataBlockCmd(byte(i), isLast, payload[start:end])
+		resp, err := s.transmit(ctx, cmd)
+		if err != nil {
+			return nil, fmt.Errorf("STORE DATA block %d/%d: %w", i, totalBlocks, err)
+		}
+		if !isLast && !resp.IsSuccess() {
+			return resp, fmt.Errorf("STORE DATA block %d/%d: %w", i, totalBlocks, resp.Error())
 		}
 		lastResp = resp
 	}
@@ -499,9 +688,7 @@ func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs
 	}
 
 	payload := storeCertificatesData(ref, derCerts)
-	cmd := storeDataCmd(payload)
-
-	resp, err := s.transmitWithChaining(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store certificates: %w", err)
 	}
@@ -554,9 +741,7 @@ func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byt
 	}
 
 	payload := storeCaIssuerData(ref, ski)
-	cmd := storeDataCmd(payload)
-
-	resp, err := s.transmit(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store CA issuer: %w", err)
 	}
@@ -581,8 +766,7 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 		return err
 	}
 
-	cmd := storeDataCmd(payload)
-	resp, err := s.transmit(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store allowlist: %w", err)
 	}
@@ -614,13 +798,13 @@ func (s *Session) GetData(ctx context.Context, tag uint16, data []byte) ([]byte,
 	return resp.Data, nil
 }
 
-// StoreData sends a raw STORE DATA command. Requires authentication.
+// StoreData sends a STORE DATA command, fragmenting the payload into
+// blocks if it exceeds a single APDU.
 func (s *Session) StoreData(ctx context.Context, data []byte) error {
 	if err := s.requireAuth(); err != nil {
 		return err
 	}
-	cmd := storeDataCmd(data)
-	resp, err := s.transmit(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, data)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store data: %w", err)
 	}

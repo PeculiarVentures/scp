@@ -50,6 +50,32 @@ type SessionKeys struct {
 	MACChain []byte // Initial MAC chaining value (all zeros)
 }
 
+// Clone returns a deep copy of the session keys. Callers that obtain
+// a SessionKeys value from a session's SessionKeys() method receive
+// a Clone so they cannot accidentally (or maliciously) mutate the
+// keys the session is actively using.
+func (k *SessionKeys) Clone() *SessionKeys {
+	if k == nil {
+		return nil
+	}
+	cp := func(b []byte) []byte {
+		if b == nil {
+			return nil
+		}
+		out := make([]byte, len(b))
+		copy(out, b)
+		return out
+	}
+	return &SessionKeys{
+		SENC:     cp(k.SENC),
+		SMAC:     cp(k.SMAC),
+		SRMAC:    cp(k.SRMAC),
+		DEK:      cp(k.DEK),
+		Receipt:  cp(k.Receipt),
+		MACChain: cp(k.MACChain),
+	}
+}
+
 // X963KDF implements the X9.63 Key Derivation Function as specified in
 // BSI TR-03111 and used by GP SCP11 for deriving key material from ECDH
 // shared secrets.

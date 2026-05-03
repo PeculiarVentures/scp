@@ -31,7 +31,9 @@ func TestEndToEnd_SCP11b_Handshake(t *testing.T) {
 	//   3. INTERNAL AUTHENTICATE (ECDH key agreement)
 	//   4. Session key derivation + receipt verification
 	//   5. SELECT PIV application (encrypted + MACed)
-	sess, err := session.Open(ctx, transport, session.DefaultConfig())
+	cfg := session.DefaultConfig()
+	cfg.InsecureSkipCardAuthentication = true // mock card self-signed key
+	sess, err := session.Open(ctx, transport, cfg)
 	if err != nil {
 		t.Fatalf("session.Open: %v", err)
 	}
@@ -51,11 +53,12 @@ func TestEndToEnd_SCP11b_EchoCommand(t *testing.T) {
 
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:           session.SCP11b,
-		SecurityDomainAID: session.AIDSecurityDomain,
-		ApplicationAID:    nil, // Don't auto-select an app
-		KeyID:             0x13,
-		KeyVersion:        0x01,
+		Variant:                        session.SCP11b,
+		SelectAID:                      session.AIDSecurityDomain,
+		ApplicationAID:                 nil, // Don't auto-select an app
+		KeyID:                          0x13,
+		KeyVersion:                     0x01,
+		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
 		t.Fatalf("session.Open: %v", err)
@@ -95,11 +98,12 @@ func TestEndToEnd_SCP11b_MultipleCommands(t *testing.T) {
 
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:           session.SCP11b,
-		SecurityDomainAID: session.AIDSecurityDomain,
-		ApplicationAID:    nil,
-		KeyID:             0x13,
-		KeyVersion:        0x01,
+		Variant:                        session.SCP11b,
+		SelectAID:                      session.AIDSecurityDomain,
+		ApplicationAID:                 nil,
+		KeyID:                          0x13,
+		KeyVersion:                     0x01,
+		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
 		t.Fatalf("session.Open: %v", err)
@@ -137,7 +141,10 @@ func TestEndToEnd_SCP11b_PIVGenerateKey(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sess, err := session.Open(ctx, card.Transport(), session.DefaultConfig())
+	cfg := session.DefaultConfig()
+	cfg.ApplicationAID = session.AIDPIV
+	cfg.InsecureSkipCardAuthentication = true
+	sess, err := session.Open(ctx, card.Transport(), cfg)
 	if err != nil {
 		t.Fatalf("session.Open: %v", err)
 	}
@@ -176,11 +183,12 @@ func TestEndToEnd_SCP11b_EmptyPayload(t *testing.T) {
 
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:           session.SCP11b,
-		SecurityDomainAID: session.AIDSecurityDomain,
-		ApplicationAID:    nil,
-		KeyID:             0x13,
-		KeyVersion:        0x01,
+		Variant:                        session.SCP11b,
+		SelectAID:                      session.AIDSecurityDomain,
+		ApplicationAID:                 nil,
+		KeyID:                          0x13,
+		KeyVersion:                     0x01,
+		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
 		t.Fatalf("session.Open: %v", err)
@@ -230,11 +238,12 @@ func TestEndToEnd_SCP11b_NoReceipt(t *testing.T) {
 
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:           session.SCP11b,
-		SecurityDomainAID: session.AIDSecurityDomain,
-		ApplicationAID:    nil,
-		KeyID:             0x13,
-		KeyVersion:        0x01,
+		Variant:                        session.SCP11b,
+		SelectAID:                      session.AIDSecurityDomain,
+		ApplicationAID:                 nil,
+		KeyID:                          0x13,
+		KeyVersion:                     0x01,
+		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
 		t.Fatalf("session.Open (SCP11b, no receipt): %v", err)
@@ -300,13 +309,14 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 
 	ctx := context.Background()
 	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:           session.SCP11a,
-		SecurityDomainAID: session.AIDSecurityDomain,
-		ApplicationAID:    nil,
-		KeyID:             0x11, // SCP11a KID
-		KeyVersion:        0x01,
-		OCEPrivateKey:     oceKey,
-		OCECertificate:    oceCert,
+		Variant:                        session.SCP11a,
+		SelectAID:                      session.AIDSecurityDomain,
+		ApplicationAID:                 nil,
+		KeyID:                          0x11, // SCP11a KID
+		KeyVersion:                     0x01,
+		OCEPrivateKey:                  oceKey,
+		OCECertificate:                 oceCert,
+		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
 		t.Fatalf("session.Open (SCP11a): %v", err)

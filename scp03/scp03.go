@@ -10,8 +10,8 @@
 // # Protocol Flow
 //
 //	Host                              Card
-//	 │── INITIALIZE UPDATE ──────────>│  host challenge (8 bytes)
-//	 │<─ card challenge + cryptogram ─│  key diversification data
+//	 │── INITIALIZE UPDATE ──────────>│  host challenge (8 bytes S8 / 16 bytes S16)
+//	 │<─ card challenge + cryptogram ─│  key diversification data, iParam selects S8/S16
 //	 │                                │
 //	 │   derive session keys (S-ENC, S-MAC, S-RMAC)
 //	 │   verify card cryptogram
@@ -70,16 +70,22 @@ type Config struct {
 	// Default: 0x00 (card chooses first available).
 	KeyVersion byte
 
-	// HostChallenge is the 8-byte random value used in INITIALIZE UPDATE.
-	// If nil, a random challenge is generated.
+	// HostChallenge is the random value used in INITIALIZE UPDATE.
+	// 8 bytes selects S8 (8-byte cryptograms and MACs); 16 bytes
+	// selects S16. If nil, a random 8-byte challenge is generated.
 	HostChallenge []byte
 
-	// SecurityDomainAID is the AID to SELECT before the handshake.
-	// If nil, no SELECT is sent (assumes the SD is already selected).
-	SecurityDomainAID []byte
+	// SelectAID is the applet AID to SELECT before the handshake.
+	// The applet's SCP03 key set is what the handshake authenticates
+	// against — typically the Issuer Security Domain, but any applet
+	// holding an SCP03 key set is valid.
+	// If nil, no SELECT is sent (assumes the target is already selected).
+	SelectAID []byte
 
-	// ApplicationAID is the target applet to SELECT after the secure
-	// channel is established. If nil, no application SELECT is performed.
+	// ApplicationAID is an optional applet to SELECT through the
+	// secure channel after the handshake. Note: on YubiKey, doing
+	// this terminates the SCP session — set SelectAID instead and
+	// leave this nil.
 	ApplicationAID []byte
 
 	// SecurityLevel controls which secure messaging operations to apply.
@@ -111,14 +117,15 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		transport: t,
 	}
 
-	// Step 1: SELECT Security Domain if configured.
-	if len(cfg.SecurityDomainAID) > 0 {
-		resp, err := t.Transmit(ctx, apdu.NewSelect(cfg.SecurityDomainAID))
+	// Step 1: SELECT the target applet (whose SCP03 key set we
+	// authenticate against). Skipped if SelectAID is nil.
+	if len(cfg.SelectAID) > 0 {
+		resp, err := t.Transmit(ctx, apdu.NewSelect(cfg.SelectAID))
 		if err != nil {
-			return nil, fmt.Errorf("select SD: %w", err)
+			return nil, fmt.Errorf("select applet: %w", err)
 		}
 		if !resp.IsSuccess() {
-			return nil, fmt.Errorf("select SD: %w", resp.Error())
+			return nil, fmt.Errorf("select applet: %w", resp.Error())
 		}
 	}
 
@@ -130,8 +137,8 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 			return nil, fmt.Errorf("generate host challenge: %w", err)
 		}
 	}
-	if len(hostChallenge) != 8 {
-		return nil, errors.New("host challenge must be 8 bytes")
+	if len(hostChallenge) != 8 && len(hostChallenge) != 16 {
+		return nil, errors.New("host challenge must be 8 bytes (S8) or 16 bytes (S16)")
 	}
 
 	// Step 3: Send INITIALIZE UPDATE.
@@ -183,9 +190,9 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		SENC:     senc,
 		SMAC:     smac,
 		SRMAC:    srmac,
-		DEK:      make([]byte, keyLen), // DEK derived on demand
-		Receipt:  nil,                  // SCP03 doesn't use receipts
-		MACChain: make([]byte, 16),     // Start with zeros
+		DEK:      nil,              // SCP03 secure messaging does not derive a session DEK
+		Receipt:  nil,              // SCP03 doesn't use receipts
+		MACChain: make([]byte, 16), // Start with zeros
 	}
 
 	// Step 6: Verify card cryptogram.
@@ -193,7 +200,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	// derivation scheme with S-MAC as the base key and derivation
 	// constants 0x00 (card) / 0x01 (host). See also GlobalPlatformPro
 	// GPSession.java which uses macKey for cryptogram computation.
-	expectedCC, err := calculateCryptogram(smac, 0x00, kdfContext, keyLen)
+	expectedCC, err := calculateCryptogram(smac, 0x00, kdfContext, iur.macSize)
 	if err != nil {
 		return nil, fmt.Errorf("calculate card cryptogram: %w", err)
 	}
@@ -202,13 +209,12 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 
 	// Step 7: Calculate host cryptogram (also derived with S-MAC).
-	hostCryptogram, err := calculateCryptogram(smac, 0x01, kdfContext, keyLen)
+	hostCryptogram, err := calculateCryptogram(smac, 0x01, kdfContext, iur.macSize)
 	if err != nil {
 		return nil, fmt.Errorf("calculate host cryptogram: %w", err)
 	}
 
 	// Step 8: Send EXTERNAL AUTHENTICATE.
-	s.channel = channel.New(s.sessionKeys, cfg.SecurityLevel)
 
 	// The EXTERNAL AUTHENTICATE command itself is MACed with the session keys.
 	extAuthData := hostCryptogram
@@ -221,8 +227,10 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		Le:   -1,
 	}
 
-	// Wrap with C-MAC only (no encryption for EXTERNAL AUTHENTICATE).
-	wrappedExtAuth, err := s.channel.Wrap(extAuthCmd)
+	// EXTERNAL AUTHENTICATE is the command that establishes the secure
+	// channel. It is C-MACed, but its host cryptogram is not C-ENC encrypted,
+	// even when the requested post-authentication level includes C-DEC.
+	wrappedExtAuth, err := wrapExternalAuthenticate(extAuthCmd, s.sessionKeys, iur.macSize)
 	if err != nil {
 		return nil, fmt.Errorf("wrap EXTERNAL AUTHENTICATE: %w", err)
 	}
@@ -235,19 +243,19 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, fmt.Errorf("EXTERNAL AUTHENTICATE: %w", resp.Error())
 	}
 
+	s.channel = channel.NewWithMACSize(s.sessionKeys, cfg.SecurityLevel, iur.macSize)
+
 	// Step 9: SELECT application if configured.
+	// Routed through Session.Transmit so R-MAC is verified on the
+	// response when negotiated — the post-auth SELECT response is
+	// part of the authenticated channel and must not bypass the
+	// secure-messaging unwrap.
 	if len(cfg.ApplicationAID) > 0 {
-		selectCmd := apdu.NewSelect(cfg.ApplicationAID)
-		wrappedSelect, err := s.channel.Wrap(selectCmd)
-		if err != nil {
-			return nil, fmt.Errorf("wrap SELECT app: %w", err)
-		}
-		resp, err = t.Transmit(ctx, wrappedSelect)
+		resp, err = s.Transmit(ctx, apdu.NewSelect(cfg.ApplicationAID))
 		if err != nil {
 			return nil, fmt.Errorf("SELECT app: %w", err)
 		}
 		if !resp.IsSuccess() {
-			// Unwrap to get the real error
 			return nil, fmt.Errorf("SELECT app: %w", resp.Error())
 		}
 	}
@@ -266,6 +274,16 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 	if err != nil {
 		return nil, fmt.Errorf("transmit: %w", err)
 	}
+	if s.config.SecurityLevel&channel.LevelRMAC != 0 {
+		unwrapped, err := s.channel.Unwrap(resp)
+		if err != nil {
+			// GP §4.8: MAC verification failure terminates the channel.
+			s.Close()
+			return nil, fmt.Errorf("unwrap response (session terminated): %w", err)
+		}
+		return unwrapped, nil
+	}
+
 	if !resp.IsSuccess() {
 		return resp, nil
 	}
@@ -273,7 +291,6 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 	if len(resp.Data) > 0 {
 		unwrapped, err := s.channel.Unwrap(resp)
 		if err != nil {
-			// GP §4.8: MAC verification failure terminates the channel.
 			s.Close()
 			return nil, fmt.Errorf("unwrap response (session terminated): %w", err)
 		}
@@ -295,9 +312,11 @@ func (s *Session) Close() {
 	s.channel = nil
 }
 
-// SessionKeys returns the derived session keys for audit or debugging.
+// SessionKeys returns a defensive copy of the session keys for audit
+// or debugging. Mutations to the returned struct do not affect the
+// session's live key material.
 func (s *Session) SessionKeys() *kdf.SessionKeys {
-	return s.sessionKeys
+	return s.sessionKeys.Clone()
 }
 
 // Protocol returns "SCP03".
@@ -321,10 +340,11 @@ type initUpdateResponse struct {
 	keyDiversificationData []byte // 10 bytes
 	keyVersion             byte
 	scpID                  byte   // Should be 0x03
-	iParam                 byte   // Implementation options
-	cardChallenge          []byte // 8 bytes
-	cardCryptogram         []byte // 8 bytes
+	iParam                 byte   // Implementation options (b1 = S16 if set)
+	cardChallenge          []byte // 8 bytes (S8) or 16 bytes (S16)
+	cardCryptogram         []byte // 8 bytes (S8) or 16 bytes (S16)
 	sequenceCounter        []byte // 3 bytes (optional)
+	macSize                int    // 8 for S8, 16 for S16
 }
 
 // parseInitUpdateResponse parses the card's response to INITIALIZE UPDATE.
@@ -339,8 +359,6 @@ func parseInitUpdateResponse(data []byte) (*initUpdateResponse, error) {
 		keyVersion:             data[10],
 		scpID:                  data[11],
 		iParam:                 data[12],
-		cardChallenge:          data[13:21],
-		cardCryptogram:         data[21:29],
 	}
 
 	// Verify SCP identifier.
@@ -348,9 +366,25 @@ func parseInitUpdateResponse(data []byte) (*initUpdateResponse, error) {
 		return nil, fmt.Errorf("unexpected SCP identifier: 0x%02X (expected 0x03)", r.scpID)
 	}
 
-	// Optional: sequence counter (3 bytes) may follow.
-	if len(data) >= 32 {
-		r.sequenceCounter = data[29:32]
+	if r.iParam&0x01 != 0 {
+		// S16 mode uses 16-byte host/card challenges and 16-byte cryptograms.
+		if len(data) < 45 {
+			return nil, fmt.Errorf("INITIALIZE UPDATE S16 response too short: %d bytes (need 45+)", len(data))
+		}
+		r.cardChallenge = data[13:29]
+		r.cardCryptogram = data[29:45]
+		r.macSize = 16
+		if len(data) >= 48 {
+			r.sequenceCounter = data[45:48]
+		}
+	} else {
+		r.cardChallenge = data[13:21]
+		r.cardCryptogram = data[21:29]
+		r.macSize = 8
+		// Optional: sequence counter (3 bytes) may follow.
+		if len(data) >= 32 {
+			r.sequenceCounter = data[29:32]
+		}
 	}
 
 	return r, nil
@@ -370,9 +404,9 @@ func deriveSCP03Key(staticKey []byte, derivConst byte, context []byte, keyLen in
 	var derived []byte
 	for counter := byte(1); counter <= byte(iterations); counter++ {
 		var input []byte
-		input = append(input, make([]byte, 11)...) // 11 zero bytes
-		input = append(input, derivConst)           // derivation constant
-		input = append(input, 0x00)                 // separation indicator
+		input = append(input, make([]byte, 11)...)                   // 11 zero bytes
+		input = append(input, derivConst)                            // derivation constant
+		input = append(input, 0x00)                                  // separation indicator
 		input = append(input, byte(keyLenBits>>8), byte(keyLenBits)) // L in bits
 		input = append(input, counter)
 		input = append(input, context...)
@@ -391,9 +425,13 @@ func deriveSCP03Key(staticKey []byte, derivConst byte, context []byte, keyLen in
 // GP Amendment D §6.2.2: The authentication cryptograms are computed
 // using the data derivation scheme with S-MAC as the base key.
 // Derivation constant 0x00 = card cryptogram, 0x01 = host cryptogram.
-// The output is L=64 bits (8 bytes) for S8 mode.
-func calculateCryptogram(smac []byte, derivConst byte, context []byte, keyLen int) ([]byte, error) {
-	cryptoLenBits := 64
+// Output is L=64 bits (8 bytes) for S8 mode, L=128 bits (16 bytes) for
+// S16 mode, selected by macSize.
+func calculateCryptogram(smac []byte, derivConst byte, context []byte, macSize int) ([]byte, error) {
+	if macSize != 8 && macSize != 16 {
+		return nil, fmt.Errorf("unsupported cryptogram length: %d", macSize)
+	}
+	cryptoLenBits := macSize * 8
 	var input []byte
 	input = append(input, make([]byte, 11)...)
 	input = append(input, derivConst)
@@ -407,7 +445,44 @@ func calculateCryptogram(smac []byte, derivConst byte, context []byte, keyLen in
 		return nil, err
 	}
 
-	return mac[:8], nil
+	return mac[:macSize], nil
+}
+
+func wrapExternalAuthenticate(cmd *apdu.Command, keys *kdf.SessionKeys, macSize int) (*apdu.Command, error) {
+	if len(keys.MACChain) != 16 {
+		keys.MACChain = make([]byte, 16)
+	}
+
+	lc := len(cmd.Data) + macSize
+	if lc > 255 {
+		return nil, fmt.Errorf("EXTERNAL AUTHENTICATE data too large: %d", lc)
+	}
+
+	newCLA := cmd.CLA | 0x04
+	var macInput []byte
+	macInput = append(macInput, keys.MACChain...)
+	macInput = append(macInput, newCLA, cmd.INS, cmd.P1, cmd.P2, byte(lc))
+	macInput = append(macInput, cmd.Data...)
+
+	mac, err := cmac.AESCMAC(keys.SMAC, macInput)
+	if err != nil {
+		return nil, fmt.Errorf("compute EXTERNAL AUTHENTICATE C-MAC: %w", err)
+	}
+	keys.MACChain = mac
+
+	var wrappedData []byte
+	wrappedData = append(wrappedData, cmd.Data...)
+	wrappedData = append(wrappedData, mac[:macSize]...)
+
+	return &apdu.Command{
+		CLA:            newCLA,
+		INS:            cmd.INS,
+		P1:             cmd.P1,
+		P2:             cmd.P2,
+		Data:           wrappedData,
+		Le:             cmd.Le,
+		ExtendedLength: cmd.ExtendedLength,
+	}, nil
 }
 
 func constantTimeEqual(a, b []byte) bool {

@@ -13,17 +13,22 @@ Both protocols produce a `scp.Session` with the same `Transmit` method. The cons
 
 ```go
 // SCP03 — symmetric keys
-sess, _ := scp03.Open(ctx, transport, &scp03.Config{
+sess, err := scp03.Open(ctx, transport, &scp03.Config{
     Keys: scp03.StaticKeys{ENC: encKey, MAC: macKey, DEK: dekKey},
 })
 
-// SCP11b — ECDH key agreement
-sess, _ := session.Open(ctx, transport, session.DefaultConfig())
+// SCP11b — ECDH key agreement, with the card's trust anchors
+sess, err := session.Open(ctx, transport, &session.Config{
+    Variant:          session.SCP11b,
+    CardTrustPolicy:  &trust.Policy{Roots: rootPool},
+})
 
 // Both return scp.Session — same API from here on
-resp, _ := sess.Transmit(ctx, myCommand)
+resp, err := sess.Transmit(ctx, myCommand)
 sess.Close()
 ```
+
+`session.Open` requires explicit trust configuration; see [SCP11 Usage](#scp11-usage) below for the required fields and the "test/lab" escape hatch.
 
 ## Architecture
 
@@ -66,7 +71,7 @@ sess.Close()
 | `tlv` | BER-TLV encoding/decoding for GP data structures |
 | `apdu` | ISO 7816-4 command/response APDU types |
 | `transport` | Transport interface and helpers |
-| `piv` | PIV (NIST SP 800-73) command builders |
+| `piv` | YubiKey-flavored PIV command builders (APDU only — no PIV session layer; see package doc) |
 | `mockcard` | Simulated SCP11 Security Domain for testing |
 
 ## Security Domain Management
@@ -133,10 +138,9 @@ SCP03 uses pre-shared symmetric keys. Most cards ship with well-known default ke
 
 ```go
 sess, err := scp03.Open(ctx, transport, &scp03.Config{
-    Keys:              scp03.DefaultKeys,  // TESTING ONLY
-    KeyVersion:        0x01,
-    SecurityDomainAID: session.AIDSecurityDomain,
-    ApplicationAID:    session.AIDPIV,
+    Keys:       scp03.DefaultKeys,  // TESTING ONLY
+    KeyVersion: 0x01,
+    SelectAID:  session.AIDSecurityDomain,
 })
 if err != nil {
     log.Fatal(err)
@@ -154,23 +158,75 @@ resp, err := sess.Transmit(ctx, &apdu.Command{
 SCP11 uses ECDH key agreement with X.509 certificates. Three variants:
 
 ```go
-// SCP11b — card authenticates to host (simplest)
-sess, err := session.Open(ctx, transport, session.DefaultConfig())
+// SCP11b — card authenticates to host
+// IMPORTANT: callers must configure trust. See "Card authentication" below.
+sess, err := session.Open(ctx, transport, &session.Config{
+    Variant:         session.SCP11b,
+    CardTrustPolicy: &trust.Policy{Roots: rootPool},
+})
 
 // SCP11a — mutual authentication with certificates
 sess, err := session.Open(ctx, transport, &session.Config{
     Variant:        session.SCP11a,
     KeyID:          0x11,
     OCEPrivateKey:  myECDSAKey,
-    OCECertificate: myCert,
-})
-
-// SCP11b with trust validation
-sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:         session.SCP11b,
+    OCECertificate: myCert, // must correspond to OCEPrivateKey
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 ```
+
+### Card authentication
+
+`session.Open` fails closed unless one of these is set:
+
+- `CardTrustPolicy` — preferred; full chain validation through the `trust` package, with P-256 enforcement and optional serial/SKI/EKU constraints.
+- `CardTrustAnchors` — full X.509 chain validation against a `*x509.CertPool`. Intermediates from the card's BF21 certificate store are picked up automatically.
+- `InsecureSkipCardAuthentication` — escape hatch for tests and labs only. Without it, `session.Open` against a card that returns a self-signed or proprietary key is rejected before any ECDH.
+
+This is intentional: an SCP11b session against an unauthenticated card is not authenticated key agreement — it is opportunistic encryption against whoever answered the SELECT. Treat the difference as load-bearing.
+
+GP-proprietary SCP11 certificates are *parsed* but not chain-validated. Cards that return GP-proprietary certs only authenticate when paired with `InsecureSkipCardAuthentication = true`, or when `CardTrustPolicy` is configured with a custom validator that handles them.
+
+### Applet selection
+
+`session.Open` SELECTs `cfg.SelectAID` before the handshake. The applet at that AID is the one whose SCP key set the handshake authenticates against. On YubiKey, different applets hold different SCP key sets:
+
+- **Issuer Security Domain** — for Security Domain management. Default in `DefaultConfig()`.
+- **PIV** — for PIV provisioning operations.
+- **OATH, OTP, etc.** — applet-specific.
+
+```go
+// SCP11b against the PIV applet. This opens an authenticated, encrypted
+// channel to PIV — but PIV provisioning operations (key generation,
+// certificate writes, etc.) additionally require PIV management-key
+// authentication, which is a multi-step GENERAL AUTHENTICATE
+// challenge-response not provided by this library. The caller drives
+// that themselves through the channel.
+sess, err := session.Open(ctx, transport, &session.Config{
+    Variant:         session.SCP11b,
+    SelectAID:       session.AIDPIV, // PIV holds its own SCP11 key set on YubiKey
+    CardTrustPolicy: &trust.Policy{Roots: rootPool},
+})
+```
+
+If `cfg.SelectAID` is `nil`, no SELECT is sent — useful when the caller has already SELECTed the target applet through some other path (a test harness, an applet-aware transport, manual setup).
+
+`cfg.ApplicationAID` is a separate optional field that SELECTs a *second* applet through the secure channel after the handshake. Default is `nil`. On YubiKey this is a footgun — selecting a different applet through the channel terminates the SCP session. Set `SelectAID` to your target applet instead and leave `ApplicationAID` at `nil`. The field exists for non-YubiKey hardware that supports cross-applet SCP.
+
+### Variant and curve support
+
+This implementation targets YubiKey 5.x and similar P-256/AES-128 hardware. The supported profile is:
+
+- SCP11a, SCP11b, SCP11c
+- NIST P-256 only
+- AES-128 session keys only
+- Full security level (`C-MAC | C-DEC | R-MAC | R-ENC`) only
+
+GP Amendment F also defines P-384, Brainpool P-256, AES-192/256, and partial security levels for SCP11. Those are out of scope for the SCP11 implementation here. SCP03 supports AES-128/192/256 in S8 and S16 modes; all six combinations are validated against external Samsung OpenSCP transcript vectors.
+
+### SCP11a/c key/certificate consistency
+
+For mutual-auth variants, `Open` verifies that `OCEPrivateKey` corresponds to `OCECertificate` before sending anything to the card. A mismatch is rejected immediately rather than discovered in the second ECDH.
 
 ## Implementing a Transport
 
@@ -192,24 +248,24 @@ Both `scp03.Open` and `session.Open` accept any `Transport`. Whether it's a loca
 go test ./...
 ```
 
-The test suite includes 118 tests covering:
+The suite covers protocol behavior end-to-end (handshake, encrypted echo, MAC chain continuity, error paths) and security regressions (fail-closed trust, DEK validation, error-response R-MAC, resource limits on TLV decode and GET RESPONSE collection).
 
-- **SCP03 end-to-end:** Handshake, encrypted echo, multi-command MAC chain, wrong-key rejection, empty payload counter sync
-- **SCP11 end-to-end:** SCP11b (no receipt), SCP11a (with receipt + cert chaining), PIV key generation, counter sync
-- **Reference vector tests:** Byte-exact verification against published SCP11 test vectors
-- **YubiKey compatibility tests:** APDU byte layout verification against YubiKey 5.7+ expectations
-- **Cross-implementation vectors:** SCP03 KDF, channel MAC, and RMAC vectors from the Yubico .NET SDK
-- **Security Domain management:** APDU construction, TLV parsing, KCV computation, DEK requirements, reset lockout dispatch
-- **Trust validation:** Chain building, fail-closed behavior, serial allowlists, SKI matching, real Yubico OCE certificate chain
+Conformance is checked against external references rather than only against this library's own mock card:
+
+- **GlobalPlatformPro JCOP4** — real-card SCP03 INITIALIZE UPDATE and EXTERNAL AUTHENTICATE dump.
+- **Samsung OpenSCP-Java** — full SCP03 transcript matrix: AES-128, AES-192, AES-256 × S8 and S16 modes (all six cells), each a byte-exact known-answer test using the static keys and host challenges from the Samsung test fixtures.
+- **Yubico .NET SDK** — SCP03 KDF and channel MAC vectors; SCP11 reference test vectors; real Yubico OCE certificate chain.
+
+These are byte-exact known-answer tests using a recording transport, so they catch regressions a mock card couldn't.
 
 ## Specification Compliance
 
 | Spec | Coverage |
 |---|---|
 | GP Card Spec v2.3.1 §11 | Security Domain APDU commands: PUT KEY, DELETE, STORE DATA, GET DATA |
-| GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE, session key derivation, secure messaging |
-| GP Amendment F (SCP11) v1.3 | All three variants (a/b/c), ECKA, X9.63 KDF, receipt verification, S8 and S16 modes |
-| GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC (shared by both protocols) |
+| GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE, session key derivation, secure messaging, S8 and S16 modes |
+| GP Amendment F (SCP11) v1.3 | SCP11a, SCP11b, SCP11c; ECKA; X9.63 KDF; receipt verification |
+| GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC |
 | NIST SP 800-108 | KDF in counter mode with AES-CMAC |
 | NIST SP 800-38B | AES-CMAC |
 | BSI TR-03111 | ECDH with zero-point validation |

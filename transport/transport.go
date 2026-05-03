@@ -10,8 +10,14 @@ package transport
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
+)
+
+const (
+	MaxGetResponseIterations  = 256
+	MaxCollectedResponseBytes = 1 << 20
 )
 
 // Transport is the low-level card communication interface. Implementations
@@ -70,7 +76,13 @@ func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*a
 	var allData []byte
 	allData = append(allData, resp.Data...)
 
-	for resp.IsMoreData() {
+	for i := 0; resp.IsMoreData(); i++ {
+		if i >= MaxGetResponseIterations {
+			return nil, fmt.Errorf("GET RESPONSE exceeded %d iterations", MaxGetResponseIterations)
+		}
+		if len(allData) > MaxCollectedResponseBytes {
+			return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", MaxCollectedResponseBytes)
+		}
 		getResp := apdu.NewGetResponse(resp.SW2)
 		resp, err = t.Transmit(ctx, getResp)
 		if err != nil {

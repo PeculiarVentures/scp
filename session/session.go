@@ -1,10 +1,12 @@
 // Package session implements the SCP11 protocol state machine for
 // establishing a secure channel between an off-card entity (OCE) and
-// a GlobalPlatform Security Domain (SD) on a smart card.
+// an applet on a smart card. The applet typically holds an SCP key
+// set — most commonly the GlobalPlatform Issuer Security Domain, but
+// also PIV, OATH, or any other applet that exposes its own SCP keys.
 //
 // The protocol flow (for SCP11b) is:
 //
-//  1. SELECT the Security Domain AID
+//  1. SELECT the target applet AID (configured via Config.SelectAID)
 //  2. GET DATA to retrieve the card's certificate (CERT.SD.ECKA)
 //     containing the card's static ECDH public key (PK.SD.ECKA)
 //  3. OCE generates an ephemeral ECDH key pair
@@ -66,17 +68,30 @@ type Config struct {
 	// Variant selects SCP11a, SCP11b, or SCP11c.
 	Variant Variant
 
-	// SecurityDomainAID is the AID of the GlobalPlatform Security Domain
-	// that holds the SCP11 keys. The handshake (GET DATA, INTERNAL AUTH)
-	// is performed against this applet.
-	// Default: GP ISD (A0000001510000)
-	SecurityDomainAID []byte
+	// SelectAID is the applet AID to SELECT (unwrapped) before the
+	// SCP handshake begins. The handshake (GET DATA, INTERNAL/MUTUAL
+	// AUTHENTICATE) authenticates against the SCP key set held by
+	// this applet:
+	//
+	//   - For Security Domain management: AIDSecurityDomain (default).
+	//   - For PIV provisioning over SCP on YubiKey: AIDPIV.
+	//
+	// If nil, no SELECT is sent — the caller is expected to have
+	// SELECTed the target applet through some other path (a test
+	// harness, a multiplexing transport, etc.).
+	//
+	// This field replaces the previous SecurityDomainAID, which had
+	// a misleading name: any applet's SCP key set can be the target,
+	// not just the Issuer Security Domain.
+	SelectAID []byte
 
-	// ApplicationAID is the target applet to SELECT after the secure
-	// channel is established. If set, Open() sends a wrapped SELECT
-	// for this AID as the final step. If nil, no application SELECT
-	// is performed and the caller must send their own.
-	// Example: PIV = A000000308
+	// ApplicationAID is an optional second applet to SELECT *through*
+	// the secure channel after the handshake completes. Note: on
+	// YubiKey, SCP is scoped to the SELECTed applet and selecting a
+	// different applet through the channel terminates the session.
+	// Set this to nil for YubiKey use; configure SelectAID instead.
+	// Example (non-YubiKey hardware that supports cross-applet SCP):
+	// AIDPIV = A000000308
 	ApplicationAID []byte
 
 	// KeyID and KeyVersion identify the key set on the card.
@@ -105,6 +120,11 @@ type Config struct {
 	// only extracts the public key after successful validation.
 	// If validation fails, session establishment fails closed.
 	CardTrustPolicy *trust.Policy
+
+	// InsecureSkipCardAuthentication permits SCP11 without validating the
+	// card certificate. This is intended only for tests and labs. Production
+	// callers should configure CardTrustPolicy or CardTrustAnchors.
+	InsecureSkipCardAuthentication bool
 
 	// HostID is the optional OCE identifier included in the KDF shared
 	// info per GP SCP11 §3.1.2. If set, it is appended to the shared
@@ -139,13 +159,22 @@ var (
 )
 
 // DefaultConfig returns a Config for SCP11b with standard defaults.
-// The handshake targets the GP Security Domain, then SELECTs the
-// PIV applet over the secure channel.
+//
+// The handshake targets the GP Issuer Security Domain by default;
+// override SelectAID for SCP against another applet (PIV, OATH, etc.).
+// ApplicationAID is left nil — callers should not SELECT a second
+// applet through the channel, since some platforms (notably YubiKey)
+// terminate an SCP session when a different applet is selected
+// mid-channel; configure SelectAID instead.
+//
+// Trust is also unconfigured by default; the caller must set
+// CardTrustPolicy, CardTrustAnchors, or InsecureSkipCardAuthentication
+// before Open will agree to a key with the card.
 func DefaultConfig() *Config {
 	return &Config{
 		Variant:           SCP11b,
-		SecurityDomainAID: AIDSecurityDomain,
-		ApplicationAID:    AIDPIV,
+		SelectAID:         AIDSecurityDomain,
+		ApplicationAID:    nil,
 		KeyID:             0x13,
 		KeyVersion:        0x01,
 		SecurityLevel:     channel.LevelFull,
@@ -191,10 +220,11 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		state:     StateNew,
 	}
 
-	// Step 1: Select the Security Domain.
-	if err := s.selectSD(ctx); err != nil {
+	// Step 1: SELECT the target applet (whose SCP key set we'll
+	// authenticate against). Skipped if SelectAID is nil.
+	if err := s.selectApplet(ctx); err != nil {
 		s.state = StateFailed
-		return nil, fmt.Errorf("select SD: %w", err)
+		return nil, fmt.Errorf("select applet: %w", err)
 	}
 
 	// Step 2: Retrieve the card's certificate and extract PK.SD.ECKA.
@@ -207,6 +237,20 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	// Both SCP11a and SCP11c are mutual-auth variants that require the OCE
 	// certificate to be provided to the card before MUTUAL AUTHENTICATE.
 	if cfg.Variant == SCP11a || cfg.Variant == SCP11c {
+		if cfg.OCEPrivateKey == nil {
+			return nil, errors.New("OCE private key required for SCP11a/c (mutual-auth variants)")
+		}
+		if cfg.OCECertificate == nil {
+			return nil, errors.New("OCE certificate required for SCP11a/c (mutual-auth variants)")
+		}
+		// Defense-in-depth: ensure the configured private key actually
+		// corresponds to the certificate sent to the card. A mismatch
+		// would either cause MUTUAL AUTHENTICATE to fail (best case) or,
+		// worse, succeed against a permissive card while the host
+		// believes it is presenting one identity but holds another.
+		if err := verifyOCEKeyMatchesCert(cfg.OCEPrivateKey, cfg.OCECertificate); err != nil {
+			return nil, fmt.Errorf("OCE key/certificate mismatch: %w", err)
+		}
 		if err := s.sendOCECertificate(ctx); err != nil {
 			s.state = StateFailed
 			return nil, fmt.Errorf("send OCE cert: %w", err)
@@ -223,10 +267,13 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	s.channel = channel.New(s.sessionKeys, cfg.SecurityLevel)
 	s.state = StateAuthenticated
 
-	// Step 6: If an application AID is configured, SELECT it through
-	// the secure channel. The SCP layer on the YubiKey intercepts all
-	// CCID traffic once the channel is up, so this SELECT (and everything
-	// after it) is encrypted and MACed.
+	// Step 6: If the caller explicitly set ApplicationAID, SELECT the
+	// applet through the secure channel. This is opt-in: the default
+	// config leaves ApplicationAID nil because some platforms — notably
+	// YubiKey — scope the SCP session to the currently selected applet
+	// and selecting a different one terminates the session. The
+	// supported pattern there is to SELECT the target applet first and
+	// then call Open against that applet.
 	if len(cfg.ApplicationAID) > 0 {
 		if err := s.selectApplication(ctx); err != nil {
 			s.state = StateFailed
@@ -295,9 +342,11 @@ func zeroBytes(b []byte) {
 	}
 }
 
-// SessionKeys returns the derived session keys for audit or debugging.
+// SessionKeys returns a defensive copy of the session keys for audit
+// or debugging. Mutations to the returned struct do not affect the
+// session's live key material.
 func (s *Session) SessionKeys() *kdf.SessionKeys {
-	return s.sessionKeys
+	return s.sessionKeys.Clone()
 }
 
 // Protocol returns the protocol variant string (e.g. "SCP11b").
@@ -316,10 +365,18 @@ func (s *Session) Protocol() string {
 
 // --- Protocol Steps ---
 
-func (s *Session) selectSD(ctx context.Context) error {
-	// SELECT the Security Domain — this is UNENCRYPTED since we don't
-	// have a secure channel yet. The SD holds the SCP11 keys.
-	cmd := apdu.NewSelect(s.config.SecurityDomainAID)
+func (s *Session) selectApplet(ctx context.Context) error {
+	// If SelectAID is nil, the caller has already SELECTed the
+	// target applet (e.g. through a test harness) and we just
+	// proceed with the handshake.
+	if len(s.config.SelectAID) == 0 {
+		s.state = StateSelected
+		return nil
+	}
+	// SELECT the target applet — UNENCRYPTED since we don't yet
+	// have a secure channel. That applet's SCP key set is what the
+	// handshake will authenticate against.
+	cmd := apdu.NewSelect(s.config.SelectAID)
 	resp, err := s.transport.Transmit(ctx, cmd)
 	if err != nil {
 		return err
@@ -376,8 +433,20 @@ func (s *Session) getCardCertificate(ctx context.Context) error {
 		return s.validateCardCertChain(resp.Data)
 	}
 
-	// Legacy path: simple key extraction with optional root validation.
-	pubKey, err := extractCardPublicKey(resp.Data, s.config.CardTrustAnchors)
+	return s.legacyExtractAndStoreKey(resp.Data)
+}
+
+// legacyExtractAndStoreKey is the pre-trust-policy code path: it parses
+// the card certificate (or, with a configured trust pool, validates the
+// chain) and stores the static public key for ECDH. It must fail closed
+// when neither CardTrustAnchors nor InsecureSkipCardAuthentication are
+// set — otherwise SCP11b reduces to opportunistic encryption against any
+// responder, which is not authentication.
+func (s *Session) legacyExtractAndStoreKey(data []byte) error {
+	if s.config.CardTrustAnchors == nil && !s.config.InsecureSkipCardAuthentication {
+		return errors.New("SCP11 card certificate validation is required; configure CardTrustPolicy/CardTrustAnchors or set InsecureSkipCardAuthentication for tests")
+	}
+	pubKey, err := extractCardPublicKey(data, s.config.CardTrustAnchors)
 	if err != nil {
 		return fmt.Errorf("extract card public key: %w", err)
 	}
@@ -423,7 +492,7 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 	}
 
 	// PERFORM SECURITY OPERATION sends the OCE certificate chain.
-// GP §7.5: Certificate chaining for PERFORM SECURITY OPERATION.
+	// GP §7.5: Certificate chaining for PERFORM SECURITY OPERATION.
 	//   - Intermediate chunks: CLA |= 0x10 (chaining bit), P1 |= 0x80
 	//   - Final chunk: original CLA, original P1
 	//   - Each chunk max 255 bytes
@@ -445,7 +514,7 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 		p1 := p1Base
 		if !isLast {
 			cla |= 0x10 // Command chaining
-			p1 |= 0x80 // GP §7.5.2.1: more certificate data follows
+			p1 |= 0x80  // GP §7.5.2.1: more certificate data follows
 		}
 
 		cmd := &apdu.Command{
@@ -558,11 +627,14 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	}
 
 	// ShSes = ECDH(SK.OCE or eSK.OCE, PK.SD)
-// GP §3.1.1: For SCP11b, reuse the ephemeral key for ShSes.
+	// GP §3.1.1: For SCP11b, reuse the ephemeral key for ShSes.
 	// For SCP11a/c: use the OCE static private key
 	// For SCP11b: reuse the ephemeral private key (no static key available)
 	var shSesKey *ecdh.PrivateKey
-	if (s.config.Variant == SCP11a || s.config.Variant == SCP11c) && s.config.OCEPrivateKey != nil {
+	if s.config.Variant == SCP11a || s.config.Variant == SCP11c {
+		if s.config.OCEPrivateKey == nil {
+			return errors.New("OCE private key required for SCP11a/c")
+		}
 		// Convert the OCE static ECDSA key to ECDH.
 		oceStaticECDH, err := s.config.OCEPrivateKey.ECDH()
 		if err != nil {
@@ -610,7 +682,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 
 	s.sessionKeys = keys
 
-// GP §5.3.2: macChain is initialized to the receipt for SCP11a/c.
+	// GP §5.3.2: macChain is initialized to the receipt for SCP11a/c.
 
 	if receipt != nil {
 		s.sessionKeys.MACChain = make([]byte, len(receipt))
@@ -619,4 +691,3 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 
 	return nil
 }
-

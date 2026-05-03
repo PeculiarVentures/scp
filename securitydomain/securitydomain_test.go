@@ -2,12 +2,18 @@ package securitydomain
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/hex"
 	"math/big"
 	"testing"
+
+	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/kdf"
+	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // --- KCV tests ---
@@ -256,17 +262,17 @@ func TestDeleteKeyCmd_BothZero(t *testing.T) {
 
 func TestInsForKeyReset(t *testing.T) {
 	tests := []struct {
-		kid       byte
-		wantINS   byte
-		wantProc  bool
+		kid      byte
+		wantINS  byte
+		wantProc bool
 	}{
-		{0x01, insInitializeUpdate, true},  // SCP03
-		{0x02, 0, false},                    // SCP03 sub-key, skip
-		{0x03, 0, false},                    // SCP03 sub-key, skip
-		{0x13, insIntAuth, true},            // SCP11b
-		{0x11, insExtAuth, true},            // SCP11a
-		{0x15, insExtAuth, true},            // SCP11c
-		{0x10, insPerformSecOp, true},       // OCE
+		{0x01, insInitializeUpdate, true}, // SCP03
+		{0x02, 0, false},                  // SCP03 sub-key, skip
+		{0x03, 0, false},                  // SCP03 sub-key, skip
+		{0x13, insIntAuth, true},          // SCP11b
+		{0x11, insExtAuth, true},          // SCP11a
+		{0x15, insExtAuth, true},          // SCP11c
+		{0x10, insPerformSecOp, true},     // OCE
 	}
 	for _, tt := range tests {
 		ins, process := insForKeyReset(tt.kid)
@@ -420,7 +426,11 @@ func TestParseKeyInformation(t *testing.T) {
 func TestParseGeneratedPublicKey_B0TLV(t *testing.T) {
 	// Response should be Tlv(0xB0, point).
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	point := elliptic.Marshal(key.Curve, key.X, key.Y)
+	ecdhPub, err := key.PublicKey.ECDH()
+	if err != nil {
+		t.Fatal(err)
+	}
+	point := ecdhPub.Bytes()
 
 	// Build B0 TLV.
 	var data []byte
@@ -438,7 +448,11 @@ func TestParseGeneratedPublicKey_B0TLV(t *testing.T) {
 
 func TestParseGeneratedPublicKey_RawPoint(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	point := elliptic.Marshal(key.Curve, key.X, key.Y)
+	ecdhPub, err := key.PublicKey.ECDH()
+	if err != nil {
+		t.Fatal(err)
+	}
+	point := ecdhPub.Bytes()
 
 	pub, err := parseGeneratedPublicKey(point)
 	if err != nil {
@@ -515,7 +529,15 @@ func TestRequireDEK(t *testing.T) {
 	if err := s.requireDEK(); err == nil {
 		t.Error("expected error for nil DEK")
 	}
+	// All-zero DEK must be rejected to prevent silent use of a known
+	// key — that would defeat the purpose of session-key encryption.
 	s.dek = make([]byte, 16)
+	if err := s.requireDEK(); err == nil {
+		t.Error("expected error for all-zero DEK")
+	}
+	// A normal session DEK should pass.
+	s.dek = []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10}
 	if err := s.requireDEK(); err != nil {
 		t.Errorf("unexpected: %v", err)
 	}
@@ -537,5 +559,331 @@ func TestSession_Close_ZerosDEK(t *testing.T) {
 		if b != 0 {
 			t.Errorf("dek[%d] not zeroed: 0x%02X", i, b)
 		}
+	}
+}
+
+// --- STORE DATA application-level chaining tests ---
+
+// recordingTransport is a minimal transport.Transport that records every
+// outgoing command and returns 9000 for each. Used to verify that the
+// caller fragments STORE DATA correctly per GP §11.11 (block number in
+// P2, last-block bit in P1).
+type recordingTransport struct {
+	commands []*apdu.Command
+}
+
+func (r *recordingTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	clone := *cmd
+	clone.Data = append([]byte(nil), cmd.Data...)
+	r.commands = append(r.commands, &clone)
+	return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+}
+
+func (r *recordingTransport) TransmitRaw(_ context.Context, raw []byte) ([]byte, error) {
+	return []byte{0x90, 0x00}, nil
+}
+
+func (r *recordingTransport) Close() error { return nil }
+
+// TestStoreDataChained_SingleBlock confirms that payloads ≤255 bytes are
+// transmitted as a single APDU with P1 = 0x90 and P2 = 0x00.
+func TestStoreDataChained_SingleBlock(t *testing.T) {
+	rt := &recordingTransport{}
+	s := &Session{transport: rt, authenticated: true}
+
+	payload := bytes.Repeat([]byte{0xAB}, 200)
+	resp, err := s.transmitStoreDataChained(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("transmitStoreDataChained: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
+	}
+	if len(rt.commands) != 1 {
+		t.Fatalf("expected 1 APDU, got %d", len(rt.commands))
+	}
+	cmd := rt.commands[0]
+	if cmd.INS != insStoreData {
+		t.Errorf("INS = %02X, want %02X", cmd.INS, insStoreData)
+	}
+	if cmd.P1 != storeDataP1Final {
+		t.Errorf("P1 = %02X, want %02X (final block)", cmd.P1, storeDataP1Final)
+	}
+	if cmd.P2 != 0x00 {
+		t.Errorf("P2 = %02X, want 0x00", cmd.P2)
+	}
+	if !bytes.Equal(cmd.Data, payload) {
+		t.Errorf("payload mismatch")
+	}
+}
+
+// TestStoreDataChained_MultipleBlocks confirms that payloads >255 bytes
+// are split into ≤255-byte blocks with sequential P2 and the last-block
+// bit (b8 of P1) set only on the final block. Each block must be its own
+// APDU — never an APDU-chained fragment of one logical command.
+func TestStoreDataChained_MultipleBlocks(t *testing.T) {
+	rt := &recordingTransport{}
+	s := &Session{transport: rt, authenticated: true}
+
+	// 600 bytes -> 3 blocks at the secure-wrap-safe size (223 each):
+	// 223 + 223 + 154. The chunk size is chosen so the on-wire APDU
+	// stays within short Lc (≤ 255) even after AES-CBC padding plus
+	// a 16-byte MAC inflate the wrapped form.
+	payload := make([]byte, 600)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	resp, err := s.transmitStoreDataChained(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("transmitStoreDataChained: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
+	}
+	if len(rt.commands) != 3 {
+		t.Fatalf("expected 3 APDUs, got %d", len(rt.commands))
+	}
+
+	wantSizes := []int{223, 223, 154}
+	for i, cmd := range rt.commands {
+		if cmd.CLA != clsGP {
+			t.Errorf("block %d: CLA = %02X, want %02X", i, cmd.CLA, clsGP)
+		}
+		if cmd.INS != insStoreData {
+			t.Errorf("block %d: INS = %02X, want %02X", i, cmd.INS, insStoreData)
+		}
+		if cmd.P2 != byte(i) {
+			t.Errorf("block %d: P2 = %02X, want %02X (block number)", i, cmd.P2, byte(i))
+		}
+		if len(cmd.Data) != wantSizes[i] {
+			t.Errorf("block %d: data size = %d, want %d", i, len(cmd.Data), wantSizes[i])
+		}
+		isLast := i == len(rt.commands)-1
+		var wantP1 byte = storeDataP1NonFinal
+		if isLast {
+			wantP1 = storeDataP1Final
+		}
+		if cmd.P1 != wantP1 {
+			t.Errorf("block %d (last=%v): P1 = %02X, want %02X", i, isLast, cmd.P1, wantP1)
+		}
+		// Critical: each block APDU must NOT carry the chaining CLA bit
+		// (0x10). That bit signals ISO/IEC 7816 transport-level chaining,
+		// which would conflict with STORE DATA's own application-level
+		// block protocol.
+		if cmd.CLA&0x10 != 0 {
+			t.Errorf("block %d: CLA = %02X has transport-chaining bit set", i, cmd.CLA)
+		}
+	}
+
+	// Verify the concatenated data round-trips.
+	var got []byte
+	for _, cmd := range rt.commands {
+		got = append(got, cmd.Data...)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload reassembly mismatch")
+	}
+}
+
+// TestStoreDataChained_RejectsAPDUChainingPath confirms that the generic
+// transmitWithChaining path explicitly refuses STORE DATA — STORE DATA
+// uses its own chaining protocol and must go through transmitStoreDataChained.
+func TestStoreDataChained_RejectsAPDUChainingPath(t *testing.T) {
+	rt := &recordingTransport{}
+	s := &Session{transport: rt, authenticated: true}
+
+	cmd := storeDataCmd(make([]byte, 300)) // >255 to force the chaining branch
+	_, err := s.transmitWithChaining(context.Background(), cmd)
+	if err == nil {
+		t.Fatal("expected error: STORE DATA must not use APDU-level chaining")
+	}
+}
+
+// --- SCP-aware GET RESPONSE bounding ---
+
+// chainingSCPSession is a minimal scp.Session that always replies with
+// "still more data" (61 xx) so we can verify that transmitCollectAll
+// under SCP also enforces the iteration cap. Without bounding, a hostile
+// or buggy card could keep the host looping forever.
+type chainingSCPSession struct {
+	calls    int
+	chunkLen int
+}
+
+func (c *chainingSCPSession) Transmit(_ context.Context, _ *apdu.Command) (*apdu.Response, error) {
+	c.calls++
+	return &apdu.Response{Data: make([]byte, c.chunkLen), SW1: 0x61, SW2: 0xFF}, nil
+}
+
+func (c *chainingSCPSession) Close()                        {}
+func (c *chainingSCPSession) SessionKeys() *kdf.SessionKeys { return nil }
+func (c *chainingSCPSession) Protocol() string              { return "test" }
+
+func TestSCPCollectAll_IterationCap(t *testing.T) {
+	scpSess := &chainingSCPSession{chunkLen: 0}
+	s := &Session{authenticated: true, scpSession: scpSess}
+
+	cmd := &apdu.Command{CLA: 0x00, INS: 0xCA}
+	_, err := s.transmitCollectAll(context.Background(), cmd)
+	if err == nil {
+		t.Fatal("expected iteration cap to fire on infinite 61xx loop")
+	}
+	if scpSess.calls > transport.MaxGetResponseIterations+2 {
+		t.Errorf("scp session invoked %d times; cap is %d",
+			scpSess.calls, transport.MaxGetResponseIterations)
+	}
+}
+
+func TestSCPCollectAll_ByteCap(t *testing.T) {
+	scpSess := &chainingSCPSession{chunkLen: 8 * 1024}
+	s := &Session{authenticated: true, scpSession: scpSess}
+
+	cmd := &apdu.Command{CLA: 0x00, INS: 0xCA}
+	_, err := s.transmitCollectAll(context.Background(), cmd)
+	if err == nil {
+		t.Fatal("expected byte cap to fire on large-chunk infinite loop")
+	}
+}
+
+// --- OpenWithSession DEK validation ---
+
+func TestOpenWithSession_RejectsAllZeroDEK(t *testing.T) {
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	if _, err := OpenWithSession(scpSess, rt, make([]byte, 16)); err == nil {
+		t.Fatal("expected error: all-zero DEK must be rejected at construction")
+	}
+}
+
+func TestOpenWithSession_RejectsBadDEKLength(t *testing.T) {
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	if _, err := OpenWithSession(scpSess, rt, []byte{0x01, 0x02, 0x03}); err == nil {
+		t.Fatal("expected error: 3-byte DEK is not a valid AES key length")
+	}
+}
+
+func TestOpenWithSession_AcceptsValidDEK(t *testing.T) {
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	dek := []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10}
+	s, err := OpenWithSession(scpSess, rt, dek)
+	if err != nil {
+		t.Fatalf("valid DEK rejected: %v", err)
+	}
+	if s == nil {
+		t.Fatal("expected non-nil session")
+	}
+	if !s.authenticated {
+		t.Error("session should be marked authenticated")
+	}
+}
+
+func TestOpenWithSession_AcceptsNilDEK(t *testing.T) {
+	// A caller that does not need PUT KEY may pass dek=nil. PUT KEY
+	// will then fail with ErrNotAuthenticated, but the session is
+	// otherwise usable.
+	scpSess := &chainingSCPSession{}
+	rt := &recordingTransport{}
+	s, err := OpenWithSession(scpSess, rt, nil)
+	if err != nil {
+		t.Fatalf("nil DEK rejected: %v", err)
+	}
+	if s == nil {
+		t.Fatal("expected non-nil session")
+	}
+	if len(s.dek) != 0 {
+		t.Errorf("expected empty DEK, got %d bytes", len(s.dek))
+	}
+}
+
+// TestOpen_RejectsAllZeroStaticDEK confirms that the SCP03 entry-point
+// Open() applies the same DEK validation as OpenWithSession. A bogus
+// static DEK (all-zero or wrong length) must fail here before any
+// network I/O — the previous behavior deferred the failure to PUT KEY.
+func TestOpen_RejectsAllZeroStaticDEK(t *testing.T) {
+	keys := scp03.StaticKeys{
+		ENC: bytes.Repeat([]byte{0x40}, 16),
+		MAC: bytes.Repeat([]byte{0x41}, 16),
+		DEK: make([]byte, 16), // all-zero
+	}
+	// Transport is unused — validation must fire before scp03.Open is
+	// invoked. Pass a nil transport to make that explicit; if the code
+	// reached scp03.Open, the panic from the nil deref would be the
+	// failure mode instead of the validation error we want.
+	_, err := Open(context.Background(), nil, keys, 0x00)
+	if err == nil {
+		t.Fatal("expected error: all-zero static DEK must be rejected at construction")
+	}
+}
+
+func TestOpen_RejectsBadStaticDEKLength(t *testing.T) {
+	keys := scp03.StaticKeys{
+		ENC: bytes.Repeat([]byte{0x40}, 16),
+		MAC: bytes.Repeat([]byte{0x41}, 16),
+		DEK: []byte{0x01, 0x02, 0x03}, // wrong length
+	}
+	_, err := Open(context.Background(), nil, keys, 0x00)
+	if err == nil {
+		t.Fatal("expected error: 3-byte DEK is not a valid AES key length")
+	}
+}
+
+// --- Chained APDU chunk-size invariant ---
+
+// TestChainCommandsAt_ChunkSize confirms chainCommandsAt splits at the
+// requested boundary and sets the chaining bit only on intermediates.
+func TestChainCommandsAt_ChunkSize(t *testing.T) {
+	cmd := &apdu.Command{
+		CLA:  0x80,
+		INS:  0xD8,
+		P1:   0x00,
+		P2:   0x00,
+		Data: make([]byte, 600),
+		Le:   0,
+	}
+	// secureWrapSafeBlock-sized chunks: 600 -> 223 + 223 + 154.
+	cmds := chainCommandsAt(cmd, secureWrapSafeBlock)
+	if len(cmds) != 3 {
+		t.Fatalf("expected 3 chained APDUs, got %d", len(cmds))
+	}
+	wantSizes := []int{secureWrapSafeBlock, secureWrapSafeBlock, 600 - 2*secureWrapSafeBlock}
+	for i, c := range cmds {
+		if len(c.Data) != wantSizes[i] {
+			t.Errorf("APDU %d: data size = %d, want %d", i, len(c.Data), wantSizes[i])
+		}
+		isLast := i == len(cmds)-1
+		hasChainingBit := c.CLA&0x10 != 0
+		if isLast && hasChainingBit {
+			t.Errorf("APDU %d (last): chaining bit must be CLEAR", i)
+		}
+		if !isLast && !hasChainingBit {
+			t.Errorf("APDU %d (intermediate): chaining bit must be SET", i)
+		}
+	}
+}
+
+// TestSecureWrapSafeBlock_FitsShortLc is a documentation test asserting
+// the math behind secureWrapSafeBlock: a plaintext of that size, after
+// AES-CBC encryption with ISO 9797-1 method-2 padding plus the largest
+// MAC truncation we use (16 bytes / S16), still produces a wrapped
+// payload that fits in a short-Lc APDU (≤ 255 bytes).
+func TestSecureWrapSafeBlock_FitsShortLc(t *testing.T) {
+	const macSize = 16 // worst case
+	padded := ((secureWrapSafeBlock + 1 + 15) / 16) * 16
+	wireLen := padded + macSize
+	if wireLen > 255 {
+		t.Errorf("secureWrapSafeBlock=%d: wrapped wire len = %d, exceeds short-Lc 255",
+			secureWrapSafeBlock, wireLen)
+	}
+	// And one more byte should NOT fit — verifying the bound is tight.
+	N := secureWrapSafeBlock + 1
+	padded = ((N + 1 + 15) / 16) * 16
+	wireLen = padded + macSize
+	if wireLen <= 255 {
+		t.Errorf("secureWrapSafeBlock could be larger: N=%d still fits (%d ≤ 255)",
+			N, wireLen)
 	}
 }

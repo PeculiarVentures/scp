@@ -1,7 +1,20 @@
 // Package piv implements PIV (NIST SP 800-73-4) command builders for
 // the provisioning operations that run over an established SCP11
-// secure channel. These are the commands your remote provisioning
-// server sends after the handshake completes.
+// secure channel. These are the commands a remote provisioning server
+// sends after the handshake completes.
+//
+// # Scope
+//
+// The command builders here are tuned for YubiKey 5.x, not the full
+// NIST PIV instruction set. Several functions use YubiKey-proprietary
+// instructions (IMPORT_KEY = 0xFE, ATTEST = 0xF9, RESET = 0xFB,
+// SET_MGMKEY = 0xFF) and YubiKey-specific data layouts. Behavior
+// against non-YubiKey PIV applets is unverified.
+//
+// PIV management-key authentication is intentionally not provided:
+// it is a multi-step GENERAL AUTHENTICATE challenge-response that
+// the caller must drive directly. A "simplified" single-call helper
+// would be wrong both protocol-wise and as a security primitive.
 //
 // Each function returns a plain *apdu.Command; the session's Transmit
 // method wraps it with secure messaging before sending.
@@ -28,11 +41,11 @@ const (
 
 // Algorithm identifiers for PIV key generation.
 const (
-	AlgoRSA2048  byte = 0x07
-	AlgoECCP256  byte = 0x11
-	AlgoECCP384  byte = 0x14
-	AlgoEd25519  byte = 0xE0 // YubiKey 5.7+ specific
-	AlgoX25519   byte = 0xE1 // YubiKey 5.7+ specific
+	AlgoRSA2048 byte = 0x07
+	AlgoECCP256 byte = 0x11
+	AlgoECCP384 byte = 0x14
+	AlgoEd25519 byte = 0xE0 // YubiKey 5.7+ specific
+	AlgoX25519  byte = 0xE1 // YubiKey 5.7+ specific
 )
 
 // PIN policy values (YubiKey specific).
@@ -137,9 +150,11 @@ func PutCertificate(slot byte, cert *x509.Certificate) (*apdu.Command, error) {
 }
 
 // ImportKey builds the YubiKey-specific IMPORT ASYMMETRIC KEY command.
-// The key material must be provided in the appropriate format:
-//   - EC keys: raw private key bytes
-//   - RSA keys: CRT components (p, q, dp, dq, qinv)
+//
+// Only NIST P-256 and P-384 EC private keys are supported — the
+// algorithm constants for RSA, Ed25519, and X25519 are defined for
+// completeness but not implemented here. Pass the raw EC private
+// key bytes (32 bytes for P-256, 48 for P-384).
 func ImportKey(slot, algorithm byte, keyData []byte) (*apdu.Command, error) {
 	if len(keyData) == 0 {
 		return nil, errors.New("key data cannot be empty")
@@ -196,10 +211,25 @@ func SetManagementKey(algorithm byte, newKey []byte) (*apdu.Command, error) {
 	}, nil
 }
 
-// VerifyPIN builds a VERIFY command for PIN authentication.
-func VerifyPIN(pin []byte) *apdu.Command {
-	// PIN is padded to 8 bytes with 0xFF.
-	padded := make([]byte, 8)
+// MaxPINLength is the maximum PIN length accepted by VerifyPIN. PIV
+// VERIFY (NIST SP 800-73-4 Part 2 §3.2.1) sends a fixed 8-byte data
+// field padded with 0xFF, so 8 bytes is the inherent ceiling.
+const MaxPINLength = 8
+
+// VerifyPIN builds a VERIFY command for PIN authentication. The PIN
+// is padded to 8 bytes with 0xFF.
+//
+// PINs longer than 8 bytes are rejected — silently truncating would
+// have the card see a different value than the caller passed in,
+// which is exactly the kind of bug that hides until production.
+func VerifyPIN(pin []byte) (*apdu.Command, error) {
+	if len(pin) == 0 {
+		return nil, errors.New("PIN cannot be empty")
+	}
+	if len(pin) > MaxPINLength {
+		return nil, fmt.Errorf("PIN exceeds %d bytes (got %d)", MaxPINLength, len(pin))
+	}
+	padded := make([]byte, MaxPINLength)
 	for i := range padded {
 		padded[i] = 0xFF
 	}
@@ -212,22 +242,7 @@ func VerifyPIN(pin []byte) *apdu.Command {
 		P2:   0x80, // PIV Card Application PIN
 		Data: padded,
 		Le:   -1,
-	}
-}
-
-// Authenticate builds a GENERAL AUTHENTICATE command for management
-// key authentication. This is required before administrative operations.
-func Authenticate(algorithm byte, key []byte) *apdu.Command {
-	// This is a simplified version. The full 3DES/AES mutual authentication
-	// is a multi-step challenge-response protocol.
-	return &apdu.Command{
-		CLA:  0x00,
-		INS:  0x87, // GENERAL AUTHENTICATE
-		P1:   algorithm,
-		P2:   0x9B, // Management key reference
-		Data: key,
-		Le:   0,
-	}
+	}, nil
 }
 
 // Attest builds an ATTEST command for the given slot (YubiKey specific).

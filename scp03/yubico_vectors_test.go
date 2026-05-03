@@ -23,12 +23,13 @@ func mustHex(s string) []byte {
 // against a concrete test vector from the Yubico .NET SDK.
 //
 // Source: DerivationTests.cs
-//   Key:            FC90AA67CDC5DABFD5051663045DFA23
-//   Host Challenge: 360CB43F4301B894
-//   Card Challenge: CAAFA4DAC615236A
-//   DDC:            HOST_CRYPTOGRAM (0x01)
-//   Output length:  64 bits (8 bytes)
-//   Expected:       45330AB30BB1A079
+//
+//	Key:            FC90AA67CDC5DABFD5051663045DFA23
+//	Host Challenge: 360CB43F4301B894
+//	Card Challenge: CAAFA4DAC615236A
+//	DDC:            HOST_CRYPTOGRAM (0x01)
+//	Output length:  64 bits (8 bytes)
+//	Expected:       45330AB30BB1A079
 func TestDeriveSCP03Key_YubicoVector(t *testing.T) {
 	key := mustHex("FC90AA67CDC5DABFD5051663045DFA23")
 	hostChallenge := mustHex("360CB43F4301B894")
@@ -39,7 +40,7 @@ func TestDeriveSCP03Key_YubicoVector(t *testing.T) {
 
 	// calculateCryptogram uses derivConst, S-MAC key, context, and keyLen.
 	// DDC_HOST_CRYPTOGRAM = 0x01, output = 64 bits = 8 bytes
-	got, err := calculateCryptogram(key, derivConstHostCrypto, context, len(key))
+	got, err := calculateCryptogram(key, derivConstHostCrypto, context, 8)
 	if err != nil {
 		t.Fatalf("calculateCryptogram: %v", err)
 	}
@@ -121,11 +122,11 @@ func TestDeriveSCP03_CardCryptogram(t *testing.T) {
 
 	context := append(hostChallenge, cardChallenge...)
 
-	cardCrypto, err := calculateCryptogram(key, derivConstCardCrypto, context, len(key))
+	cardCrypto, err := calculateCryptogram(key, derivConstCardCrypto, context, 8)
 	if err != nil {
 		t.Fatalf("calculateCryptogram: %v", err)
 	}
-	hostCrypto, err := calculateCryptogram(key, derivConstHostCrypto, context, len(key))
+	hostCrypto, err := calculateCryptogram(key, derivConstHostCrypto, context, 8)
 	if err != nil {
 		t.Fatalf("calculateCryptogram: %v", err)
 	}
