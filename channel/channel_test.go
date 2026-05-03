@@ -575,3 +575,101 @@ func TestS16_RejectsPartialMACMatch(t *testing.T) {
 		t.Fatal("S16 Unwrap should have rejected response with corrupted last 8 MAC bytes")
 	}
 }
+
+// TestEmptyData_YubicoDefault confirms the default empty-data
+// encryption behavior pads with 0x80||0x00*15 and encrypts as one
+// AES block. Matches yubikit's ScpState.encrypt:
+//
+//   msg = data + b"\x80" + 0-padding to 16 bytes; encrypt.
+//
+// Earlier the code skipped encryption entirely for empty data, which
+// is what GP §6.2.4 literally says, but YubiKey rejects that. We now
+// default to Yubico's interpretation (EmptyDataYubico) and have a
+// fallback (EmptyDataGPLiteral) for cards that follow the literal
+// spec.
+func TestEmptyData_YubicoDefault_PadsAndEncrypts(t *testing.T) {
+	keys := &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{0xAA}, 16),
+		SMAC:     bytes.Repeat([]byte{0xBB}, 16),
+		SRMAC:    bytes.Repeat([]byte{0xCC}, 16),
+		DEK:      bytes.Repeat([]byte{0xDD}, 16),
+		MACChain: make([]byte, 16),
+	}
+	sc := New(keys, LevelFull)
+	// Default policy is EmptyDataYubico — verify.
+	if sc.EmptyDataEncryption != EmptyDataYubico {
+		t.Errorf("default EmptyDataEncryption = %v, want EmptyDataYubico", sc.EmptyDataEncryption)
+	}
+
+	cmd := &apdu.Command{CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0x00, Data: nil, Le: -1}
+	wrapped, err := sc.Wrap(cmd)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	// Encrypted block (16 bytes) + truncated MAC (8 bytes) = 24 bytes.
+	// If we had skipped encryption, the data field would be just the
+	// 8-byte MAC.
+	if len(wrapped.Data) != 24 {
+		t.Errorf("wrapped data length = %d, want 24 (16 encrypted + 8 MAC) under EmptyDataYubico",
+			len(wrapped.Data))
+	}
+}
+
+func TestEmptyData_GPLiteral_SkipsEncryption(t *testing.T) {
+	keys := &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{0xAA}, 16),
+		SMAC:     bytes.Repeat([]byte{0xBB}, 16),
+		SRMAC:    bytes.Repeat([]byte{0xCC}, 16),
+		DEK:      bytes.Repeat([]byte{0xDD}, 16),
+		MACChain: make([]byte, 16),
+	}
+	sc := New(keys, LevelFull)
+	sc.EmptyDataEncryption = EmptyDataGPLiteral
+
+	cmd := &apdu.Command{CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0x00, Data: nil, Le: -1}
+	wrapped, err := sc.Wrap(cmd)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	// GP-literal path skips encryption: data field is just the 8-byte MAC.
+	if len(wrapped.Data) != 8 {
+		t.Errorf("wrapped data length = %d, want 8 (MAC only) under EmptyDataGPLiteral",
+			len(wrapped.Data))
+	}
+}
+
+// TestEmptyData_BothModes_AdvanceCounter confirms both empty-data
+// policies still advance the encryption counter — even GP-literal,
+// which advances the counter without producing ciphertext.
+func TestEmptyData_BothModes_AdvanceCounter(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy EmptyDataPolicy
+	}{
+		{"Yubico", EmptyDataYubico},
+		{"GPLiteral", EmptyDataGPLiteral},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := &kdf.SessionKeys{
+				SENC:     bytes.Repeat([]byte{0xAA}, 16),
+				SMAC:     bytes.Repeat([]byte{0xBB}, 16),
+				SRMAC:    bytes.Repeat([]byte{0xCC}, 16),
+				DEK:      bytes.Repeat([]byte{0xDD}, 16),
+				MACChain: make([]byte, 16),
+			}
+			sc := New(keys, LevelFull)
+			sc.EmptyDataEncryption = tc.policy
+
+			before := sc.encCounter
+			cmd := &apdu.Command{CLA: 0x80, INS: 0xCA, Data: nil, Le: -1}
+			if _, err := sc.Wrap(cmd); err != nil {
+				t.Fatalf("Wrap: %v", err)
+			}
+			if sc.encCounter != before+1 {
+				t.Errorf("counter not advanced under %s: before=%d after=%d", tc.name, before, sc.encCounter)
+			}
+		})
+	}
+}

@@ -45,7 +45,38 @@ type SecureChannel struct {
 	// MACSize is the truncated MAC length appended to APDUs.
 	// S8 mode = 8 bytes (default), S16 mode = 16 bytes.
 	MACSize int
+
+	// EmptyDataEncryption controls whether C-DECRYPTION encrypts an
+	// empty command data field. Two interpretations exist in the wild:
+	//
+	//   - GP literal (Amendment D §6.2.4): "If data is empty, no
+	//     encryption is performed and Lc remains as in the original
+	//     APDU." Skip encryption, increment counter.
+	//
+	//   - Yubico (yubikit's ScpState.encrypt): pad empty data with
+	//     0x80 || 0x00*15 and encrypt as one block.
+	//
+	// YubiKey expects the Yubico behavior. Other GP cards may expect
+	// the literal behavior. Default is EmptyDataYubico because YubiKey
+	// is this library's primary target; switch to EmptyDataGPLiteral
+	// for other cards or for spec-conformance testing.
+	EmptyDataEncryption EmptyDataPolicy
 }
+
+// EmptyDataPolicy selects how an empty C-DECRYPTED command data field
+// is handled on the wire.
+type EmptyDataPolicy int
+
+const (
+	// EmptyDataYubico pads empty data with 0x80 || 0x00*15 and
+	// encrypts. Matches yubikit's ScpState.encrypt.
+	EmptyDataYubico EmptyDataPolicy = iota
+
+	// EmptyDataGPLiteral skips encryption when data is empty,
+	// matching a literal reading of GP Amendment D §6.2.4. The
+	// encryption counter still advances.
+	EmptyDataGPLiteral
+)
 
 // SecurityLevel defines which secure messaging operations to apply.
 type SecurityLevel uint8
@@ -102,8 +133,12 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 	payload := cmd.Data
 
 	// Step 1: Encrypt the payload if C-DEC is active.
-	// GP §5.3.2: Empty data skips encryption but
-	// increments the counter.
+	//
+	// Empty-data handling diverges between GP-literal and Yubico — see
+	// the EmptyDataEncryption field doc on SecureChannel. Default
+	// (EmptyDataYubico) pads-and-encrypts so an "empty" command still
+	// has one encrypted block on the wire; that matches yubikit and
+	// the YubiKey-side expectation.
 	if sc.SecurityLevel&LevelCDEC != 0 {
 		if len(payload) > 0 {
 			encrypted, err := sc.encryptPayload(payload)
@@ -111,7 +146,17 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 				return nil, fmt.Errorf("encrypt payload: %w", err)
 			}
 			payload = encrypted
+		} else if sc.EmptyDataEncryption == EmptyDataYubico {
+			// Yubico path: pad empty data per ISO 9797-1 method 2
+			// (0x80 || 0x00*15) and encrypt as one block. The
+			// encryptPayload helper already does exactly that.
+			encrypted, err := sc.encryptPayload(nil)
+			if err != nil {
+				return nil, fmt.Errorf("encrypt empty payload (Yubico mode): %w", err)
+			}
+			payload = encrypted
 		} else {
+			// GP-literal: skip encryption entirely; counter still advances.
 			sc.encCounter++
 		}
 	}
