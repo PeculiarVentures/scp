@@ -134,10 +134,20 @@ sess, err := session.Open(ctx, transport, &session.Config{
 
 SCP03 uses pre-shared symmetric keys. Most cards ship with well-known default keys that must be replaced in production.
 
+For a factory-fresh YubiKey:
+
+```go
+// Convenience: GP standard test keys at YubiKey factory KVN 0xFF.
+// TESTING ONLY — these keys are publicly known.
+sess, err := scp03.Open(ctx, transport, scp03.FactoryYubiKeyConfig())
+```
+
+For a custom or non-YubiKey card, set the KVN explicitly:
+
 ```go
 sess, err := scp03.Open(ctx, transport, &scp03.Config{
     Keys:       scp03.DefaultKeys,  // TESTING ONLY
-    KeyVersion: 0x01,
+    KeyVersion: 0x01,                // vendor-specific; 0xFF for YubiKey
     SelectAID:  session.AIDSecurityDomain,
 })
 if err != nil {
@@ -150,6 +160,8 @@ resp, err := sess.Transmit(ctx, &apdu.Command{
     Data: []byte{0xAC, 0x03, 0x80, 0x01, 0x11},
 })
 ```
+
+> The KVN matters: YubiKey 5.3+ rejects KVN `0x00` with `6A88` because the factory key set lives at `0xFF`. The factory-keys table below lists the KVN each vendor ships with.
 
 ### Factory and spec default keys
 

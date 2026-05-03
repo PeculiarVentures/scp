@@ -237,8 +237,17 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 	}
 
 	// No MAC, just return with potentially encrypted payload.
+	// Even on the no-MAC branch (only reachable via the partial-security
+	// escape hatch in scp03.Open), if encryption ran the APDU is
+	// secure-messaging-shaped and must carry the SM CLA bit. Otherwise
+	// the card sees plaintext-CLA + ciphertext-data and rejects
+	// (or misroutes) the command.
+	outCLA := cmd.CLA
+	if sc.SecurityLevel&LevelCDEC != 0 {
+		outCLA |= 0x04
+	}
 	return &apdu.Command{
-		CLA:            cmd.CLA,
+		CLA:            outCLA,
 		INS:            cmd.INS,
 		P1:             cmd.P1,
 		P2:             cmd.P2,
