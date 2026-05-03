@@ -123,6 +123,14 @@ func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, key
 // so configs reused across applets/sessions stay intact. Earlier
 // versions modified cfg in place, which surprised callers reusing a
 // shared config object.
+//
+// The DEK derived during SCP11 key agreement (one of the five outputs
+// of the X9.63 KDF) is captured here so PUT KEY operations work over
+// SCP11 without the caller needing to plumb the DEK manually. Earlier
+// versions discarded the SCP11-derived DEK entirely, which meant
+// PutSCP03Key, PutECPrivateKey, and PutECPublicKey all failed with
+// "SCP03 session required" against an SCP11-authenticated session —
+// even though the SCP11 session DOES derive a usable DEK.
 func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) (*Session, error) {
 	var local session.Config
 	if cfg != nil {
@@ -138,26 +146,46 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 		return nil, fmt.Errorf("securitydomain: open SCP11 session: %w", err)
 	}
 
-	return &Session{
+	s := &Session{
 		scpSession:       scpSess,
 		transport:        t,
 		authenticated:    true,
 		oceAuthenticated: isOCEAuthProtocol(scpSess.Protocol()),
-	}, nil
+	}
+	if dek := scpSess.SessionDEK(); len(dek) > 0 {
+		// SCP11-derived DEK passes the same length check used for
+		// SCP03 static DEKs (16/24/32 AES). The all-zero check would
+		// false-positive on a freshly-derived key whose first byte
+		// happens to be zero, so we only enforce the length+nonempty
+		// here; the static-DEK all-zero check is a config-mistake
+		// guard, not a runtime invariant.
+		if len(dek) == 16 || len(dek) == 24 || len(dek) == 32 {
+			s.dek = dek
+		}
+	}
+	return s, nil
 }
 
 // OpenWithSession wraps an existing authenticated scp.Session.
 //
-// If the session was established with SCP03 and the caller intends to
-// perform PUT KEY operations, supply the static DEK so key material can
-// be encrypted before transmission. The DEK is validated at construction
-// time — an all-zero or oversized DEK is rejected immediately rather
-// than at first use, so configuration mistakes surface at the API
-// boundary.
+// DEK selection:
 //
-// Pass dek=nil if the caller will not invoke PUT KEY (or is using
-// SCP11, where there is no separate DEK). PUT KEY will then return
-// ErrNotAuthenticated.
+//   - If dek is non-nil, it is validated and used as the PUT KEY
+//     wrapping key (length must be 16/24/32, must not be all zero).
+//   - If dek is nil, this function calls scpSess.SessionDEK() and
+//     uses what comes back. This works for SCP03 sessions (returns
+//     the static DEK) and SCP11 sessions (returns the KDF-derived
+//     DEK). The all-zero check is skipped for SessionDEK output
+//     because a freshly-derived key may legitimately start with a
+//     zero byte; the all-zero guard is a config-mistake check, not
+//     a runtime invariant.
+//   - If both are nil/empty, PUT KEY operations will return
+//     ErrNotAuthenticated.
+//
+// This default-to-SessionDEK behavior is the right thing for almost
+// every caller: previously, anyone using OpenWithSession with an
+// SCP11 session had to know to pass the DEK manually, even though
+// the session always has one. That was a silent footgun.
 func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) (*Session, error) {
 	if scpSess == nil {
 		return nil, errors.New("securitydomain: scp.Session is required")
@@ -177,6 +205,13 @@ func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) (*S
 		}
 		s.dek = make([]byte, len(dek))
 		copy(s.dek, dek)
+	} else if sdek := scpSess.SessionDEK(); len(sdek) > 0 {
+		// Length-only validation for derived keys; the all-zero
+		// check is a config-mistake guard (see validateDEK) and
+		// doesn't apply to KDF output.
+		if len(sdek) == 16 || len(sdek) == 24 || len(sdek) == 32 {
+			s.dek = sdek
+		}
 	}
 	return s, nil
 }
@@ -329,13 +364,18 @@ func (s *Session) requireOCEAuth() error {
 
 func (s *Session) requireDEK() error {
 	if len(s.dek) == 0 {
-		return fmt.Errorf("%w: session DEK not available (SCP03 session required for PUT KEY)", ErrNotAuthenticated)
+		return fmt.Errorf("%w: session DEK not available; PUT KEY requires either an SCP03 session or an SCP11a/c session that derived a DEK during key agreement", ErrNotAuthenticated)
 	}
 	// Re-validate at use time. Construction-time validation in Open
 	// and OpenWithSession should already have caught a bad DEK, but
 	// running the same checks here means construction and use cannot
 	// drift if validateDEK gets stricter in the future, and it
-	// defends against any later mutation of s.dek.
+	// defends against any later mutation of s.dek. Note: validateDEK
+	// rejects all-zero, which is appropriate for static SCP03 DEKs
+	// (config mistake) but a freshly-derived SCP11 DEK could in
+	// principle be all-zero with negligible probability — that's the
+	// "this card just gave us a degenerate KDF output, abort" case
+	// and we should treat it the same way.
 	if err := validateDEK(s.dek); err != nil {
 		return fmt.Errorf("%w: %w", ErrNotAuthenticated, err)
 	}

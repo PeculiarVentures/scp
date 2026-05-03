@@ -477,6 +477,22 @@ func (s *Session) InsecureExportSessionKeysForTestOnly() *kdf.SessionKeys {
 	return s.sessionKeys.Clone()
 }
 
+// SessionDEK returns a defensive copy of the SCP03 static DEK, used
+// by the securitydomain layer for PUT KEY key wrapping. See
+// scp.Session.SessionDEK for full doc and security semantics.
+//
+// For SCP03, the "session" DEK is the static DEK from Config.Keys —
+// SCP03 secure messaging does not derive a separate session DEK.
+// Returns nil if the session is closed.
+func (s *Session) SessionDEK() []byte {
+	if s.sessionKeys == nil || len(s.sessionKeys.DEK) == 0 {
+		return nil
+	}
+	out := make([]byte, len(s.sessionKeys.DEK))
+	copy(out, s.sessionKeys.DEK)
+	return out
+}
+
 // Protocol returns "SCP03".
 func (s *Session) Protocol() string {
 	return "SCP03"
