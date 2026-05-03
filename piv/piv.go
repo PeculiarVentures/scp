@@ -150,9 +150,11 @@ func PutCertificate(slot byte, cert *x509.Certificate) (*apdu.Command, error) {
 }
 
 // ImportKey builds the YubiKey-specific IMPORT ASYMMETRIC KEY command.
-// The key material must be provided in the appropriate format:
-//   - EC keys: raw private key bytes
-//   - RSA keys: CRT components (p, q, dp, dq, qinv)
+//
+// Only NIST P-256 and P-384 EC private keys are supported — the
+// algorithm constants for RSA, Ed25519, and X25519 are defined for
+// completeness but not implemented here. Pass the raw EC private
+// key bytes (32 bytes for P-256, 48 for P-384).
 func ImportKey(slot, algorithm byte, keyData []byte) (*apdu.Command, error) {
 	if len(keyData) == 0 {
 		return nil, errors.New("key data cannot be empty")
@@ -209,10 +211,25 @@ func SetManagementKey(algorithm byte, newKey []byte) (*apdu.Command, error) {
 	}, nil
 }
 
-// VerifyPIN builds a VERIFY command for PIN authentication.
-func VerifyPIN(pin []byte) *apdu.Command {
-	// PIN is padded to 8 bytes with 0xFF.
-	padded := make([]byte, 8)
+// MaxPINLength is the maximum PIN length accepted by VerifyPIN. PIV
+// VERIFY (NIST SP 800-73-4 Part 2 §3.2.1) sends a fixed 8-byte data
+// field padded with 0xFF, so 8 bytes is the inherent ceiling.
+const MaxPINLength = 8
+
+// VerifyPIN builds a VERIFY command for PIN authentication. The PIN
+// is padded to 8 bytes with 0xFF.
+//
+// PINs longer than 8 bytes are rejected — silently truncating would
+// have the card see a different value than the caller passed in,
+// which is exactly the kind of bug that hides until production.
+func VerifyPIN(pin []byte) (*apdu.Command, error) {
+	if len(pin) == 0 {
+		return nil, errors.New("PIN cannot be empty")
+	}
+	if len(pin) > MaxPINLength {
+		return nil, fmt.Errorf("PIN exceeds %d bytes (got %d)", MaxPINLength, len(pin))
+	}
+	padded := make([]byte, MaxPINLength)
 	for i := range padded {
 		padded[i] = 0xFF
 	}
@@ -225,7 +242,7 @@ func VerifyPIN(pin []byte) *apdu.Command {
 		P2:   0x80, // PIV Card Application PIN
 		Data: padded,
 		Le:   -1,
-	}
+	}, nil
 }
 
 // Attest builds an ATTEST command for the given slot (YubiKey specific).
