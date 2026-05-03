@@ -72,6 +72,26 @@ type Session interface {
 	// Protocol returns "SCP03" or "SCP11a" / "SCP11b" / "SCP11c".
 	Protocol() string
 
+	// SessionDEK returns a defensive copy of the Data Encryption Key
+	// derived during the handshake. The DEK is used by the Security
+	// Domain layer to wrap key material in PUT KEY commands (per
+	// GP §11.1.4).
+	//
+	// Returns nil if the protocol or session has no separate DEK
+	// (e.g. SCP11b without OCE-DEK key, or a closed session).
+	//
+	// This is intended for the securitydomain package and any custom
+	// management code that needs to construct PUT KEY APDUs. It is
+	// deliberately narrower than full session-key access: a caller
+	// with the DEK can encrypt key material the card will accept, but
+	// cannot decrypt past traffic, forge MACs, or compromise the
+	// receipt chain.
+	//
+	// Production callers SHOULD use the securitydomain.Session API,
+	// which calls this internally. Direct callers must zero the
+	// returned slice when done.
+	SessionDEK() []byte
+
 	// Note: an earlier version of this interface exposed SessionKeys()
 	// as a public method, with the rationale "for audit or debugging."
 	// That was a footgun: examples become production code, and the

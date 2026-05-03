@@ -534,6 +534,21 @@ func (s *Session) InsecureExportSessionKeysForTestOnly() *kdf.SessionKeys {
 	return s.sessionKeys.Clone()
 }
 
+// SessionDEK returns a defensive copy of the Data Encryption Key
+// derived during the SCP11 handshake. Used by the securitydomain
+// package to wrap key material for PUT KEY. See scp.Session.SessionDEK
+// for full doc and security semantics.
+//
+// Returns nil if the session is closed or did not derive a DEK.
+func (s *Session) SessionDEK() []byte {
+	if s.sessionKeys == nil || len(s.sessionKeys.DEK) == 0 {
+		return nil
+	}
+	out := make([]byte, len(s.sessionKeys.DEK))
+	copy(out, s.sessionKeys.DEK)
+	return out
+}
+
 // Protocol returns the protocol variant string (e.g. "SCP11b").
 func (s *Session) Protocol() string {
 	switch s.config.Variant {

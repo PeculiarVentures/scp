@@ -718,6 +718,7 @@ func (c *chainingSCPSession) Transmit(_ context.Context, _ *apdu.Command) (*apdu
 
 func (c *chainingSCPSession) Close()                        {}
 func (c *chainingSCPSession) SessionKeys() *kdf.SessionKeys { return nil }
+func (c *chainingSCPSession) SessionDEK() []byte            { return nil }
 func (c *chainingSCPSession) Protocol() string              { return "test" }
 
 func TestSCPCollectAll_IterationCap(t *testing.T) {
