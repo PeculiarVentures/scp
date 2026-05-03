@@ -21,11 +21,15 @@ import (
 // reference byte-for-byte where it should.
 //
 // Vector source:
-//   github.com/samsungspbc/openscp-java
+//   github.com/Samsung/OpenSCP-Java
+//   verified at SHA b9876fc36a5b18fb90ce03d0894f39edb08a905b (2026-05-03)
+//   license: Apache-2.0
 //   src/test/java/com/samsung/openscp/testdata/
 //     - SmartCardScp11aP256Aes128S8ModeEmulation.java
 //     - Scp11Nist256TestData.java
 //     - Scp11TestData.java
+//
+// Provenance and refresh procedure: see testvectors/README.md.
 //
 // Coverage scope:
 //
