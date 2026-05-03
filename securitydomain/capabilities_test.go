@@ -48,25 +48,6 @@ func TestSessionOCEAuthenticated_TypedPath(t *testing.T) {
 	}
 }
 
-// TestSessionOCEAuthenticated_FallbackPath confirms that a
-// scp.Session that doesn't implement oceAuthState falls through to
-// the conservative string match. This is the compatibility path
-// for test doubles and any third-party Session adapter.
-func TestSessionOCEAuthenticated_FallbackPath(t *testing.T) {
-	f := &fakePlainSession{proto: "SCP11a"}
-	if !sessionOCEAuthenticated(f) {
-		t.Error("fallback should accept SCP11a as OCE-auth")
-	}
-	f2 := &fakePlainSession{proto: "SCP11b"}
-	if sessionOCEAuthenticated(f2) {
-		t.Error("fallback must reject SCP11b as OCE-auth")
-	}
-	f3 := &fakePlainSession{proto: "MysteryProtocol"}
-	if sessionOCEAuthenticated(f3) {
-		t.Error("fallback must reject unknown protocols (default-deny)")
-	}
-}
-
 // TestSessionDEK_FallsBackToNil confirms a session that doesn't
 // implement dekProvider yields a nil DEK (rather than panicking
 // or reaching for some imagined method).

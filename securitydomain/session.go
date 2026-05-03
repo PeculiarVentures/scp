@@ -101,14 +101,22 @@ type oceAuthState interface {
 // sessionOCEAuthenticated reports whether the underlying secure-
 // channel session authenticates the OCE to the card.
 //
-// Concrete *scp03.Session and *session.Session satisfy oceAuthState
-// directly. The fallback string match (via isOCEAuthProtocol) exists
-// only to defend against a future scp.Session implementation (test
-// double, custom adapter) that doesn't satisfy oceAuthState — better
-// to err on the side of the most-restrictive interpretation that
-// still admits the obvious SCP03 / SCP11a/c cases. New protocol
-// variants should implement the interface rather than rely on the
-// fallback.
+// The check is strict: a session must implement oceAuthState (i.e.
+// expose an OCEAuthenticated() bool method on the concrete type) to
+// be considered for OCE-gated management operations. Concrete
+// *scp03.Session and *session.Session both satisfy this; any other
+// scp.Session implementation that wants to drive Security Domain
+// management ops MUST implement the same method.
+//
+// Earlier versions fell back to a Protocol() string match
+// ("SCP03"|"SCP11a"|"SCP11c" treated as OCE-authenticated). That was
+// a soft guard: a malicious or buggy custom Session could return a
+// favourable protocol string and pass the host-side gate without
+// actually authenticating the OCE to the card. Card-side
+// authorization would still reject the operation, but the host-side
+// gate is meant to catch the misuse before the wire APDU goes out.
+// Removing the fallback eliminates the soft path and forces explicit
+// opt-in by adapter authors.
 func sessionOCEAuthenticated(s scp.Session) bool {
 	if s == nil {
 		return false
@@ -116,24 +124,12 @@ func sessionOCEAuthenticated(s scp.Session) bool {
 	if oa, ok := s.(oceAuthState); ok {
 		return oa.OCEAuthenticated()
 	}
-	return isOCEAuthProtocol(s.Protocol())
-}
-
-// isOCEAuthProtocol is the fallback used when a scp.Session value
-// doesn't satisfy oceAuthState. SCP03, SCP11a, SCP11c authenticate
-// the off-card entity to the card; SCP11b does not.
-//
-// Code paths that hold a concrete *scp03.Session or *session.Session
-// reach this through sessionOCEAuthenticated, which prefers the
-// typed capability and only falls through to this string check for
-// custom session implementations.
-func isOCEAuthProtocol(proto string) bool {
-	switch proto {
-	case "SCP03", "SCP11a", "SCP11c":
-		return true
-	default:
-		return false
-	}
+	// Custom Session implementations that don't expose
+	// OCEAuthenticated() are treated as not-OCE-authenticated.
+	// Management operations (PUT KEY, DELETE KEY, GENERATE EC KEY,
+	// STORE CERTIFICATES, STORE DATA, etc.) will fail at the
+	// host-side gate with ErrNotAuthenticated.
+	return false
 }
 
 // sessionDEK returns the underlying session's DEK if it exposes one.
@@ -326,13 +322,23 @@ func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, 
 }
 
 // Close terminates the session and zeros key material.
+// Close terminates the session. The underlying SCP session is closed
+// (zeroing its key material), the DEK is zeroed and the slice header
+// nilled, and the authentication flags are cleared so that subsequent
+// calls observe a closed session rather than a session that thinks it
+// is still authenticated with all-zero key material. Calling Close
+// twice is safe.
 func (s *Session) Close() {
 	if s.scpSession != nil {
 		s.scpSession.Close()
+		s.scpSession = nil
 	}
 	for i := range s.dek {
 		s.dek[i] = 0
 	}
+	s.dek = nil
+	s.authenticated = false
+	s.oceAuthenticated = false
 }
 
 // IsAuthenticated reports whether this session has a secure channel.

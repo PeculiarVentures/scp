@@ -419,7 +419,20 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 	if err != nil {
 		return nil, fmt.Errorf("transmit: %w", err)
 	}
+
+	// GP SCP03 §6.2.4: R-MAC / R-ENC are applied ONLY to responses
+	// with SW 9000 or warning SW1 62/63. Error status words (6Axx,
+	// 6Bxx, ...) are unprotected by the card and must pass through
+	// without R-MAC verification — otherwise legitimate card errors
+	// turn into spurious session terminations and any transport-
+	// level attacker can DoS the channel by injecting an unprotected
+	// error status word.
 	if s.config.SecurityLevel&channel.LevelRMAC != 0 {
+		if !channel.ResponseIsSecureMessagingProtected(resp.SW1, resp.SW2) {
+			// Unprotected card error — return as-is. Session stays
+			// open; the caller decides what to do with the SW.
+			return resp, nil
+		}
 		unwrapped, err := s.channel.Unwrap(resp)
 		if err != nil {
 			// GP §4.8: MAC verification failure terminates the channel.

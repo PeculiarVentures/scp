@@ -257,6 +257,45 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 	}, nil
 }
 
+// ResponseIsSecureMessagingProtected reports whether a card response with
+// the given status word carries R-MAC and R-ENC under SCP03/SCP11
+// secure messaging.
+//
+// Per GP SCP03 v1.2 Amendment D §6.2.4, R-MAC and R-ENC are applied
+// only to responses with status word 9000 or warning status words
+// 62XX / 63XX. All other status words (error codes such as 6Axx,
+// 6Bxx, 6Cxx, 6Dxx, 6Exx, 6Fxx) are returned by the card without
+// secure-messaging protection. Trying to verify R-MAC on those
+// responses will always fail (no MAC is present), and earlier
+// versions of this library would tear down the session as if it had
+// been tampered with — masking the real card error and giving any
+// transport-layer attacker an easy session-termination DoS by
+// injecting an unprotected error status.
+//
+// Callers in scp03.Session.Transmit and session.Session.Transmit
+// gate the Unwrap call on this predicate so error status words pass
+// through cleanly without false MAC failures.
+//
+// Note: the protocol does NOT authenticate error status words. A
+// transport-level attacker can substitute one error response for
+// another without detection. That is an inherent limitation of the
+// GP SCP03 design, not a library defect, and matters only for
+// responses where the card already failed — the secure channel
+// itself remains untampered.
+func ResponseIsSecureMessagingProtected(sw1, sw2 byte) bool {
+	if sw1 == 0x90 && sw2 == 0x00 {
+		return true
+	}
+	// 62XX (warning, state of non-volatile memory unchanged) and
+	// 63XX (warning, state of non-volatile memory changed) are
+	// warning indications, not errors. The card returns response
+	// data along with these and applies secure messaging.
+	if sw1 == 0x62 || sw1 == 0x63 {
+		return true
+	}
+	return false
+}
+
 // Unwrap verifies and decrypts a response APDU from the card.
 func (sc *SecureChannel) Unwrap(resp *apdu.Response) (*apdu.Response, error) {
 	if sc.keys == nil {
@@ -430,9 +469,22 @@ func (sc *SecureChannel) ExportMACChain() []byte {
 	return out
 }
 
-// SetMACChain updates the MAC chaining value (used by card-side after
-// verifying a C-MAC).
+// SetMACChain updates the MAC chaining value. Used by the card-side
+// secure-channel emulation in tests/mocks after verifying a C-MAC,
+// to keep its MAC chain in lockstep with what the host computed.
+//
+// The argument MUST be exactly the channel's MAC chain length (16
+// bytes for AES-128). Other lengths are programmer errors — silently
+// truncating or zero-padding produces a desynchronized chain that
+// only manifests as MAC failures on the next Transmit, far from the
+// real bug. This function panics on length mismatch for the same
+// reason NewWithMACSize panics on a bad macSize: there is no
+// recovery from a misconfigured channel.
 func (sc *SecureChannel) SetMACChain(mac []byte) {
+	if len(mac) != len(sc.macChain) {
+		panic(fmt.Sprintf("channel: SetMACChain requires exactly %d bytes, got %d",
+			len(sc.macChain), len(mac)))
+	}
 	copy(sc.macChain, mac)
 }
 
