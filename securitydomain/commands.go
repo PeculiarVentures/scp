@@ -79,12 +79,50 @@ func getDataCmd(p1p2 uint16, data []byte) *apdu.Command {
 	}
 }
 
+// STORE DATA P1 reference control parameter (GP Card Spec v2.3.1 §11.11.2.1).
+//
+// The original implementation uses 0x90 for single (or final) STORE DATA
+// blocks; that value is what YubiKey and the existing mock accept. We
+// preserve that value and only flip the high bit (b8) for non-final
+// blocks during application-level chaining:
+//
+//	bit 8: 0 = more blocks follow, 1 = last (or only) block.
+//
+// Anything else encoded into P1 (response handling, encoding hints) stays
+// constant across the chain — the card sees the same shape on every block,
+// only differing in P2 (block number) and the last-block flag.
+const (
+	storeDataP1Final    byte = 0x90 // last/only block, response permitted
+	storeDataP1NonFinal byte = 0x10 // more blocks follow (P1Final & ~0x80)
+)
+
+// storeDataCmd builds a single, unfragmented STORE DATA command. Use only
+// when the caller has verified the payload fits in one APDU. For payloads
+// that may exceed a single APDU, use storeDataChained.
 func storeDataCmd(data []byte) *apdu.Command {
 	return &apdu.Command{
 		CLA:  clsGP,
 		INS:  insStoreData,
-		P1:   0x90, // last block | BER-TLV
+		P1:   storeDataP1Final,
 		P2:   0x00,
+		Data: data,
+	}
+}
+
+// storeDataBlockCmd builds one STORE DATA APDU representing a single
+// application-level block (GP Card Spec v2.3.1 §11.11). Sequential blocks
+// share the same INS and use P2 as the block number; non-final blocks
+// clear P1 bit 8.
+func storeDataBlockCmd(blockNumber byte, lastBlock bool, data []byte) *apdu.Command {
+	p1 := storeDataP1NonFinal
+	if lastBlock {
+		p1 = storeDataP1Final
+	}
+	return &apdu.Command{
+		CLA:  clsGP,
+		INS:  insStoreData,
+		P1:   p1,
+		P2:   blockNumber,
 		Data: data,
 	}
 }

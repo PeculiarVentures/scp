@@ -28,7 +28,8 @@ func yHex(s string) []byte {
 //
 // Key:    404142434445464748494A4B4C4D4E4F (default SCP03 key)
 // Input:  CB85E66F9DD7C009CB85E66F9DD7C009 (MCV, 16 bytes)
-//       + 00FD000008 (CLA=00, INS=FD, P1=00, P2=00, Lc=08)
+//   - 00FD000008 (CLA=00, INS=FD, P1=00, P2=00, Lc=08)
+//
 // Expected MAC (first 8 bytes): 06e58094d47d8908
 func TestAESCMAC_YubicoChannelMAC(t *testing.T) {
 	key := yHex("404142434445464748494A4B4C4D4E4F")
@@ -36,7 +37,7 @@ func TestAESCMAC_YubicoChannelMAC(t *testing.T) {
 	// MAC input: MCV || APDU header bytes
 	var macInput []byte
 	macInput = append(macInput, yHex("CB85E66F9DD7C009CB85E66F9DD7C009")...) // MCV
-	macInput = append(macInput, yHex("00FD000008")...)                        // APDU header
+	macInput = append(macInput, yHex("00FD000008")...)                       // APDU header
 
 	expectedMAC := yHex("06e58094d47d8908") // First 8 bytes of CMAC
 
@@ -60,7 +61,8 @@ func TestAESCMAC_YubicoChannelMAC(t *testing.T) {
 // RMAC Key: 38C0C6E3D0B6AED40FBB420B51399081
 // MCV:      53C2C04391250CCEC0213FF68C877EDA
 // Response: 5F67E9E059DF3C52809DC9F6DDFBEF3E (16 bytes data)
-//         + 4C45691B2C8CDDD8 (8 bytes RMAC)
+//   - 4C45691B2C8CDDD8 (8 bytes RMAC)
+//
 // SW:       9000
 //
 // Expected: CMAC(key, MCV || data || SW)[:8] == received RMAC

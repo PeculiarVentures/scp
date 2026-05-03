@@ -2,12 +2,15 @@ package securitydomain
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/hex"
 	"math/big"
 	"testing"
+
+	"github.com/PeculiarVentures/scp/apdu"
 )
 
 // --- KCV tests ---
@@ -256,17 +259,17 @@ func TestDeleteKeyCmd_BothZero(t *testing.T) {
 
 func TestInsForKeyReset(t *testing.T) {
 	tests := []struct {
-		kid       byte
-		wantINS   byte
-		wantProc  bool
+		kid      byte
+		wantINS  byte
+		wantProc bool
 	}{
-		{0x01, insInitializeUpdate, true},  // SCP03
-		{0x02, 0, false},                    // SCP03 sub-key, skip
-		{0x03, 0, false},                    // SCP03 sub-key, skip
-		{0x13, insIntAuth, true},            // SCP11b
-		{0x11, insExtAuth, true},            // SCP11a
-		{0x15, insExtAuth, true},            // SCP11c
-		{0x10, insPerformSecOp, true},       // OCE
+		{0x01, insInitializeUpdate, true}, // SCP03
+		{0x02, 0, false},                  // SCP03 sub-key, skip
+		{0x03, 0, false},                  // SCP03 sub-key, skip
+		{0x13, insIntAuth, true},          // SCP11b
+		{0x11, insExtAuth, true},          // SCP11a
+		{0x15, insExtAuth, true},          // SCP11c
+		{0x10, insPerformSecOp, true},     // OCE
 	}
 	for _, tt := range tests {
 		ins, process := insForKeyReset(tt.kid)
@@ -515,7 +518,15 @@ func TestRequireDEK(t *testing.T) {
 	if err := s.requireDEK(); err == nil {
 		t.Error("expected error for nil DEK")
 	}
+	// All-zero DEK must be rejected to prevent silent use of a known
+	// key — that would defeat the purpose of session-key encryption.
 	s.dek = make([]byte, 16)
+	if err := s.requireDEK(); err == nil {
+		t.Error("expected error for all-zero DEK")
+	}
+	// A normal session DEK should pass.
+	s.dek = []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10}
 	if err := s.requireDEK(); err != nil {
 		t.Errorf("unexpected: %v", err)
 	}
@@ -537,5 +548,140 @@ func TestSession_Close_ZerosDEK(t *testing.T) {
 		if b != 0 {
 			t.Errorf("dek[%d] not zeroed: 0x%02X", i, b)
 		}
+	}
+}
+
+// --- STORE DATA application-level chaining tests ---
+
+// recordingTransport is a minimal transport.Transport that records every
+// outgoing command and returns 9000 for each. Used to verify that the
+// caller fragments STORE DATA correctly per GP §11.11 (block number in
+// P2, last-block bit in P1).
+type recordingTransport struct {
+	commands []*apdu.Command
+}
+
+func (r *recordingTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	clone := *cmd
+	clone.Data = append([]byte(nil), cmd.Data...)
+	r.commands = append(r.commands, &clone)
+	return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+}
+
+func (r *recordingTransport) TransmitRaw(_ context.Context, raw []byte) ([]byte, error) {
+	return []byte{0x90, 0x00}, nil
+}
+
+func (r *recordingTransport) Close() error { return nil }
+
+// TestStoreDataChained_SingleBlock confirms that payloads ≤255 bytes are
+// transmitted as a single APDU with P1 = 0x90 and P2 = 0x00.
+func TestStoreDataChained_SingleBlock(t *testing.T) {
+	rt := &recordingTransport{}
+	s := &Session{transport: rt, authenticated: true}
+
+	payload := bytes.Repeat([]byte{0xAB}, 200)
+	resp, err := s.transmitStoreDataChained(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("transmitStoreDataChained: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
+	}
+	if len(rt.commands) != 1 {
+		t.Fatalf("expected 1 APDU, got %d", len(rt.commands))
+	}
+	cmd := rt.commands[0]
+	if cmd.INS != insStoreData {
+		t.Errorf("INS = %02X, want %02X", cmd.INS, insStoreData)
+	}
+	if cmd.P1 != storeDataP1Final {
+		t.Errorf("P1 = %02X, want %02X (final block)", cmd.P1, storeDataP1Final)
+	}
+	if cmd.P2 != 0x00 {
+		t.Errorf("P2 = %02X, want 0x00", cmd.P2)
+	}
+	if !bytes.Equal(cmd.Data, payload) {
+		t.Errorf("payload mismatch")
+	}
+}
+
+// TestStoreDataChained_MultipleBlocks confirms that payloads >255 bytes
+// are split into ≤255-byte blocks with sequential P2 and the last-block
+// bit (b8 of P1) set only on the final block. Each block must be its own
+// APDU — never an APDU-chained fragment of one logical command.
+func TestStoreDataChained_MultipleBlocks(t *testing.T) {
+	rt := &recordingTransport{}
+	s := &Session{transport: rt, authenticated: true}
+
+	// 600 bytes -> 3 blocks: 255 + 255 + 90.
+	payload := make([]byte, 600)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	resp, err := s.transmitStoreDataChained(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("transmitStoreDataChained: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
+	}
+	if len(rt.commands) != 3 {
+		t.Fatalf("expected 3 APDUs, got %d", len(rt.commands))
+	}
+
+	wantSizes := []int{255, 255, 90}
+	for i, cmd := range rt.commands {
+		if cmd.CLA != clsGP {
+			t.Errorf("block %d: CLA = %02X, want %02X", i, cmd.CLA, clsGP)
+		}
+		if cmd.INS != insStoreData {
+			t.Errorf("block %d: INS = %02X, want %02X", i, cmd.INS, insStoreData)
+		}
+		if cmd.P2 != byte(i) {
+			t.Errorf("block %d: P2 = %02X, want %02X (block number)", i, cmd.P2, byte(i))
+		}
+		if len(cmd.Data) != wantSizes[i] {
+			t.Errorf("block %d: data size = %d, want %d", i, len(cmd.Data), wantSizes[i])
+		}
+		isLast := i == len(rt.commands)-1
+		var wantP1 byte = storeDataP1NonFinal
+		if isLast {
+			wantP1 = storeDataP1Final
+		}
+		if cmd.P1 != wantP1 {
+			t.Errorf("block %d (last=%v): P1 = %02X, want %02X", i, isLast, cmd.P1, wantP1)
+		}
+		// Critical: each block APDU must NOT carry the chaining CLA bit
+		// (0x10). That bit signals ISO/IEC 7816 transport-level chaining,
+		// which would conflict with STORE DATA's own application-level
+		// block protocol.
+		if cmd.CLA&0x10 != 0 {
+			t.Errorf("block %d: CLA = %02X has transport-chaining bit set", i, cmd.CLA)
+		}
+	}
+
+	// Verify the concatenated data round-trips.
+	var got []byte
+	for _, cmd := range rt.commands {
+		got = append(got, cmd.Data...)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload reassembly mismatch")
+	}
+}
+
+// TestStoreDataChained_RejectsAPDUChainingPath confirms that the generic
+// transmitWithChaining path explicitly refuses STORE DATA — STORE DATA
+// uses its own chaining protocol and must go through transmitStoreDataChained.
+func TestStoreDataChained_RejectsAPDUChainingPath(t *testing.T) {
+	rt := &recordingTransport{}
+	s := &Session{transport: rt, authenticated: true}
+
+	cmd := storeDataCmd(make([]byte, 300)) // >255 to force the chaining branch
+	_, err := s.transmitWithChaining(context.Background(), cmd)
+	if err == nil {
+		t.Fatal("expected error: STORE DATA must not use APDU-level chaining")
 	}
 }

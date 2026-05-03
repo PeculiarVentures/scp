@@ -392,4 +392,3 @@ func parseRaw(raw []byte) *apdu.Command {
 	}
 	return cmd
 }
-

@@ -21,14 +21,14 @@ func generateTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 	}
 
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "Test CA"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
-		SubjectKeyId: []byte{0x01, 0x02, 0x03, 0x04},
+		SubjectKeyId:          []byte{0x01, 0x02, 0x03, 0x04},
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)

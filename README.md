@@ -154,23 +154,49 @@ resp, err := sess.Transmit(ctx, &apdu.Command{
 SCP11 uses ECDH key agreement with X.509 certificates. Three variants:
 
 ```go
-// SCP11b — card authenticates to host (simplest)
-sess, err := session.Open(ctx, transport, session.DefaultConfig())
+// SCP11b — card authenticates to host
+// IMPORTANT: callers must configure trust. See "Card authentication" below.
+sess, err := session.Open(ctx, transport, &session.Config{
+    Variant:         session.SCP11b,
+    CardTrustPolicy: &trust.Policy{Roots: rootPool},
+})
 
 // SCP11a — mutual authentication with certificates
 sess, err := session.Open(ctx, transport, &session.Config{
     Variant:        session.SCP11a,
     KeyID:          0x11,
     OCEPrivateKey:  myECDSAKey,
-    OCECertificate: myCert,
-})
-
-// SCP11b with trust validation
-sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:         session.SCP11b,
+    OCECertificate: myCert, // must correspond to OCEPrivateKey
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 ```
+
+### Card authentication
+
+`session.Open` fails closed unless one of these is set:
+
+- `CardTrustPolicy` — preferred; full chain validation through the `trust` package, with P-256 enforcement and optional serial/SKI constraints.
+- `CardTrustAnchors` — minimal X.509 chain validation against a `*x509.CertPool`.
+- `InsecureSkipCardAuthentication` — escape hatch for tests and labs only. Without it, `session.Open` against a card that returns a self-signed or proprietary key is rejected before any ECDH.
+
+This is intentional: an SCP11b session against an unauthenticated card is not authenticated key agreement — it is opportunistic encryption against whoever answered the SELECT. Treat the difference as load-bearing.
+
+### Applet selection
+
+`DefaultConfig().ApplicationAID` is `nil`. SCP sessions on YubiKey are scoped to the currently selected applet, and selecting another applet terminates the session. The supported pattern is:
+
+```go
+// Caller selects the applet first, then opens SCP against it.
+_, err := transport.Transmit(ctx, apdu.NewSelect(session.AIDPIV))
+// ...check resp...
+sess, err := session.Open(ctx, transport, cfg)
+```
+
+If you need to address two applets, open two sessions.
+
+### SCP11a/c key/certificate consistency
+
+For mutual-auth variants, `Open` verifies that `OCEPrivateKey` corresponds to `OCECertificate` before sending anything to the card. A mismatch is rejected immediately rather than discovered in the second ECDH.
 
 ## Implementing a Transport
 
@@ -192,27 +218,54 @@ Both `scp03.Open` and `session.Open` accept any `Transport`. Whether it's a loca
 go test ./...
 ```
 
-The test suite includes 118 tests covering:
+The test suite includes 135 tests covering:
 
 - **SCP03 end-to-end:** Handshake, encrypted echo, multi-command MAC chain, wrong-key rejection, empty payload counter sync
+- **SCP03 transcript vectors:** Byte-exact known-answer tests against GlobalPlatformPro JCOP4 (MAC-only) and Samsung OpenSCP-Java AES-128 in both S8 and S16 modes — these distinguish a correct EXTERNAL AUTHENTICATE wrap from one that encrypts the host cryptogram, and exercise the full S16 code path
 - **SCP11 end-to-end:** SCP11b (no receipt), SCP11a (with receipt + cert chaining), PIV key generation, counter sync
+- **SCP11 fail-closed regressions:** Reject card cert when no trust anchors and no opt-in; reject OCE private/certificate mismatches
 - **Reference vector tests:** Byte-exact verification against published SCP11 test vectors
 - **YubiKey compatibility tests:** APDU byte layout verification against YubiKey 5.7+ expectations
 - **Cross-implementation vectors:** SCP03 KDF, channel MAC, and RMAC vectors from the Yubico .NET SDK
-- **Security Domain management:** APDU construction, TLV parsing, KCV computation, DEK requirements, reset lockout dispatch
+- **Security Domain management:** APDU construction, TLV parsing, KCV computation, DEK requirements (including all-zero rejection), STORE DATA application-level chaining (single block, multi-block fragmentation, ISO chaining rejection), reset lockout dispatch
 - **Trust validation:** Chain building, fail-closed behavior, serial allowlists, SKI matching, real Yubico OCE certificate chain
+- **Resource limits:** GET RESPONSE iteration and byte caps; BER-TLV decoder depth, node-count, and size bounds
 
 ## Specification Compliance
 
 | Spec | Coverage |
 |---|---|
-| GP Card Spec v2.3.1 §11 | Security Domain APDU commands: PUT KEY, DELETE, STORE DATA, GET DATA |
-| GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE, session key derivation, secure messaging |
-| GP Amendment F (SCP11) v1.3 | All three variants (a/b/c), ECKA, X9.63 KDF, receipt verification, S8 and S16 modes |
-| GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC (shared by both protocols) |
+| GP Card Spec v2.3.1 §11 | Security Domain APDU commands: PUT KEY, DELETE, STORE DATA (with §11.11 application-level chaining), GET DATA |
+| GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE (MAC-only, never C-ENC), session key derivation, secure messaging, S8 and S16 modes |
+| GP Amendment F (SCP11) v1.3 | All three variants (a/b/c), ECKA, X9.63 KDF, receipt verification, fail-closed card authentication |
+| GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC (R-MAC verified on every response when negotiated, including errors) |
 | NIST SP 800-108 | KDF in counter mode with AES-CMAC |
 | NIST SP 800-38B | AES-CMAC |
 | BSI TR-03111 | ECDH with zero-point validation |
+
+## Conformance and hardening
+
+Beyond the mock card, the test suite includes independent transcript vectors so the implementation is validated against external references:
+
+- **GlobalPlatformPro JCOP4** — real-card SCP03 INITIALIZE UPDATE and EXTERNAL AUTHENTICATE dump with default keys.
+- **Samsung OpenSCP-Java AES-128/S8** — full SCP03 transcript including the EXTERNAL AUTHENTICATE wrapping that distinguishes MAC-only from MAC-and-encrypt.
+- **Samsung OpenSCP-Java AES-128/S16** — same in S16 mode (16-byte challenges, 16-byte cryptograms, 16-byte MACs).
+
+These are byte-exact known-answer tests using a recording transport; they cannot pass against a mock card that mirrors the implementation's own behavior.
+
+Hardening invariants enforced by the code and verified by tests:
+
+- SCP03 EXTERNAL AUTHENTICATE is C-MACed but never C-ENC encrypted, regardless of the negotiated post-authentication security level.
+- SCP03 supports both S8 (8-byte) and S16 (16-byte) modes, dispatched by the `i` parameter of INITIALIZE UPDATE.
+- R-MAC is verified on every response under R-MAC-negotiated channels — including status-only and error responses.
+- Secure-messaging C-MAC is computed over the same Lc encoding (1-byte short or 3-byte extended) that goes on the wire.
+- SCP11 fails closed without `CardTrustPolicy`, `CardTrustAnchors`, or `InsecureSkipCardAuthentication`.
+- SCP11a/c require both `OCEPrivateKey` and `OCECertificate`, and verify they correspond to each other before contact with the card.
+- SCP11 `DefaultConfig` does not auto-SELECT a target applet (YubiKey scopes SCP to the selected applet).
+- Security Domain refuses to use an all-zero session DEK.
+- `STORE DATA` payloads above one APDU use GP §11.11 application-level chaining (sequential P2, last-block bit), not ISO 7816 CLA-bit chaining.
+- `GET RESPONSE` collection is bounded by both iteration count and accumulated byte count.
+- BER-TLV decoding is bounded by depth, node count, and total input size; resource-limit errors propagate rather than being absorbed by opaque-payload tolerance.
 
 ## License
 

@@ -142,6 +142,31 @@ func ecdsaToECDH(pub interface{}) (*ecdh.PublicKey, error) {
 	}
 }
 
+// verifyOCEKeyMatchesCert checks that the configured OCE private key
+// corresponds to the public key in the OCE certificate. This catches
+// configuration mistakes where the certificate sent to the card and
+// the private key used in the second ECDH disagree — which would
+// either fail MUTUAL AUTHENTICATE noisily or, against a permissive
+// card, complete a session under a fundamentally different identity
+// than the host believes it is presenting.
+func verifyOCEKeyMatchesCert(priv *ecdsa.PrivateKey, cert *x509.Certificate) error {
+	if priv == nil || cert == nil {
+		return errors.New("nil key or certificate")
+	}
+	certPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("OCE certificate public key is not ECDSA: %T", cert.PublicKey)
+	}
+	if priv.PublicKey.Curve != certPub.Curve {
+		return fmt.Errorf("curve mismatch: private key %s, certificate %s",
+			priv.PublicKey.Curve.Params().Name, certPub.Curve.Params().Name)
+	}
+	if priv.PublicKey.X.Cmp(certPub.X) != 0 || priv.PublicKey.Y.Cmp(certPub.Y) != 0 {
+		return errors.New("private key does not correspond to certificate public key")
+	}
+	return nil
+}
+
 // findECPointInNodes recursively searches TLV nodes for a 65-byte
 // uncompressed P-256 EC point (0x04 prefix).
 func findECPointInNodes(nodes []*tlv.Node) (*ecdh.PublicKey, error) {

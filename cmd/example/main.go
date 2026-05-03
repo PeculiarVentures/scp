@@ -36,7 +36,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("create SCP11 card: %v", err)
 	}
-	scp11Sess, err := session.Open(ctx, scp11Card.Transport(), session.DefaultConfig())
+	cfg := session.DefaultConfig()
+	cfg.InsecureSkipCardAuthentication = true // mock card self-signed key
+	scp11Sess, err := session.Open(ctx, scp11Card.Transport(), cfg)
 	if err != nil {
 		log.Fatalf("SCP11 Open: %v", err)
 	}

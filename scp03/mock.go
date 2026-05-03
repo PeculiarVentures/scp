@@ -93,7 +93,7 @@ func (c *MockCard) doInitializeUpdate(cmd *apdu.Command) (*apdu.Response, error)
 	}
 
 	// Calculate card cryptogram (using S-MAC per GP SCP03 spec)
-	cardCryptogram, err := calculateCryptogram(smac, derivConstCardCrypto, kdfContext, keyLen)
+	cardCryptogram, err := calculateCryptogram(smac, derivConstCardCrypto, kdfContext, 8)
 	if err != nil {
 		return nil, err
 	}
@@ -164,22 +164,15 @@ func (c *MockCard) doExternalAuthenticate(cmd *apdu.Command) (*apdu.Response, er
 	}
 	c.session.ch.SetMACChain(expectedMAC)
 
-	// Decrypt the payload to get the host cryptogram.
-	var hostCryptogram []byte
-	if len(payload) > 0 {
-		hostCryptogram, err = c.session.ch.DecryptCommand(payload)
-		if err != nil {
-			c.session = nil
-			return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil
-		}
-	}
+	// EXTERNAL AUTHENTICATE carries the host cryptogram in cleartext plus C-MAC.
+	hostCryptogram := payload
 
 	// Verify host cryptogram.
 	kdfContext := c.session.keys.DEK // Retrieved from temp storage
 	smac := c.session.keys.Receipt   // Retrieved from temp storage (S-MAC key)
 	keyLen := len(smac)
 
-	expectedHC, err := calculateCryptogram(smac, derivConstHostCrypto, kdfContext, keyLen)
+	expectedHC, err := calculateCryptogram(smac, derivConstHostCrypto, kdfContext, 8)
 	if err != nil {
 		c.session = nil
 		return nil, err
@@ -290,4 +283,3 @@ func (t *MockTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, er
 }
 
 func (t *MockTransport) Close() error { return nil }
-

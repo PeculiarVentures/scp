@@ -28,11 +28,11 @@ const (
 
 // Algorithm identifiers for PIV key generation.
 const (
-	AlgoRSA2048  byte = 0x07
-	AlgoECCP256  byte = 0x11
-	AlgoECCP384  byte = 0x14
-	AlgoEd25519  byte = 0xE0 // YubiKey 5.7+ specific
-	AlgoX25519   byte = 0xE1 // YubiKey 5.7+ specific
+	AlgoRSA2048 byte = 0x07
+	AlgoECCP256 byte = 0x11
+	AlgoECCP384 byte = 0x14
+	AlgoEd25519 byte = 0xE0 // YubiKey 5.7+ specific
+	AlgoX25519  byte = 0xE1 // YubiKey 5.7+ specific
 )
 
 // PIN policy values (YubiKey specific).

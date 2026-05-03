@@ -75,7 +75,10 @@ type Config struct {
 	// ApplicationAID is the target applet to SELECT after the secure
 	// channel is established. If set, Open() sends a wrapped SELECT
 	// for this AID as the final step. If nil, no application SELECT
-	// is performed and the caller must send their own.
+	// is performed and the caller must send their own. Some devices,
+	// including YubiKey, scope SCP sessions to the selected applet and
+	// terminate the session when another applet is selected, so this is
+	// nil by default.
 	// Example: PIV = A000000308
 	ApplicationAID []byte
 
@@ -105,6 +108,11 @@ type Config struct {
 	// only extracts the public key after successful validation.
 	// If validation fails, session establishment fails closed.
 	CardTrustPolicy *trust.Policy
+
+	// InsecureSkipCardAuthentication permits SCP11 without validating the
+	// card certificate. This is intended only for tests and labs. Production
+	// callers should configure CardTrustPolicy or CardTrustAnchors.
+	InsecureSkipCardAuthentication bool
 
 	// HostID is the optional OCE identifier included in the KDF shared
 	// info per GP SCP11 §3.1.2. If set, it is appended to the shared
@@ -145,7 +153,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Variant:           SCP11b,
 		SecurityDomainAID: AIDSecurityDomain,
-		ApplicationAID:    AIDPIV,
+		ApplicationAID:    nil,
 		KeyID:             0x13,
 		KeyVersion:        0x01,
 		SecurityLevel:     channel.LevelFull,
@@ -207,6 +215,20 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	// Both SCP11a and SCP11c are mutual-auth variants that require the OCE
 	// certificate to be provided to the card before MUTUAL AUTHENTICATE.
 	if cfg.Variant == SCP11a || cfg.Variant == SCP11c {
+		if cfg.OCEPrivateKey == nil {
+			return nil, errors.New("OCE private key required for SCP11a/c (mutual-auth variants)")
+		}
+		if cfg.OCECertificate == nil {
+			return nil, errors.New("OCE certificate required for SCP11a/c (mutual-auth variants)")
+		}
+		// Defense-in-depth: ensure the configured private key actually
+		// corresponds to the certificate sent to the card. A mismatch
+		// would either cause MUTUAL AUTHENTICATE to fail (best case) or,
+		// worse, succeed against a permissive card while the host
+		// believes it is presenting one identity but holds another.
+		if err := verifyOCEKeyMatchesCert(cfg.OCEPrivateKey, cfg.OCECertificate); err != nil {
+			return nil, fmt.Errorf("OCE key/certificate mismatch: %w", err)
+		}
 		if err := s.sendOCECertificate(ctx); err != nil {
 			s.state = StateFailed
 			return nil, fmt.Errorf("send OCE cert: %w", err)
@@ -376,8 +398,20 @@ func (s *Session) getCardCertificate(ctx context.Context) error {
 		return s.validateCardCertChain(resp.Data)
 	}
 
-	// Legacy path: simple key extraction with optional root validation.
-	pubKey, err := extractCardPublicKey(resp.Data, s.config.CardTrustAnchors)
+	return s.legacyExtractAndStoreKey(resp.Data)
+}
+
+// legacyExtractAndStoreKey is the pre-trust-policy code path: it parses
+// the card certificate (or, with a configured trust pool, validates the
+// chain) and stores the static public key for ECDH. It must fail closed
+// when neither CardTrustAnchors nor InsecureSkipCardAuthentication are
+// set — otherwise SCP11b reduces to opportunistic encryption against any
+// responder, which is not authentication.
+func (s *Session) legacyExtractAndStoreKey(data []byte) error {
+	if s.config.CardTrustAnchors == nil && !s.config.InsecureSkipCardAuthentication {
+		return errors.New("SCP11 card certificate validation is required; configure CardTrustPolicy/CardTrustAnchors or set InsecureSkipCardAuthentication for tests")
+	}
+	pubKey, err := extractCardPublicKey(data, s.config.CardTrustAnchors)
 	if err != nil {
 		return fmt.Errorf("extract card public key: %w", err)
 	}
@@ -423,7 +457,7 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 	}
 
 	// PERFORM SECURITY OPERATION sends the OCE certificate chain.
-// GP §7.5: Certificate chaining for PERFORM SECURITY OPERATION.
+	// GP §7.5: Certificate chaining for PERFORM SECURITY OPERATION.
 	//   - Intermediate chunks: CLA |= 0x10 (chaining bit), P1 |= 0x80
 	//   - Final chunk: original CLA, original P1
 	//   - Each chunk max 255 bytes
@@ -445,7 +479,7 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 		p1 := p1Base
 		if !isLast {
 			cla |= 0x10 // Command chaining
-			p1 |= 0x80 // GP §7.5.2.1: more certificate data follows
+			p1 |= 0x80  // GP §7.5.2.1: more certificate data follows
 		}
 
 		cmd := &apdu.Command{
@@ -558,11 +592,14 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	}
 
 	// ShSes = ECDH(SK.OCE or eSK.OCE, PK.SD)
-// GP §3.1.1: For SCP11b, reuse the ephemeral key for ShSes.
+	// GP §3.1.1: For SCP11b, reuse the ephemeral key for ShSes.
 	// For SCP11a/c: use the OCE static private key
 	// For SCP11b: reuse the ephemeral private key (no static key available)
 	var shSesKey *ecdh.PrivateKey
-	if (s.config.Variant == SCP11a || s.config.Variant == SCP11c) && s.config.OCEPrivateKey != nil {
+	if s.config.Variant == SCP11a || s.config.Variant == SCP11c {
+		if s.config.OCEPrivateKey == nil {
+			return errors.New("OCE private key required for SCP11a/c")
+		}
 		// Convert the OCE static ECDSA key to ECDH.
 		oceStaticECDH, err := s.config.OCEPrivateKey.ECDH()
 		if err != nil {
@@ -610,7 +647,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 
 	s.sessionKeys = keys
 
-// GP §5.3.2: macChain is initialized to the receipt for SCP11a/c.
+	// GP §5.3.2: macChain is initialized to the receipt for SCP11a/c.
 
 	if receipt != nil {
 		s.sessionKeys.MACChain = make([]byte, len(receipt))
@@ -619,4 +656,3 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 
 	return nil
 }
-

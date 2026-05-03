@@ -398,7 +398,6 @@ func TestEcdsaToECDH_SDKey(t *testing.T) {
 	}
 }
 
-
 func TestMutualAuthCAPDU_MatchesReferenceVectors(t *testing.T) {
 	// the reference expected SCP11a MUTUAL AUTHENTICATE CAPDU:
 	// 80 82 03 11 53 A6{0D 90{02 11 01} 95{01 3C} 80{01 88} 81{01 10}}

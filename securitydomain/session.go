@@ -194,11 +194,42 @@ func (s *Session) requireDEK() error {
 	if len(s.dek) == 0 {
 		return fmt.Errorf("%w: session DEK not available (SCP03 session required for PUT KEY)", ErrNotAuthenticated)
 	}
+	allZero := true
+	for _, b := range s.dek {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return fmt.Errorf("%w: refusing to use all-zero SCP03 DEK", ErrNotAuthenticated)
+	}
 	return nil
 }
 
-// transmitWithChaining handles command chaining for large payloads.
+// transmitWithChaining handles large payloads.
+//
+// For commands ≤255 bytes, transmits as-is. For larger payloads we have
+// two options:
+//
+//  1. APDU-level chaining (CLA bit 5). Each chained APDU is independently
+//     wrapped by secure messaging, so secure-channel state advances per
+//     APDU. This works for instructions that the application semantically
+//     treats as a single command but that is fragmented at the transport
+//     layer.
+//
+//  2. Application-level chaining (instruction-specific). STORE DATA has
+//     its own block-counting protocol in P2 with a "last block" flag in
+//     P1; APDU-level chaining must NOT be used for it. Callers handling
+//     STORE DATA invoke transmitStoreDataChained instead.
+//
+// transmitWithChaining therefore implements option 1 only. Each chained
+// APDU passes through secure messaging individually; nothing is split
+// after wrapping.
 func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	if cmd.INS == insStoreData {
+		return nil, fmt.Errorf("transmitWithChaining must not be used for STORE DATA; use transmitStoreDataChained")
+	}
 	if len(cmd.Data) <= 255 {
 		return s.transmit(ctx, cmd)
 	}
@@ -214,6 +245,51 @@ func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (
 		}
 		if i < len(cmds)-1 && !resp.IsSuccess() {
 			return resp, resp.Error()
+		}
+		lastResp = resp
+	}
+	return lastResp, nil
+}
+
+// storeDataMaxBlock is the maximum payload per STORE DATA block. We use
+// the short-Lc maximum (255) so the chained APDUs work on cards that do
+// not support extended length, including older YubiKey firmware.
+const storeDataMaxBlock = 255
+
+// transmitStoreDataChained sends a STORE DATA payload that may exceed a
+// single APDU using GP application-level chaining (§11.11). The payload
+// is split into ≤255-byte blocks, each block is sent as an individual
+// STORE DATA APDU with P2 = block number, P1 b8 = 0 for all but the last.
+// Each block goes through secure messaging individually (no plaintext
+// pre-splitting after wrapping).
+func (s *Session) transmitStoreDataChained(ctx context.Context, payload []byte) (*apdu.Response, error) {
+	if len(payload) == 0 {
+		return s.transmit(ctx, storeDataCmd(nil))
+	}
+	if len(payload) <= storeDataMaxBlock {
+		return s.transmit(ctx, storeDataCmd(payload))
+	}
+
+	totalBlocks := (len(payload) + storeDataMaxBlock - 1) / storeDataMaxBlock
+	if totalBlocks > 256 {
+		return nil, fmt.Errorf("STORE DATA payload requires %d blocks; P2 block number exceeds 0xFF", totalBlocks)
+	}
+
+	var lastResp *apdu.Response
+	for i := 0; i < totalBlocks; i++ {
+		start := i * storeDataMaxBlock
+		end := start + storeDataMaxBlock
+		if end > len(payload) {
+			end = len(payload)
+		}
+		isLast := i == totalBlocks-1
+		cmd := storeDataBlockCmd(byte(i), isLast, payload[start:end])
+		resp, err := s.transmit(ctx, cmd)
+		if err != nil {
+			return nil, fmt.Errorf("STORE DATA block %d/%d: %w", i, totalBlocks, err)
+		}
+		if !isLast && !resp.IsSuccess() {
+			return resp, fmt.Errorf("STORE DATA block %d/%d: %w", i, totalBlocks, resp.Error())
 		}
 		lastResp = resp
 	}
@@ -499,9 +575,7 @@ func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs
 	}
 
 	payload := storeCertificatesData(ref, derCerts)
-	cmd := storeDataCmd(payload)
-
-	resp, err := s.transmitWithChaining(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store certificates: %w", err)
 	}
@@ -554,9 +628,7 @@ func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byt
 	}
 
 	payload := storeCaIssuerData(ref, ski)
-	cmd := storeDataCmd(payload)
-
-	resp, err := s.transmit(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store CA issuer: %w", err)
 	}
@@ -581,8 +653,7 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 		return err
 	}
 
-	cmd := storeDataCmd(payload)
-	resp, err := s.transmit(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store allowlist: %w", err)
 	}
@@ -614,13 +685,13 @@ func (s *Session) GetData(ctx context.Context, tag uint16, data []byte) ([]byte,
 	return resp.Data, nil
 }
 
-// StoreData sends a raw STORE DATA command. Requires authentication.
+// StoreData sends a STORE DATA command, fragmenting the payload into
+// blocks if it exceeds a single APDU.
 func (s *Session) StoreData(ctx context.Context, data []byte) error {
 	if err := s.requireAuth(); err != nil {
 		return err
 	}
-	cmd := storeDataCmd(data)
-	resp, err := s.transmit(ctx, cmd)
+	resp, err := s.transmitStoreDataChained(ctx, data)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store data: %w", err)
 	}

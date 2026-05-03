@@ -91,13 +91,13 @@ type Result struct {
 
 // Errors returned by validation.
 var (
-	ErrNoRoots         = errors.New("trust: no root certificates configured")
-	ErrNoCertificates  = errors.New("trust: no certificates to validate")
-	ErrChainInvalid    = errors.New("trust: certificate chain validation failed")
-	ErrWrongCurve      = errors.New("trust: leaf certificate key is not P-256")
-	ErrWrongKeyType    = errors.New("trust: leaf certificate key is not ECDSA")
-	ErrSerialMismatch  = errors.New("trust: leaf certificate serial not in allowed list")
-	ErrSKIMismatch     = errors.New("trust: leaf certificate SKI does not match expected value")
+	ErrNoRoots        = errors.New("trust: no root certificates configured")
+	ErrNoCertificates = errors.New("trust: no certificates to validate")
+	ErrChainInvalid   = errors.New("trust: certificate chain validation failed")
+	ErrWrongCurve     = errors.New("trust: leaf certificate key is not P-256")
+	ErrWrongKeyType   = errors.New("trust: leaf certificate key is not ECDSA")
+	ErrSerialMismatch = errors.New("trust: leaf certificate serial not in allowed list")
+	ErrSKIMismatch    = errors.New("trust: leaf certificate SKI does not match expected value")
 )
 
 // ValidateSCP11Chain validates a certificate chain for SCP11 trust

@@ -38,6 +38,19 @@ type Node struct {
 	Children []*Node
 }
 
+const (
+	maxDecodeDepth  = 32
+	maxDecodeNodes  = 4096
+	maxDecodeLength = 1 << 20
+)
+
+// errResourceLimit signals that a hard decoder resource limit was hit.
+// Unlike ordinary parse errors (which are swallowed at constructed-node
+// boundaries because GP cards routinely return constructed tags with
+// opaque payloads), resource-limit errors must propagate so the host
+// cannot be coerced into unbounded work by a hostile or buggy card.
+var errResourceLimit = errors.New("tlv: decoder resource limit exceeded")
+
 // Encode serializes a Node into BER-TLV bytes. Constructed nodes
 // (those with children) encode recursively. Primitive nodes write
 // their raw value.
@@ -60,9 +73,24 @@ func (n *Node) Encode() []byte {
 
 // Decode parses a byte slice into a sequence of TLV Nodes.
 func Decode(data []byte) ([]*Node, error) {
+	count := 0
+	return decode(data, 0, &count)
+}
+
+func decode(data []byte, depth int, count *int) ([]*Node, error) {
+	if depth > maxDecodeDepth {
+		return nil, fmt.Errorf("%w: nesting too deep (>%d)", errResourceLimit, maxDecodeDepth)
+	}
+	if len(data) > maxDecodeLength {
+		return nil, fmt.Errorf("%w: input too large (%d bytes)", errResourceLimit, len(data))
+	}
 	var nodes []*Node
 	offset := 0
 	for offset < len(data) {
+		*count += 1
+		if *count > maxDecodeNodes {
+			return nil, fmt.Errorf("%w: too many nodes (>%d)", errResourceLimit, maxDecodeNodes)
+		}
 		tag, tagLen, err := decodeTag(data[offset:])
 		if err != nil {
 			return nil, fmt.Errorf("decode tag at offset %d: %w", offset, err)
@@ -91,12 +119,16 @@ func Decode(data []byte) ([]*Node, error) {
 
 		// Constructed tags have bit 6 of the first byte set.
 		if isConstructed(tag) && length > 0 {
-			children, err := Decode(value)
+			children, err := decode(value, depth+1, count)
 			if err == nil {
 				node.Children = children
+			} else if errors.Is(err, errResourceLimit) {
+				// Resource limits are non-negotiable: propagate.
+				return nil, err
 			}
-			// If child decoding fails, keep raw value. Some GP responses
-			// use constructed tags with opaque payloads.
+			// Otherwise: parse error inside an opaque payload. Some GP
+			// responses use constructed tags whose value is not itself
+			// well-formed BER-TLV; tolerate that and keep the raw value.
 		}
 
 		nodes = append(nodes, node)

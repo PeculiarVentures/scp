@@ -119,3 +119,62 @@ func TestMultipleNodes(t *testing.T) {
 		t.Fatalf("expected 2 nodes, got %d", len(nodes))
 	}
 }
+
+// --- DoS-resistance tests (resource limits) ---
+
+// TestDecode_RejectsExcessiveDepth confirms that deeply nested constructed
+// TLV input from the card is rejected before exhausting the host's stack.
+func TestDecode_RejectsExcessiveDepth(t *testing.T) {
+	// Build a deeply nested constructed TLV: A0 LL (A0 LL (...)) repeating.
+	// Each level: tag 0xA0 (constructed), BER-TLV length, inner payload.
+	// Innermost is a primitive 0x80 0x00 (empty primitive).
+	build := func(depth int) []byte {
+		payload := []byte{0x80, 0x00}
+		for i := 0; i < depth; i++ {
+			lenBytes := encodeLength(len(payload))
+			wrapped := make([]byte, 0, 1+len(lenBytes)+len(payload))
+			wrapped = append(wrapped, 0xA0)
+			wrapped = append(wrapped, lenBytes...)
+			wrapped = append(wrapped, payload...)
+			payload = wrapped
+		}
+		return payload
+	}
+
+	// Just under the limit: should decode.
+	if _, err := Decode(build(30)); err != nil {
+		t.Errorf("depth 30 should decode: %v", err)
+	}
+
+	// Well over the limit: should be rejected.
+	if _, err := Decode(build(100)); err == nil {
+		t.Error("excessively nested TLV should be rejected")
+	}
+}
+
+// TestDecode_RejectsTooManyNodes confirms that a TLV stream with too many
+// elements is rejected to prevent O(N) memory blowup from a single GET DATA.
+func TestDecode_RejectsTooManyNodes(t *testing.T) {
+	// Build N empty primitives back-to-back: each one is 2 bytes (80 00).
+	// With maxDecodeNodes = 4096, we want to exceed that comfortably.
+	const target = 5000
+	encoded := make([]byte, 0, target*2)
+	for i := 0; i < target; i++ {
+		encoded = append(encoded, 0x80, 0x00)
+	}
+	if _, err := Decode(encoded); err == nil {
+		t.Errorf("decoding %d nodes should be rejected", target)
+	}
+}
+
+// TestDecode_RejectsHugeInput confirms that an input larger than the
+// per-call byte limit is rejected. This prevents a hostile card from
+// inducing the host to decode a multi-megabyte response stream.
+func TestDecode_RejectsHugeInput(t *testing.T) {
+	// 2 MB of a primitive — exceeds the 1 MB limit.
+	const size = 2 * 1024 * 1024
+	huge := make([]byte, size)
+	if _, err := Decode(huge); err == nil {
+		t.Error("huge input should be rejected")
+	}
+}

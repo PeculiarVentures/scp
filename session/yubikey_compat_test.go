@@ -40,12 +40,13 @@ func TestYubiKeyCompatibility_SCP11b_ProtocolTrace(t *testing.T) {
 	}
 	t.Logf("STEP 1 SELECT SD: %X ✓", selectBytes)
 
-	// Verify the application AID is PIV by default.
-	expectedAppAID, _ := hex.DecodeString("A000000308")
-	if !bytes.Equal(cfg.ApplicationAID, expectedAppAID) {
-		t.Errorf("default ApplicationAID: got %X, want %X (PIV)", cfg.ApplicationAID, expectedAppAID)
+	// YubiKey scopes an SCP session to the selected applet and selecting
+	// another applet terminates the session, so the default config must not
+	// auto-select PIV after opening the Security Domain channel.
+	if cfg.ApplicationAID != nil {
+		t.Errorf("default ApplicationAID: got %X, want nil", cfg.ApplicationAID)
 	}
-	t.Logf("STEP 1b Application AID (PIV): %X ✓", cfg.ApplicationAID)
+	t.Logf("STEP 1b Application AID: nil by default ✓")
 
 	// =====================================================================
 	// STEP 2: GET DATA for Certificate Store (BF21)
