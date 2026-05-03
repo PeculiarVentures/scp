@@ -151,6 +151,28 @@ resp, err := sess.Transmit(ctx, &apdu.Command{
 })
 ```
 
+### Factory and spec default keys
+
+> **WARNING — these keys provide no security.** Any card still running on its factory default keys can be read, written, or impersonated by anyone who can reach it. Use these values only to establish a first session against an unprovisioned card so you can immediately replace the keys with your own. Production deployments must replace the default key set before deploying.
+
+Most GlobalPlatform cards ship with the same standard test key set defined by GP for compliance testing. The library exposes it as `scp03.DefaultKeys`. Below is the value and the per-vendor key version number (KVN) you'll need on the wire.
+
+| Card / vendor | KVN | ENC / MAC / DEK | Sizes | Source |
+|---|---|---|---|---|
+| **GP standard test keys** (most factory-fresh cards) | `0x00`–`0x01` (vendor-dependent) | `40 41 42 43 44 45 46 47 48 49 4A 4B 4C 4D 4E 4F` (same value for all three) | AES-128 | GlobalPlatform Card Spec v2.3.1, Annex E |
+| **YubiKey 5.3+** (SCP03) | `0xFF` | `40 41 42 43 44 45 46 47 48 49 4A 4B 4C 4D 4E 4F` (same value for all three) | AES-128 only | [Yubico tech manual](https://docs.yubico.com/hardware/yubikey/yk-tech-manual/yk5-scp-specifics.html) |
+| **NXP JCOP** (engineering / unprovisioned) | `0x00` | GP standard test keys | AES-128 typical, depends on profile | NXP JCOP4 / J3R200 documentation |
+| **Oracle JavaCard simulator** (`jcardsim`) | `0x00` | GP standard test keys | AES-128 | jcardsim source |
+| **Samsung OpenSCP-Java** (reference impl) | `0x01` | GP standard test keys | AES-128/192/256 (S8 + S16) | [OpenSCP repo](https://github.com/SamsungSLSI-JCOS/OpenSCP) |
+| **Custom-keyed YubiKey** (Yubico custom-order SKU) | per order | Customer-supplied | AES-128 | Yubico sales |
+
+Notes:
+
+- The GP test value `40..4F` repeated for all three keys is intentional — it's a cryptographically weak set, not a real secret. Cards that arrive with anything else (custom-order, FIPS lots, post-provisioning) will reject `DefaultKeys` and you need the operator-issued key set.
+- Vendors set the **default KVN** differently. YubiKey uses `0xFF` and reserves it as factory-only. Most other cards use `0x00` or `0x01` as the first replaceable slot. Calling `Open` with the wrong KVN gets you `6A 88` (referenced data not found).
+- Some cards ship with **two** active key sets: a debug/test set you can replace and a vendor-locked set you can't. `GET DATA` for tag `00 E0` returns the installed key information.
+- SCP11 has no equivalent "default keys" table because the long-lived material is asymmetric and PKI-rooted; per-vendor PKI roots (e.g. Yubico's SCP11 CA) belong with the trust-anchor configuration in [Certificate Trust Validation](#certificate-trust-validation), not here.
+
 ## SCP11 Usage
 
 SCP11 uses ECDH key agreement with X.509 certificates. Three variants:
@@ -225,6 +247,10 @@ GP Amendment F also defines P-384, Brainpool P-256, AES-192/256, and partial sec
 ### SCP11a/c key/certificate consistency
 
 For mutual-auth variants, `Open` verifies that `OCEPrivateKey` corresponds to `OCECertificate` before sending anything to the card. A mismatch is rejected immediately rather than discovered in the second ECDH.
+
+### SCP11a/c transport requirements
+
+OCE certificate upload (`PERFORM SECURITY OPERATION` in the SCP11a/c handshake) sends each cert as a single APDU. Real X.509 OCE certs run 300–800 bytes, so the transport must support **extended-length APDUs**. USB CCID and modern NFC readers handle this natively; some constrained NFC paths and legacy contact readers do not. This is a limit of the wire format, not the library.
 
 ## Transports
 
