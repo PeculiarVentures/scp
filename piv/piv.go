@@ -1,7 +1,20 @@
 // Package piv implements PIV (NIST SP 800-73-4) command builders for
 // the provisioning operations that run over an established SCP11
-// secure channel. These are the commands your remote provisioning
-// server sends after the handshake completes.
+// secure channel. These are the commands a remote provisioning server
+// sends after the handshake completes.
+//
+// # Scope
+//
+// The command builders here are tuned for YubiKey 5.x, not the full
+// NIST PIV instruction set. Several functions use YubiKey-proprietary
+// instructions (IMPORT_KEY = 0xFE, ATTEST = 0xF9, RESET = 0xFB,
+// SET_MGMKEY = 0xFF) and YubiKey-specific data layouts. Behavior
+// against non-YubiKey PIV applets is unverified.
+//
+// PIV management-key authentication is intentionally not provided:
+// it is a multi-step GENERAL AUTHENTICATE challenge-response that
+// the caller must drive directly. A "simplified" single-call helper
+// would be wrong both protocol-wise and as a security primitive.
 //
 // Each function returns a plain *apdu.Command; the session's Transmit
 // method wraps it with secure messaging before sending.
@@ -212,21 +225,6 @@ func VerifyPIN(pin []byte) *apdu.Command {
 		P2:   0x80, // PIV Card Application PIN
 		Data: padded,
 		Le:   -1,
-	}
-}
-
-// Authenticate builds a GENERAL AUTHENTICATE command for management
-// key authentication. This is required before administrative operations.
-func Authenticate(algorithm byte, key []byte) *apdu.Command {
-	// This is a simplified version. The full 3DES/AES mutual authentication
-	// is a multi-step challenge-response protocol.
-	return &apdu.Command{
-		CLA:  0x00,
-		INS:  0x87, // GENERAL AUTHENTICATE
-		P1:   algorithm,
-		P2:   0x9B, // Management key reference
-		Data: key,
-		Le:   0,
 	}
 }
 

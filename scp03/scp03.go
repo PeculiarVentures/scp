@@ -306,9 +306,11 @@ func (s *Session) Close() {
 	s.channel = nil
 }
 
-// SessionKeys returns the derived session keys for audit or debugging.
+// SessionKeys returns a defensive copy of the session keys for audit
+// or debugging. Mutations to the returned struct do not affect the
+// session's live key material.
 func (s *Session) SessionKeys() *kdf.SessionKeys {
-	return s.sessionKeys
+	return s.sessionKeys.Clone()
 }
 
 // Protocol returns "SCP03".

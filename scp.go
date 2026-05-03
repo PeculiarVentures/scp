@@ -70,7 +70,10 @@ type Session interface {
 	// Close terminates the session and zeros all key material.
 	Close()
 
-	// SessionKeys returns the derived session keys for audit or debugging.
+	// SessionKeys returns a defensive copy of the derived session
+	// keys for audit or debugging. Implementations MUST return a copy:
+	// callers cannot be allowed to read or mutate the live key
+	// material the session is using.
 	SessionKeys() *kdf.SessionKeys
 
 	// Protocol returns "SCP03" or "SCP11a" / "SCP11b" / "SCP11c".

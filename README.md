@@ -180,24 +180,44 @@ sess, err := session.Open(ctx, transport, &session.Config{
 
 `session.Open` fails closed unless one of these is set:
 
-- `CardTrustPolicy` — preferred; full chain validation through the `trust` package, with P-256 enforcement and optional serial/SKI constraints.
-- `CardTrustAnchors` — minimal X.509 chain validation against a `*x509.CertPool`.
+- `CardTrustPolicy` — preferred; full chain validation through the `trust` package, with P-256 enforcement and optional serial/SKI/EKU constraints.
+- `CardTrustAnchors` — full X.509 chain validation against a `*x509.CertPool`. Intermediates from the card's BF21 certificate store are picked up automatically.
 - `InsecureSkipCardAuthentication` — escape hatch for tests and labs only. Without it, `session.Open` against a card that returns a self-signed or proprietary key is rejected before any ECDH.
 
 This is intentional: an SCP11b session against an unauthenticated card is not authenticated key agreement — it is opportunistic encryption against whoever answered the SELECT. Treat the difference as load-bearing.
 
+GP-proprietary SCP11 certificates are *parsed* but not chain-validated. Cards that return GP-proprietary certs only authenticate when paired with `InsecureSkipCardAuthentication = true`, or when `CardTrustPolicy` is configured with a custom validator that handles them.
+
 ### Applet selection
 
-`DefaultConfig().ApplicationAID` is `nil`. SCP sessions on YubiKey are scoped to the currently selected applet, and selecting another applet terminates the session. The supported pattern is:
+`session.Open` SELECTs `cfg.SecurityDomainAID` before the handshake — that's the AID that holds the SCP11 keys you want to authenticate against. On YubiKey, different applets hold different SCP11 key sets:
+
+- **Issuer Security Domain** — for Security Domain management (the default, `session.AIDSecurityDomain`).
+- **PIV** — for PIV provisioning operations. Set `cfg.SecurityDomainAID = session.AIDPIV`.
 
 ```go
-// Caller selects the applet first, then opens SCP against it.
-_, err := transport.Transmit(ctx, apdu.NewSelect(session.AIDPIV))
-// ...check resp...
-sess, err := session.Open(ctx, transport, cfg)
+// Open SCP11b against the PIV applet for PIV provisioning over SCP.
+sess, err := session.Open(ctx, transport, &session.Config{
+    Variant:           session.SCP11b,
+    SecurityDomainAID: session.AIDPIV, // PIV holds its own SCP11 key set on YubiKey
+    CardTrustPolicy:   &trust.Policy{Roots: rootPool},
+})
 ```
 
-If you need to address two applets, open two sessions.
+`DefaultConfig().ApplicationAID` is intentionally `nil`: a YubiKey SCP session is scoped to the SELECTed applet, so reselecting a different applet through the channel terminates the session. If you need to address two applets, open two sessions.
+
+`SecurityDomainAID` is not the cleanest name for "the AID where the SCP keys live" (it predates first-class non-SD usage). Treat it as that pragmatic meaning until the API gets refactored.
+
+### Variant and curve support
+
+This implementation targets YubiKey 5.x and similar P-256/AES-128 hardware. The supported profile is:
+
+- SCP11a, SCP11b, SCP11c
+- NIST P-256 only
+- AES-128 session keys only
+- Full security level (`C-MAC | C-DEC | R-MAC | R-ENC`) only
+
+GP Amendment F also defines P-384, Brainpool P-256, AES-192/256, and partial security levels. Those are out of scope for this implementation. SCP03 supports AES-128/192/256 in S8 and S16 modes, but only AES-128 is covered by the imported transcript vectors.
 
 ### SCP11a/c key/certificate consistency
 

@@ -39,7 +39,7 @@ func TestTrustAnchorBypass_RawKeyRejected(t *testing.T) {
 
 	// With trust anchors set, raw key data (not a valid X.509 cert)
 	// should be rejected, NOT silently accepted.
-	_, err = parseRawCert(rawPoint, trustAnchors)
+	_, err = parseRawCert(rawPoint, trustAnchors, nil)
 	if err == nil {
 		t.Fatal("raw EC point should be rejected when trust anchors are configured")
 	}
@@ -55,7 +55,7 @@ func TestTrustAnchorBypass_RawKeyAcceptedWithoutAnchors(t *testing.T) {
 	}
 	rawPoint := privKey.PublicKey().Bytes()
 
-	key, err := parseRawCert(rawPoint, nil)
+	key, err := parseRawCert(rawPoint, nil, nil)
 	if err != nil {
 		t.Fatalf("raw key should be accepted without trust anchors: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestTrustAnchorBypass_ValidCertAccepted(t *testing.T) {
 	trustAnchors.AddCert(caCert)
 
 	// Valid X.509 cert with matching trust anchor should succeed.
-	key, err := parseRawCert(certDER, trustAnchors)
+	key, err := parseRawCert(certDER, trustAnchors, nil)
 	if err != nil {
 		t.Fatalf("valid cert should be accepted: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestTrustAnchorBypass_UntrustedCertRejected(t *testing.T) {
 	// Use an empty trust pool — the cert should be rejected.
 	trustAnchors := x509.NewCertPool()
 
-	_, err := parseRawCert(certDER, trustAnchors)
+	_, err := parseRawCert(certDER, trustAnchors, nil)
 	if err == nil {
 		t.Fatal("untrusted cert should be rejected")
 	}
@@ -345,5 +345,124 @@ func TestVerifyOCEKeyMatchesCert_CurveMismatch(t *testing.T) {
 
 	if err := verifyOCEKeyMatchesCert(privP256, cert); err == nil {
 		t.Error("curve-mismatched key/cert should be rejected")
+	}
+}
+
+// ============================================================
+// Regression: CardTrustAnchors validates chains with intermediates.
+//
+// Earlier the code only verified the leaf against trustAnchors with
+// no Intermediates pool, so a leaf signed by an intermediate (signed
+// by the trusted root) failed validation. extractCardPublicKey now
+// builds an intermediates pool from the non-leaf entries in the
+// BF21 cert store and passes it to x509.Verify.
+// ============================================================
+
+// makeChain builds a [root, intermediate, leaf] x509 chain on P-256.
+func makeChain(t *testing.T) (rootDER, interDER, leafDER []byte) {
+	t.Helper()
+	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	rootDER, _ = x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	rootCert, _ := x509.ParseCertificate(rootDER)
+
+	interKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	interTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "Intermediate"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	interDER, _ = x509.CreateCertificate(rand.Reader, interTmpl, rootCert, &interKey.PublicKey, rootKey)
+	interCert, _ := x509.ParseCertificate(interDER)
+
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(3),
+		Subject:               pkix.Name{CommonName: "Card"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyAgreement,
+		BasicConstraintsValid: true,
+	}
+	leafDER, _ = x509.CreateCertificate(rand.Reader, leafTmpl, interCert, &leafKey.PublicKey, interKey)
+	return
+}
+
+// buildBF21 wraps a sequence of DER certificates in BF21 (cert store)
+// containing 7F21 (single certificate) entries — same shape the card
+// returns from GET DATA on the cert store.
+func buildBF21(certs ...[]byte) []byte {
+	var children []byte
+	for _, c := range certs {
+		// 7F21 with cert DER
+		children = append(children, 0x7F, 0x21)
+		if len(c) < 0x80 {
+			children = append(children, byte(len(c)))
+		} else if len(c) < 0x100 {
+			children = append(children, 0x81, byte(len(c)))
+		} else {
+			children = append(children, 0x82, byte(len(c)>>8), byte(len(c)))
+		}
+		children = append(children, c...)
+	}
+	// Wrap in BF21
+	var out []byte
+	out = append(out, 0xBF, 0x21)
+	if len(children) < 0x80 {
+		out = append(out, byte(len(children)))
+	} else if len(children) < 0x100 {
+		out = append(out, 0x81, byte(len(children)))
+	} else {
+		out = append(out, 0x82, byte(len(children)>>8), byte(len(children)))
+	}
+	out = append(out, children...)
+	return out
+}
+
+func TestExtractCardPublicKey_ChainWithIntermediate(t *testing.T) {
+	rootDER, interDER, leafDER := makeChain(t)
+	rootCert, _ := x509.ParseCertificate(rootDER)
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+
+	// Bundle ordered root, intermediate, leaf — leaf is last.
+	bundle := buildBF21(rootDER, interDER, leafDER)
+
+	key, err := extractCardPublicKey(bundle, roots)
+	if err != nil {
+		t.Fatalf("chain with intermediate should validate: %v", err)
+	}
+	if key == nil {
+		t.Fatal("expected non-nil ECDH key")
+	}
+}
+
+func TestExtractCardPublicKey_ChainWithoutIntermediateFails(t *testing.T) {
+	// Sanity: a leaf signed by an intermediate but presented WITHOUT
+	// the intermediate in the bundle must NOT validate against the
+	// root alone — that's exactly the case x509.Verify can't bridge,
+	// so we confirm the test setup is meaningful (otherwise the
+	// positive test above would prove nothing).
+	rootDER, _, leafDER := makeChain(t)
+	rootCert, _ := x509.ParseCertificate(rootDER)
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+
+	bundle := buildBF21(leafDER) // intermediate intentionally omitted
+
+	if _, err := extractCardPublicKey(bundle, roots); err == nil {
+		t.Fatal("leaf-only bundle should not validate when intermediate is required")
 	}
 }

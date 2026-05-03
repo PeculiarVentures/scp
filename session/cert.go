@@ -17,12 +17,13 @@ import (
 // response, optionally validates the chain, and returns the ECDH public key.
 func extractCardPublicKey(data []byte, trustAnchors *x509.CertPool) (*ecdh.PublicKey, error) {
 	// The response is a BF21 (certificate store) containing one or more
-	// 7F21 (certificate) entries.
+	// 7F21 (certificate) entries. Card chains may include intermediates
+	// between the leaf and the trusted root; we collect them all and
+	// build an intermediates pool so x509.Verify can build a full path.
 	nodes, err := tlv.Decode(data)
 	if err != nil {
-		// Try parsing as raw DER certificate directly (some cards
-		// return the certificate without the TLV wrapper).
-		return parseRawCert(data, trustAnchors)
+		// Not BER-TLV — try parsing the whole buffer as raw DER.
+		return parseRawCert(data, trustAnchors, nil)
 	}
 
 	// Find certificate nodes.
@@ -37,15 +38,32 @@ func extractCardPublicKey(data []byte, trustAnchors *x509.CertPool) (*ecdh.Publi
 
 	if len(certNodes) == 0 {
 		// Last resort: try the raw data as a DER certificate.
-		return parseRawCert(data, trustAnchors)
+		return parseRawCert(data, trustAnchors, nil)
 	}
 
-	// Parse the leaf certificate (last in the chain).
+	// Convention: leaf is last in the bundle. Earlier entries are
+	// intermediates (or repeats of the root, which Verify ignores).
 	leafData := certNodes[len(certNodes)-1].Value
-	return parseRawCert(leafData, trustAnchors)
+
+	var intermediates *x509.CertPool
+	if len(certNodes) > 1 && trustAnchors != nil {
+		intermediates = x509.NewCertPool()
+		for i := 0; i < len(certNodes)-1; i++ {
+			interCert, err := x509.ParseCertificate(certNodes[i].Value)
+			if err != nil {
+				// One bad intermediate doesn't kill the bundle — Verify
+				// will fail closed if it can't form a path. Skip and
+				// move on.
+				continue
+			}
+			intermediates.AddCert(interCert)
+		}
+	}
+
+	return parseRawCert(leafData, trustAnchors, intermediates)
 }
 
-func parseRawCert(data []byte, trustAnchors *x509.CertPool) (*ecdh.PublicKey, error) {
+func parseRawCert(data []byte, trustAnchors, intermediates *x509.CertPool) (*ecdh.PublicKey, error) {
 	cert, err := x509.ParseCertificate(data)
 	if err != nil {
 		// Not an X.509 certificate. If trust anchors are configured,
@@ -56,8 +74,10 @@ func parseRawCert(data []byte, trustAnchors *x509.CertPool) (*ecdh.PublicKey, er
 		}
 
 		// No trust anchors configured — try GP proprietary format.
-		// GP SCP11 §6.1: GP certificate uses tag 7F21 containing
-		// tag 7F49 with the raw EC public key point.
+		// Note: GP proprietary certificates are NOT chain-validated by
+		// this path; only X.509 cards get full trust validation. If
+		// you need authenticated GP-proprietary support, configure
+		// CardTrustPolicy with a custom validator.
 		key, gpErr := parseGPCertificate(data)
 		if gpErr == nil {
 			return key, nil
@@ -66,9 +86,13 @@ func parseRawCert(data []byte, trustAnchors *x509.CertPool) (*ecdh.PublicKey, er
 		return extractECDHKeyFromSPKI(data)
 	}
 
-	// Validate if trust anchors are provided.
+	// Validate if trust anchors are provided. Intermediates are passed
+	// through so chains longer than leaf-to-root can validate.
 	if trustAnchors != nil {
-		opts := x509.VerifyOptions{Roots: trustAnchors}
+		opts := x509.VerifyOptions{
+			Roots:         trustAnchors,
+			Intermediates: intermediates,
+		}
 		if _, err := cert.Verify(opts); err != nil {
 			return nil, fmt.Errorf("card certificate validation: %w", err)
 		}
