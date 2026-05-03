@@ -389,15 +389,85 @@ func ctEq(a, b []byte) bool {
 	return v == 0
 }
 
+// parseRaw decodes a wire-format APDU (ISO 7816-4) into an apdu.Command.
+// Handles both short and extended length encoding:
+//
+//   short:    CLA INS P1 P2 [Lc Data ...] [Le]
+//             Lc is 1 byte (1-255), Le is 1 byte (0 means 256).
+//
+//   extended: CLA INS P1 P2 [00 Lc_hi Lc_lo Data ...] [Le_hi Le_lo]
+//             Lc is 2 bytes after a 0x00 marker (1-65535).
+//             Le, when present, is the trailing 2 bytes (no marker
+//             since the extended marker was already consumed).
+//
+// An earlier version handled only short encoding, which silently
+// dropped the data field of any extended-length command — a real
+// problem for SCP11a OCE certificate uploads (~300 byte certs use
+// extended length) and any other large-payload command. The mock
+// would receive an empty data field, fail to populate state, and
+// drift out of sync with the host's protocol expectation.
 func parseRaw(raw []byte) *apdu.Command {
 	if len(raw) < 4 {
 		return &apdu.Command{INS: 0xFF}
 	}
 	cmd := &apdu.Command{CLA: raw[0], INS: raw[1], P1: raw[2], P2: raw[3], Le: -1}
-	if len(raw) > 5 {
+
+	// No payload, possibly Le-only:
+	switch len(raw) {
+	case 4:
+		return cmd // header only
+	case 5:
+		// CLA INS P1 P2 Le (short)
+		cmd.Le = int(raw[4])
+		if cmd.Le == 0 {
+			cmd.Le = 256
+		}
+		return cmd
+	case 7:
+		// Could be CLA INS P1 P2 00 Le_hi Le_lo (extended Le, no data).
+		if raw[4] == 0x00 {
+			cmd.ExtendedLength = true
+			cmd.Le = int(raw[5])<<8 | int(raw[6])
+			if cmd.Le == 0 {
+				cmd.Le = 65536
+			}
+			return cmd
+		}
+	}
+
+	// Short encoding with data: byte 4 is non-zero Lc.
+	if raw[4] != 0x00 {
 		lc := int(raw[4])
-		if len(raw) >= 5+lc {
-			cmd.Data = raw[5 : 5+lc]
+		if len(raw) < 5+lc {
+			return cmd // truncated; mockcard doesn't try to recover
+		}
+		cmd.Data = raw[5 : 5+lc]
+		// Optional trailing Le.
+		if len(raw) == 5+lc+1 {
+			cmd.Le = int(raw[5+lc])
+			if cmd.Le == 0 {
+				cmd.Le = 256
+			}
+		}
+		return cmd
+	}
+
+	// Extended encoding with data: 00 Lc_hi Lc_lo at bytes 4..6.
+	if len(raw) < 7 {
+		return cmd // header + extended marker incomplete
+	}
+	cmd.ExtendedLength = true
+	lc := int(raw[5])<<8 | int(raw[6])
+	if len(raw) < 7+lc {
+		return cmd
+	}
+	cmd.Data = raw[7 : 7+lc]
+	// Optional trailing extended Le (2 bytes, no marker — the 0x00
+	// at byte 4 already declared extended-length encoding).
+	if len(raw) == 7+lc+2 {
+		cmd.Le = int(raw[7+lc])<<8 | int(raw[7+lc+1])
+		if cmd.Le == 0 {
+			cmd.Le = 65536
 		}
 	}
 	return cmd
