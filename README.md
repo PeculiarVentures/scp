@@ -71,7 +71,7 @@ sess.Close()
 | `tlv` | BER-TLV encoding/decoding for GP data structures |
 | `apdu` | ISO 7816-4 command/response APDU types |
 | `transport` | Transport interface and helpers |
-| `piv` | PIV (NIST SP 800-73) command builders |
+| `piv` | YubiKey-flavored PIV command builders (APDU only — no PIV session layer; see package doc) |
 | `mockcard` | Simulated SCP11 Security Domain for testing |
 
 ## Security Domain Management
@@ -196,7 +196,12 @@ GP-proprietary SCP11 certificates are *parsed* but not chain-validated. Cards th
 - **OATH, OTP, etc.** — applet-specific.
 
 ```go
-// SCP11b against the PIV applet, for PIV provisioning over SCP.
+// SCP11b against the PIV applet. This opens an authenticated, encrypted
+// channel to PIV — but PIV provisioning operations (key generation,
+// certificate writes, etc.) additionally require PIV management-key
+// authentication, which is a multi-step GENERAL AUTHENTICATE
+// challenge-response not provided by this library. The caller drives
+// that themselves through the channel.
 sess, err := session.Open(ctx, transport, &session.Config{
     Variant:         session.SCP11b,
     SelectAID:       session.AIDPIV, // PIV holds its own SCP11 key set on YubiKey

@@ -117,14 +117,15 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		transport: t,
 	}
 
-	// Step 1: SELECT Security Domain if configured.
+	// Step 1: SELECT the target applet (whose SCP03 key set we
+	// authenticate against). Skipped if SelectAID is nil.
 	if len(cfg.SelectAID) > 0 {
 		resp, err := t.Transmit(ctx, apdu.NewSelect(cfg.SelectAID))
 		if err != nil {
-			return nil, fmt.Errorf("select SD: %w", err)
+			return nil, fmt.Errorf("select applet: %w", err)
 		}
 		if !resp.IsSuccess() {
-			return nil, fmt.Errorf("select SD: %w", resp.Error())
+			return nil, fmt.Errorf("select applet: %w", resp.Error())
 		}
 	}
 

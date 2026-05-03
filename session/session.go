@@ -1,10 +1,12 @@
 // Package session implements the SCP11 protocol state machine for
 // establishing a secure channel between an off-card entity (OCE) and
-// a GlobalPlatform Security Domain (SD) on a smart card.
+// an applet on a smart card. The applet typically holds an SCP key
+// set — most commonly the GlobalPlatform Issuer Security Domain, but
+// also PIV, OATH, or any other applet that exposes its own SCP keys.
 //
 // The protocol flow (for SCP11b) is:
 //
-//  1. SELECT the Security Domain AID
+//  1. SELECT the target applet AID (configured via Config.SelectAID)
 //  2. GET DATA to retrieve the card's certificate (CERT.SD.ECKA)
 //     containing the card's static ECDH public key (PK.SD.ECKA)
 //  3. OCE generates an ephemeral ECDH key pair
@@ -158,10 +160,12 @@ var (
 
 // DefaultConfig returns a Config for SCP11b with standard defaults.
 //
-// The handshake targets the GP Issuer Security Domain. ApplicationAID
-// is left nil — callers should SELECT their target applet before
-// calling Open, since some platforms (notably YubiKey) terminate an
-// SCP session when a different applet is selected mid-channel.
+// The handshake targets the GP Issuer Security Domain by default;
+// override SelectAID for SCP against another applet (PIV, OATH, etc.).
+// ApplicationAID is left nil — callers should not SELECT a second
+// applet through the channel, since some platforms (notably YubiKey)
+// terminate an SCP session when a different applet is selected
+// mid-channel; configure SelectAID instead.
 //
 // Trust is also unconfigured by default; the caller must set
 // CardTrustPolicy, CardTrustAnchors, or InsecureSkipCardAuthentication
@@ -216,10 +220,11 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		state:     StateNew,
 	}
 
-	// Step 1: Select the Security Domain.
-	if err := s.selectSD(ctx); err != nil {
+	// Step 1: SELECT the target applet (whose SCP key set we'll
+	// authenticate against). Skipped if SelectAID is nil.
+	if err := s.selectApplet(ctx); err != nil {
 		s.state = StateFailed
-		return nil, fmt.Errorf("select SD: %w", err)
+		return nil, fmt.Errorf("select applet: %w", err)
 	}
 
 	// Step 2: Retrieve the card's certificate and extract PK.SD.ECKA.
@@ -360,7 +365,7 @@ func (s *Session) Protocol() string {
 
 // --- Protocol Steps ---
 
-func (s *Session) selectSD(ctx context.Context) error {
+func (s *Session) selectApplet(ctx context.Context) error {
 	// If SelectAID is nil, the caller has already SELECTed the
 	// target applet (e.g. through a test harness) and we just
 	// proceed with the handshake.
