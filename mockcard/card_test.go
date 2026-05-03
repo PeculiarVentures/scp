@@ -316,6 +316,7 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 		KeyVersion:                     0x01,
 		OCEPrivateKey:                  oceKey,
 		OCECertificates:                []*x509.Certificate{oceCert},
+		OCEKeyReference:                session.KeyRef{KID: 0x10, KVN: 0x03}, // YubiKey default
 		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {

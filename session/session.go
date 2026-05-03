@@ -217,27 +217,58 @@ var (
 	AIDOTP = []byte{0xA0, 0x00, 0x00, 0x05, 0x27, 0x20, 0x01}
 )
 
-// DefaultConfig returns a Config for SCP11b with standard defaults.
+// DefaultConfig returns sane defaults for the most common case: SCP11b
+// against the Issuer Security Domain on a YubiKey-style card. KeyID
+// 0x13 is the GP Amendment F §7.1.1 SCP11b slot.
 //
-// The handshake targets the GP Issuer Security Domain by default;
-// override SelectAID for SCP against another applet (PIV, OATH, etc.).
-// ApplicationAID is left nil — callers should not SELECT a second
-// applet through the channel, since some platforms (notably YubiKey)
-// terminate an SCP session when a different applet is selected
-// mid-channel; configure SelectAID instead.
+// SCP11a and SCP11c use different KIDs (0x11 and 0x15 per the same
+// section); changing only the Variant field of this default WILL NOT
+// produce a working SCP11a/c config because KeyID will still be 0x13.
+// Use DefaultSCP11aConfig() / DefaultSCP11cConfig() instead, or set
+// KeyID explicitly.
 //
-// Trust is also unconfigured by default; the caller must set
-// CardTrustPolicy, CardTrustAnchors, or InsecureSkipCardAuthentication
-// before Open will agree to a key with the card.
+// Trust is required: trust validation is OFF by default, so a caller
+// must set CardTrustPolicy, CardTrustAnchors, or
+// InsecureSkipCardAuthentication before Open will agree to a key with
+// the card.
 func DefaultConfig() *Config {
 	return &Config{
-		Variant:           SCP11b,
-		SelectAID:         AIDSecurityDomain,
-		ApplicationAID:    nil,
-		KeyID:             0x13,
-		KeyVersion:        0x01,
-		SecurityLevel:     channel.LevelFull,
+		Variant:       SCP11b,
+		SelectAID:     AIDSecurityDomain,
+		KeyID:         0x13, // GP §7.1.1 SCP11b
+		KeyVersion:    0x01,
+		SecurityLevel: channel.LevelFull,
 	}
+}
+
+// DefaultSCP11aConfig returns a starting Config for SCP11a (mutual
+// auth via OCE certificate chain). KeyID is set to the GP Amendment F
+// §7.1.1 SCP11a slot (0x11). The caller must still populate
+// OCECertificates, OCEPrivateKey, OCEKeyReference, and a card-trust
+// configuration (CardTrustPolicy / CardTrustAnchors / InsecureSkipCardAuthentication)
+// before calling Open.
+func DefaultSCP11aConfig() *Config {
+	cfg := DefaultConfig()
+	cfg.Variant = SCP11a
+	cfg.KeyID = 0x11 // GP §7.1.1 SCP11a
+	return cfg
+}
+
+// DefaultSCP11bConfig is an alias for DefaultConfig provided for
+// symmetry with DefaultSCP11aConfig and DefaultSCP11cConfig.
+func DefaultSCP11bConfig() *Config {
+	return DefaultConfig()
+}
+
+// DefaultSCP11cConfig returns a starting Config for SCP11c (mutual
+// auth with offline scripting). KeyID is set to the GP Amendment F
+// §7.1.1 SCP11c slot (0x15). Same OCE/trust caveats as
+// DefaultSCP11aConfig.
+func DefaultSCP11cConfig() *Config {
+	cfg := DefaultConfig()
+	cfg.Variant = SCP11c
+	cfg.KeyID = 0x15 // GP §7.1.1 SCP11c
+	return cfg
 }
 
 // Session manages an SCP11 secure channel over a Transport.
@@ -273,6 +304,18 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull
+	}
+
+	// Validate Variant. Variant is an int enum; if a caller built the
+	// Config from JSON/YAML or passed a stale numeric value, an
+	// unrecognized variant would silently default into SCP11b-like
+	// behavior (params=0, INS=0x88) instead of failing closed. For
+	// mutual-auth code, that is the wrong failure mode.
+	switch cfg.Variant {
+	case SCP11a, SCP11b, SCP11c:
+		// ok
+	default:
+		return nil, fmt.Errorf("unsupported SCP11 variant: %d (valid: SCP11a=0, SCP11b=1, SCP11c=2)", cfg.Variant)
 	}
 
 	// Validate that the configured SecurityLevel is consistent with the
@@ -313,6 +356,14 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		}
 		if len(cfg.OCECertificates) == 0 {
 			return nil, errors.New("OCE certificate chain required for SCP11a/c (mutual-auth variants); set Config.OCECertificates to a non-empty slice in leaf-last order")
+		}
+		// OCEKeyReference is sent on the wire as P1=KVN, P2=KID|chain-bit
+		// in every PSO certificate-upload APDU (GP §7.5.2). The zero
+		// value (KID=0, KVN=0) is not a meaningful card key reference;
+		// silently sending PSO with P1=0 P2=0 produces opaque card
+		// rejections during provisioning. Reject up front instead.
+		if cfg.OCEKeyReference == (KeyRef{}) {
+			return nil, errors.New("OCEKeyReference required for SCP11a/c (mutual-auth variants); set Config.OCEKeyReference.KID and KVN to the card's OCE key slot (KID 0x10 is the YubiKey default)")
 		}
 		// Defense-in-depth: ensure the configured private key actually
 		// corresponds to the LEAF certificate (last entry) — that's the
