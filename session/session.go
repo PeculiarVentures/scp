@@ -141,17 +141,26 @@ type Config struct {
 	// Default: full security (C-MAC + C-DEC + R-MAC + R-ENC).
 	SecurityLevel channel.SecurityLevel
 
-	// EphemeralKey, if non-nil, overrides random ephemeral ECDH key
-	// generation in the SCP11 handshake. SCP11's security depends on
-	// the ephemeral key being unique per session and unpredictable;
-	// setting this in production code defeats that property and reduces
-	// SCP11 to long-term-key-only authentication.
+	// InsecureTestOnlyEphemeralKey, if non-nil, overrides random
+	// ephemeral ECDH key generation in the SCP11 handshake.
 	//
-	// The field exists exclusively for byte-exact transcript tests
-	// against external implementations (e.g. Samsung OpenSCP), where
-	// the published wire bytes are computed from a known fixed
-	// ephemeral key. Production code MUST leave this nil.
-	EphemeralKey *ecdh.PrivateKey
+	// SCP11's security depends on the ephemeral key being unique per
+	// session and unpredictable. Setting this field DEFEATS that
+	// property and reduces SCP11 to long-term-key-only authentication.
+	// A static or known ephemeral key allows an attacker who has ever
+	// observed it (or simply guessed it from the source) to recover
+	// every session's traffic — past, present, and future.
+	//
+	// Production code MUST leave this nil. The only legitimate use is
+	// byte-exact transcript tests against external implementations
+	// (e.g. Samsung OpenSCP) where the published wire bytes are
+	// computed from a known fixed ephemeral key. The field is named
+	// "InsecureTestOnlyEphemeralKey" so that callers must explicitly
+	// type "Insecure" and "TestOnly" to use it; the same prefix
+	// convention is used by InsecureSkipCardAuthentication above.
+	//
+	// Must be a P-256 ECDH private key (curve enforced at Open time).
+	InsecureTestOnlyEphemeralKey *ecdh.PrivateKey
 }
 
 // Common AIDs.
@@ -562,12 +571,20 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 
 func (s *Session) performKeyAgreement(ctx context.Context) error {
 	// Generate or accept the OCE ephemeral ECDH key pair (P-256).
-	// In production, EphemeralKey is nil and we generate fresh randomness.
-	// Test transcripts inject a known fixed key to make wire bytes
-	// deterministic for byte-exact known-answer comparison.
+	// In production, InsecureTestOnlyEphemeralKey is nil and we
+	// generate fresh randomness. Test transcripts inject a known
+	// fixed key to make wire bytes deterministic for byte-exact
+	// known-answer comparison.
 	var ephKey *ecdh.PrivateKey
-	if s.config.EphemeralKey != nil {
-		ephKey = s.config.EphemeralKey
+	if s.config.InsecureTestOnlyEphemeralKey != nil {
+		// Validate the injected key is on P-256 — anything else
+		// will produce a malformed EPK.OCE that the card rejects
+		// after the host has already sent it on the wire.
+		// Better to fail before APDU construction.
+		if s.config.InsecureTestOnlyEphemeralKey.Curve() != ecdh.P256() {
+			return errors.New("InsecureTestOnlyEphemeralKey must be a P-256 ECDH private key (this implementation supports P-256 only)")
+		}
+		ephKey = s.config.InsecureTestOnlyEphemeralKey
 	} else {
 		var err error
 		ephKey, err = ecdh.P256().GenerateKey(rand.Reader)
