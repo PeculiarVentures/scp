@@ -55,14 +55,22 @@ const (
 	// SCP03 key sets always use KID=0x01.
 	KeyIDSCP03 byte = 0x01
 
-	// KeyIDSCP11a is the Key ID for SCP11a key pairs.
-	KeyIDSCP11a byte = 0x13
+	// SCP11 KIDs per GP Amendment F §7.1.1, also used by Yubico's
+	// yubikit reference. Each variant has its own slot — they are not
+	// interchangeable. Earlier this constant block defined all three
+	// SCP11 KIDs as 0x13, which silently addressed the SCP11b slot
+	// regardless of which variant the caller named. Real cards
+	// (YubiKey, Samsung) provision SCP11a at 0x11 and SCP11c at 0x15;
+	// the old aliases would have failed against them.
 
-	// KeyIDSCP11b is the Key ID for SCP11b key pairs.
+	// KeyIDSCP11a is the Key ID for SCP11a key pairs (GP §7.1.1).
+	KeyIDSCP11a byte = 0x11
+
+	// KeyIDSCP11b is the Key ID for SCP11b key pairs (GP §7.1.1).
 	KeyIDSCP11b byte = 0x13
 
-	// KeyIDSCP11c is the Key ID for SCP11c key pairs.
-	KeyIDSCP11c byte = 0x13
+	// KeyIDSCP11c is the Key ID for SCP11c key pairs (GP §7.1.1).
+	KeyIDSCP11c byte = 0x15
 
 	// KeyIDOCE is the Key ID for Off-Card Entity (OCE) public keys.
 	// Used in SCP11a/c for mutual authentication configuration.

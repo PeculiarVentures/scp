@@ -51,7 +51,12 @@ func runDemo(ctx context.Context, sess scp.Session) {
 	defer sess.Close()
 
 	log.Printf("Protocol: %s", sess.Protocol())
-	log.Printf("S-ENC:    %X", sess.SessionKeys().SENC)
+	// Note: this example does not log session keys. Live session
+	// material (S-ENC, S-MAC, etc.) lets anyone who sees the bytes
+	// decrypt the entire session and forge commands. Examples
+	// become production code; do not log them. The session's
+	// derived material is accessible only via the deliberately
+	// awkward InsecureExportSessionKeysForTestOnly() method.
 
 	// Echo command — data goes through encrypt + MAC + verify + decrypt.
 	payload := []byte("Hello, secure channel!")

@@ -345,10 +345,23 @@ func (s *Session) Close() {
 	s.channel = nil
 }
 
-// SessionKeys returns a defensive copy of the session keys for audit
-// or debugging. Mutations to the returned struct do not affect the
-// session's live key material.
-func (s *Session) SessionKeys() *kdf.SessionKeys {
+// InsecureExportSessionKeysForTestOnly returns a defensive copy of
+// the session's live cryptographic keys (S-ENC, S-MAC, S-RMAC, DEK,
+// MAC chain). It exists for two narrow uses: round-tripping byte-exact
+// transcript tests against external reference implementations, and
+// audit tooling that diffs derived material against a known-answer
+// vector.
+//
+// Production callers MUST NOT call this. The returned material lets
+// anyone who sees the bytes decrypt every wrapped command/response
+// in this session, forge MACs against the card, and recover any key
+// material wrapped under DEK. Logging it (even at debug level) means
+// permanent compromise of every command in that session, including
+// any keys uploaded via PUT KEY.
+//
+// The deliberately ugly name exists so this function is impossible
+// to call by accident and obvious in code review.
+func (s *Session) InsecureExportSessionKeysForTestOnly() *kdf.SessionKeys {
 	return s.sessionKeys.Clone()
 }
 

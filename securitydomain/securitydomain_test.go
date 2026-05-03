@@ -887,3 +887,39 @@ func TestSecureWrapSafeBlock_FitsShortLc(t *testing.T) {
 			N, wireLen)
 	}
 }
+
+// TestKeyIDConstants_MatchGPAmendmentF locks in that SCP11 KIDs
+// match GP Amendment F §7.1.1 and Yubico's yubikit reference.
+//
+// History: an earlier version of this constants block defined all
+// three SCP11 KIDs as 0x13. That silently addressed the SCP11b
+// slot regardless of which variant the caller named. Real cards
+// provision SCP11a at 0x11 and SCP11c at 0x15; the old aliases
+// would have failed against them, and any code routing on these
+// constants (e.g. the KLCC/KLOC detection in storeCaIssuerData)
+// would have miscategorized SCP11a and SCP11c keys as something
+// else.
+func TestKeyIDConstants_MatchGPAmendmentF(t *testing.T) {
+	cases := []struct {
+		name string
+		got  byte
+		want byte
+	}{
+		{"SCP03", KeyIDSCP03, 0x01},
+		{"SCP11a", KeyIDSCP11a, 0x11},
+		{"SCP11b", KeyIDSCP11b, 0x13},
+		{"SCP11c", KeyIDSCP11c, 0x15},
+		{"OCE", KeyIDOCE, 0x10},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s KID = 0x%02X, want 0x%02X", c.name, c.got, c.want)
+		}
+	}
+	// Also assert distinctness of the three SCP11 KIDs — the bug we
+	// fixed was that all three were aliased to 0x13.
+	if KeyIDSCP11a == KeyIDSCP11b || KeyIDSCP11b == KeyIDSCP11c || KeyIDSCP11a == KeyIDSCP11c {
+		t.Errorf("SCP11 KIDs must be distinct, got: a=0x%02X b=0x%02X c=0x%02X",
+			KeyIDSCP11a, KeyIDSCP11b, KeyIDSCP11c)
+	}
+}

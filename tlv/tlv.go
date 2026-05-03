@@ -1,7 +1,27 @@
-// Package tlv implements BER-TLV encoding and decoding as used by
-// GlobalPlatform and ISO 7816 smart cards. GP relies on BER-TLV for
-// structuring APDU data fields, certificate stores, key agreement
-// payloads, and secure messaging wrappers.
+// Package tlv implements the BER-TLV subset used by GlobalPlatform
+// and ISO 7816 smart cards. GP relies on BER-TLV for structuring APDU
+// data fields, certificate stores, key agreement payloads, and secure
+// messaging wrappers.
+//
+// Scope of this package:
+//
+//   - Tag decoding supports up to 3-byte tags (covers all GP-defined
+//     tags including 0x5F49, 0x7F21, 0xBF21).
+//   - Length decoding supports up to 3 length bytes (covers values
+//     up to 65535 bytes, which is the GP and short/extended APDU
+//     ceiling).
+//   - Resource caps on depth, node count, and length are enforced
+//     during decode to bound memory use against hostile-card responses.
+//
+// What this package is NOT:
+//
+//   - A full BER-TLV decoder. Tags requiring more than 3 bytes and
+//     length encodings beyond 3 bytes (BER's "indefinite length" form
+//     and 4+ byte definite-length forms) are rejected. If you need
+//     general BER/DER processing, use crypto/asn1 or a dedicated
+//     library — this package is purpose-built for GP wire formats.
+//   - A DER validator. Decoding is permissive about non-minimal
+//     length encodings; encode() always emits minimal length form.
 package tlv
 
 import (

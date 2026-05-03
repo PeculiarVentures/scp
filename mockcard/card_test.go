@@ -40,9 +40,9 @@ func TestEndToEnd_SCP11b_Handshake(t *testing.T) {
 	defer sess.Close()
 
 	t.Log("SCP11b session established successfully")
-	t.Logf("  S-ENC:  %X", sess.SessionKeys().SENC)
-	t.Logf("  S-MAC:  %X", sess.SessionKeys().SMAC)
-	t.Logf("  S-RMAC: %X", sess.SessionKeys().SRMAC)
+	t.Logf("  S-ENC:  %X", sess.InsecureExportSessionKeysForTestOnly().SENC)
+	t.Logf("  S-MAC:  %X", sess.InsecureExportSessionKeysForTestOnly().SMAC)
+	t.Logf("  S-RMAC: %X", sess.InsecureExportSessionKeysForTestOnly().SRMAC)
 }
 
 func TestEndToEnd_SCP11b_EchoCommand(t *testing.T) {
@@ -251,12 +251,12 @@ func TestEndToEnd_SCP11b_NoReceipt(t *testing.T) {
 	defer sess.Close()
 
 	// Verify macChain is zeros (not receipt).
-	if sess.SessionKeys().MACChain == nil {
+	if sess.InsecureExportSessionKeysForTestOnly().MACChain == nil {
 		t.Fatal("macChain is nil")
 	}
-	for _, b := range sess.SessionKeys().MACChain {
+	for _, b := range sess.InsecureExportSessionKeysForTestOnly().MACChain {
 		if b != 0 {
-			t.Fatalf("SCP11b macChain should be zeros, got %X", sess.SessionKeys().MACChain)
+			t.Fatalf("SCP11b macChain should be zeros, got %X", sess.InsecureExportSessionKeysForTestOnly().MACChain)
 		}
 	}
 
@@ -325,7 +325,7 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 
 	// macChain should NOT be zeros (it's the receipt).
 	allZero := true
-	for _, b := range sess.SessionKeys().MACChain {
+	for _, b := range sess.InsecureExportSessionKeysForTestOnly().MACChain {
 		if b != 0 {
 			allZero = false
 			break

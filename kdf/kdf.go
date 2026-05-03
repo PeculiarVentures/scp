@@ -133,6 +133,20 @@ func DeriveSessionKeysFromSharedSecrets(shSee, shSes []byte, hostID, cardGroupID
 	ecdhLen := len(shSee)
 
 	// Build SharedInfo: keyUsage || keyType || keyLength [|| hostIDLen || hostID] [|| cardGroupIDLen || cardGroupID]
+	//
+	// The length prefix is a single byte per GP §3.1.2, so identifiers
+	// longer than 255 bytes cannot be encoded. Earlier this code did
+	// byte(len(...)) without bounds-checking, so a 256-byte ID silently
+	// truncated to length 0 (still emitting all 256 bytes of value),
+	// shifting the KDF input and producing different keys on host and
+	// card. Fail loud instead.
+	if len(hostID) > 255 {
+		return nil, fmt.Errorf("hostID exceeds 255-byte SharedInfo length encoding: got %d bytes", len(hostID))
+	}
+	if len(cardGroupID) > 255 {
+		return nil, fmt.Errorf("cardGroupID exceeds 255-byte SharedInfo length encoding: got %d bytes", len(cardGroupID))
+	}
+
 	sharedInfo := []byte{KeyUsage, KeyTypeAES, SessionKeyLen}
 	if len(hostID) > 0 {
 		sharedInfo = append(sharedInfo, byte(len(hostID)))

@@ -26,7 +26,7 @@ func TestSCP03_Handshake(t *testing.T) {
 		t.Errorf("Protocol: got %q, want %q", sess.Protocol(), "SCP03")
 	}
 
-	keys := sess.SessionKeys()
+	keys := sess.InsecureExportSessionKeysForTestOnly()
 	if len(keys.SENC) != 16 {
 		t.Errorf("S-ENC length: got %d, want 16", len(keys.SENC))
 	}
@@ -176,7 +176,7 @@ func TestSCP03_SessionInterface(t *testing.T) {
 
 	// These calls verify the interface methods exist and work
 	_ = sess.Protocol()
-	_ = sess.SessionKeys()
+	_ = sess.InsecureExportSessionKeysForTestOnly()
 	sess.Close()
 }
 
@@ -292,7 +292,7 @@ func TestSessionKeys_PreservesStaticDEK(t *testing.T) {
 	}
 	defer sess.Close()
 
-	got := sess.SessionKeys().DEK
+	got := sess.InsecureExportSessionKeysForTestOnly().DEK
 	if got == nil {
 		t.Fatal("SessionKeys().DEK is nil; expected a clone of the static DEK")
 	}
