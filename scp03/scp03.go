@@ -478,12 +478,19 @@ func (s *Session) InsecureExportSessionKeysForTestOnly() *kdf.SessionKeys {
 }
 
 // SessionDEK returns a defensive copy of the SCP03 static DEK, used
-// by the securitydomain layer for PUT KEY key wrapping. See
-// scp.Session.SessionDEK for full doc and security semantics.
+// by the securitydomain layer for PUT KEY key wrapping.
 //
 // For SCP03, the "session" DEK is the static DEK from Config.Keys —
 // SCP03 secure messaging does not derive a separate session DEK.
 // Returns nil if the session is closed.
+//
+// This is a concrete method on *scp03.Session, not part of the
+// scp.Session interface, so it cannot be reached through a value
+// of generic interface type. The securitydomain package consumes
+// it through an unexported capability interface; other callers
+// who genuinely need the DEK (e.g. for a custom PUT KEY-equivalent
+// flow) can type-assert on this concrete type. Callers must zero
+// the returned slice when done.
 func (s *Session) SessionDEK() []byte {
 	if s.sessionKeys == nil || len(s.sessionKeys.DEK) == 0 {
 		return nil
@@ -491,6 +498,21 @@ func (s *Session) SessionDEK() []byte {
 	out := make([]byte, len(s.sessionKeys.DEK))
 	copy(out, s.sessionKeys.DEK)
 	return out
+}
+
+// OCEAuthenticated reports whether this session authenticates the
+// Off-Card Entity to the card. SCP03 always does — host possession
+// of the static MAC key is proved during EXTERNAL AUTHENTICATE, so
+// the card knows it is talking to an authorized administrator.
+//
+// This is a concrete method, not part of the scp.Session interface.
+// The securitydomain package consumes it through an unexported
+// capability interface to gate management operations without
+// pattern-matching on Protocol() string values.
+func (s *Session) OCEAuthenticated() bool {
+	// A closed session shouldn't be considered authenticated for
+	// gating purposes. zeroSessionKeys clears sessionKeys on Close.
+	return s.sessionKeys != nil
 }
 
 // Protocol returns "SCP03".

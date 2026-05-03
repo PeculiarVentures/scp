@@ -65,9 +65,68 @@ type Session struct {
 	dek []byte
 }
 
-// isOCEAuthProtocol reports whether the given protocol name (as
-// returned by scp.Session.Protocol()) authenticates the OCE to the
-// card. Anything except SCP11b qualifies.
+// dekProvider is the unexported capability interface that the SD
+// layer type-asserts on to obtain a session DEK from a concrete
+// SCP03 or SCP11 session. Keeping this private to the
+// securitydomain package means a generic scp.Session value cannot
+// reach the DEK by interface dispatch — only code in this package
+// (or another package that explicitly type-asserts on the concrete
+// session type) can.
+//
+// Both *scp03.Session and *session.Session satisfy this interface.
+type dekProvider interface {
+	// SessionDEK returns a defensive copy of the Data Encryption Key
+	// derived during (or established at the start of) the secure
+	// channel handshake. Returns nil if the session is closed or did
+	// not produce a usable DEK. The DEK is the AES key the card
+	// expects key material to be wrapped under for PUT KEY (GP
+	// §11.1.4).
+	SessionDEK() []byte
+}
+
+// oceAuthState is the unexported capability interface the SD layer
+// type-asserts on to determine whether a session authenticates the
+// off-card entity to the card. Replaces a previous string-match on
+// scp.Session.Protocol(), which was brittle (a future protocol or
+// variant rename would silently flip authorization decisions).
+//
+// Both *scp03.Session and *session.Session satisfy this interface.
+// SCP03 always reports true (EXTERNAL AUTHENTICATE proves OCE
+// possession of the MAC key); SCP11a/c report true; SCP11b reports
+// false (only the card authenticates).
+type oceAuthState interface {
+	OCEAuthenticated() bool
+}
+
+// sessionOCEAuthenticated reports whether the underlying secure-
+// channel session authenticates the OCE to the card.
+//
+// Concrete *scp03.Session and *session.Session satisfy oceAuthState
+// directly. The fallback string match (via isOCEAuthProtocol) exists
+// only to defend against a future scp.Session implementation (test
+// double, custom adapter) that doesn't satisfy oceAuthState — better
+// to err on the side of the most-restrictive interpretation that
+// still admits the obvious SCP03 / SCP11a/c cases. New protocol
+// variants should implement the interface rather than rely on the
+// fallback.
+func sessionOCEAuthenticated(s scp.Session) bool {
+	if s == nil {
+		return false
+	}
+	if oa, ok := s.(oceAuthState); ok {
+		return oa.OCEAuthenticated()
+	}
+	return isOCEAuthProtocol(s.Protocol())
+}
+
+// isOCEAuthProtocol is the fallback used when a scp.Session value
+// doesn't satisfy oceAuthState. SCP03, SCP11a, SCP11c authenticate
+// the off-card entity to the card; SCP11b does not.
+//
+// Code paths that hold a concrete *scp03.Session or *session.Session
+// reach this through sessionOCEAuthenticated, which prefers the
+// typed capability and only falls through to this string check for
+// custom session implementations.
 func isOCEAuthProtocol(proto string) bool {
 	switch proto {
 	case "SCP03", "SCP11a", "SCP11c":
@@ -75,6 +134,19 @@ func isOCEAuthProtocol(proto string) bool {
 	default:
 		return false
 	}
+}
+
+// sessionDEK returns the underlying session's DEK if it exposes one.
+// Returns nil if the session does not satisfy dekProvider or has no
+// DEK to surface.
+func sessionDEK(s scp.Session) []byte {
+	if s == nil {
+		return nil
+	}
+	if dp, ok := s.(dekProvider); ok {
+		return dp.SessionDEK()
+	}
+	return nil
 }
 
 // Open establishes an authenticated Security Domain session using SCP03.
@@ -150,9 +222,9 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 		scpSession:       scpSess,
 		transport:        t,
 		authenticated:    true,
-		oceAuthenticated: isOCEAuthProtocol(scpSess.Protocol()),
+		oceAuthenticated: sessionOCEAuthenticated(scpSess),
 	}
-	if dek := scpSess.SessionDEK(); len(dek) > 0 {
+	if dek := sessionDEK(scpSess); len(dek) > 0 {
 		// SCP11-derived DEK passes the same length check used for
 		// SCP03 static DEKs (16/24/32 AES). The all-zero check would
 		// false-positive on a freshly-derived key whose first byte
@@ -172,20 +244,20 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 //
 //   - If dek is non-nil, it is validated and used as the PUT KEY
 //     wrapping key (length must be 16/24/32, must not be all zero).
-//   - If dek is nil, this function calls scpSess.SessionDEK() and
-//     uses what comes back. This works for SCP03 sessions (returns
-//     the static DEK) and SCP11 sessions (returns the KDF-derived
-//     DEK). The all-zero check is skipped for SessionDEK output
-//     because a freshly-derived key may legitimately start with a
-//     zero byte; the all-zero guard is a config-mistake check, not
-//     a runtime invariant.
-//   - If both are nil/empty, PUT KEY operations will return
-//     ErrNotAuthenticated.
+//   - If dek is nil, this function asks the underlying session for
+//     a DEK via the dekProvider capability interface and uses what
+//     comes back. *scp03.Session returns the static DEK; *session.
+//     Session returns the SCP11 KDF-derived DEK. The all-zero
+//     check is skipped for derived keys because a fresh KDF output
+//     may legitimately start with a zero byte; the all-zero guard
+//     is a config-mistake check, not a runtime invariant.
+//   - If neither path produces a usable DEK, PUT KEY operations
+//     will return ErrNotAuthenticated.
 //
-// This default-to-SessionDEK behavior is the right thing for almost
-// every caller: previously, anyone using OpenWithSession with an
-// SCP11 session had to know to pass the DEK manually, even though
-// the session always has one. That was a silent footgun.
+// Custom session implementations that don't satisfy dekProvider
+// (e.g. test doubles or non-standard adapters) need to pass an
+// explicit dek; OpenWithSession won't reach into a generic
+// scp.Session for key material.
 func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) (*Session, error) {
 	if scpSess == nil {
 		return nil, errors.New("securitydomain: scp.Session is required")
@@ -197,7 +269,7 @@ func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) (*S
 		scpSession:       scpSess,
 		transport:        t,
 		authenticated:    true,
-		oceAuthenticated: isOCEAuthProtocol(scpSess.Protocol()),
+		oceAuthenticated: sessionOCEAuthenticated(scpSess),
 	}
 	if len(dek) > 0 {
 		if err := validateDEK(dek); err != nil {
@@ -205,7 +277,7 @@ func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) (*S
 		}
 		s.dek = make([]byte, len(dek))
 		copy(s.dek, dek)
-	} else if sdek := scpSess.SessionDEK(); len(sdek) > 0 {
+	} else if sdek := sessionDEK(scpSess); len(sdek) > 0 {
 		// Length-only validation for derived keys; the all-zero
 		// check is a config-mistake guard (see validateDEK) and
 		// doesn't apply to KDF output.

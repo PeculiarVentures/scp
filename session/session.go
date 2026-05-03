@@ -535,11 +535,17 @@ func (s *Session) InsecureExportSessionKeysForTestOnly() *kdf.SessionKeys {
 }
 
 // SessionDEK returns a defensive copy of the Data Encryption Key
-// derived during the SCP11 handshake. Used by the securitydomain
-// package to wrap key material for PUT KEY. See scp.Session.SessionDEK
-// for full doc and security semantics.
+// derived during the SCP11 handshake.
 //
 // Returns nil if the session is closed or did not derive a DEK.
+//
+// This is a concrete method on *session.Session, not part of the
+// scp.Session interface. The securitydomain package consumes it
+// through an unexported capability interface, so a caller holding
+// a generic scp.Session value cannot reach the DEK. Direct callers
+// who genuinely need the DEK (a custom PUT KEY-equivalent flow,
+// for example) can type-assert on this concrete type and must
+// zero the returned slice when done.
 func (s *Session) SessionDEK() []byte {
 	if s.sessionKeys == nil || len(s.sessionKeys.DEK) == 0 {
 		return nil
@@ -547,6 +553,36 @@ func (s *Session) SessionDEK() []byte {
 	out := make([]byte, len(s.sessionKeys.DEK))
 	copy(out, s.sessionKeys.DEK)
 	return out
+}
+
+// OCEAuthenticated reports whether this SCP11 session authenticates
+// the Off-Card Entity (host) to the card.
+//
+//   - SCP11a, SCP11c: yes. The OCE proves possession of its private
+//     key during the variant's mutual-authentication phase, so the
+//     card knows it is talking to an authorized administrator.
+//   - SCP11b: no. The card authenticates to the host (the host learns
+//     it is talking to a trusted card), but the host does not prove
+//     identity to the card. SCP11b is appropriate for read-only or
+//     diagnostic flows; OCE-gated management operations require
+//     SCP11a/c (or SCP03).
+//
+// This is a concrete method, not part of the scp.Session interface.
+// The securitydomain package consumes it through an unexported
+// capability interface to gate management operations without
+// pattern-matching on Protocol() string values.
+func (s *Session) OCEAuthenticated() bool {
+	if s.sessionKeys == nil {
+		return false // closed session
+	}
+	switch s.config.Variant {
+	case SCP11a, SCP11c:
+		return true
+	case SCP11b:
+		return false
+	default:
+		return false
+	}
 }
 
 // Protocol returns the protocol variant string (e.g. "SCP11b").
