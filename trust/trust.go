@@ -180,11 +180,19 @@ func ValidateSCP11Chain(certs []*x509.Certificate, policy Policy) (*Result, erro
 	}
 
 	// Check serial allowlist if configured.
+	//
+	// Serial encodings vary in the wild: callers paste in 0x prefixes,
+	// uppercase hex, colon-separated bytes, or padded forms with
+	// leading zeros. Earlier this comparison was a literal string
+	// match against fmt.Sprintf("%x", leaf.SerialNumber) — every
+	// surface variant of the same number was a false negative.
+	// Normalize both sides to lowercase hex with no separators and
+	// no leading zeros (matching big.Int's printing).
 	if len(policy.AllowedSerials) > 0 {
 		leafSerial := fmt.Sprintf("%x", leaf.SerialNumber)
 		found := false
 		for _, s := range policy.AllowedSerials {
-			if s == leafSerial {
+			if normalizeSerial(s) == leafSerial {
 				found = true
 				break
 			}
@@ -218,4 +226,44 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// normalizeSerial canonicalizes a caller-supplied serial-number string
+// to lowercase hex with no separators and no "0x" prefix, matching
+// the format produced by fmt.Sprintf("%x", *big.Int). Accepts:
+//
+//   - "0x12abcd" / "0X12ABCD" (with prefix, any case)
+//   - "12:AB:CD" (colon-separated, common openssl format)
+//   - "12 ab cd" (space-separated)
+//   - "12abcd" / "12ABCD"
+//   - leading-zero variants ("0012ab")
+//
+// Leading zeros are stripped because big.Int prints without them.
+func normalizeSerial(s string) string {
+	// Strip 0x / 0X prefix.
+	if len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		s = s[2:]
+	}
+	// Drop separators and lowercase hex.
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+			out = append(out, c)
+		case c >= 'A' && c <= 'F':
+			out = append(out, c+('a'-'A'))
+		case c == ':' || c == ' ' || c == '-' || c == '_':
+			// separator: skip
+		default:
+			// Unknown character — keep as-is so an obvious mismatch
+			// surfaces rather than silently passing.
+			out = append(out, c)
+		}
+	}
+	// Strip leading zeros (keep at least one digit).
+	for len(out) > 1 && out[0] == '0' {
+		out = out[1:]
+	}
+	return string(out)
 }

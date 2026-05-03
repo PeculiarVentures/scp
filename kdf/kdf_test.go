@@ -169,3 +169,30 @@ func TestReceipt(t *testing.T) {
 		t.Error("VerifyReceipt should fail with wrong data")
 	}
 }
+
+// TestDeriveSessionKeysFromSharedSecrets_RejectsOverlongIDs confirms
+// the SharedInfo length-prefix check. Earlier the code did
+// byte(len(...)) without bounds-checking, so a 256-byte hostID
+// silently truncated to length 0 (still emitting all 256 bytes of
+// value), which shifts the KDF input and produces different keys
+// on host and card. Fail loud instead.
+func TestDeriveSessionKeysFromSharedSecrets_RejectsOverlongIDs(t *testing.T) {
+	shSee := bytes.Repeat([]byte{0x01}, 32)
+	shSes := bytes.Repeat([]byte{0x02}, 32)
+
+	// 256-byte hostID — one byte over the single-byte length encoding.
+	long := bytes.Repeat([]byte{0xAA}, 256)
+
+	if _, err := DeriveSessionKeysFromSharedSecrets(shSee, shSes, long, nil); err == nil {
+		t.Error("256-byte hostID should be rejected (single-byte length prefix overflows)")
+	}
+	if _, err := DeriveSessionKeysFromSharedSecrets(shSee, shSes, nil, long); err == nil {
+		t.Error("256-byte cardGroupID should be rejected (single-byte length prefix overflows)")
+	}
+
+	// 255-byte hostID is the longest valid case.
+	max := bytes.Repeat([]byte{0xAA}, 255)
+	if _, err := DeriveSessionKeysFromSharedSecrets(shSee, shSes, max, nil); err != nil {
+		t.Errorf("255-byte hostID should be accepted (max valid length): %v", err)
+	}
+}

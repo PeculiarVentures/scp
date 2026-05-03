@@ -264,23 +264,22 @@ These are byte-exact known-answer tests using a recording transport, so they cat
 |---|---|
 | GP Card Spec v2.3.1 §11 | Security Domain APDU commands: PUT KEY, DELETE, STORE DATA, GET DATA |
 | GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE, session key derivation, secure messaging, S8 and S16 modes |
-| GP Amendment F (SCP11) v1.3 | SCP11a, SCP11b, SCP11c; ECKA; X9.63 KDF; receipt verification |
+| GP Amendment F (SCP11) v1.3 | SCP11a, SCP11b, SCP11c; ECKA; X9.63 KDF; receipt verification (all variants) |
 | GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC |
 | NIST SP 800-108 | KDF in counter mode with AES-CMAC |
 | NIST SP 800-38B | AES-CMAC |
 | BSI TR-03111 | ECDH with zero-point validation |
 
-## Known divergences from Yubico's implementation
+External transcript validation: SCP03 byte-exact against GlobalPlatformPro and Samsung OpenSCP-Java AES-128/192/256 × S8/S16 vectors; SCP11a P-256/AES-128/S8 byte-exact against Samsung OpenSCP-Java end-to-end (handshake + wrapped command).
 
-These were identified by cross-referencing Yubico's `yubikit` (Python) and `yubikit-android` (Java) reference implementations against this code:
+## Profile and limitations
 
-- **SCP11b receipt verification** — *fixed in `scp11-spec-alignment` branch.* Receipt is now verified whenever returned, regardless of variant. Earlier code used the receipt as MAC chain seed without verification, which would have allowed a malicious card to forge MAC chain state.
-- **SCP11a/c PSO P1/P2 layout** — *fixed in `scp11-spec-alignment` branch.* Now matches Yubico exactly: one PSO per cert (no chunking), `P1=KVN`, `P2=KID|0x80` for non-leaf, `P2=KID` for leaf. Replaced single-cert `OCECertificate` with `OCECertificates []*x509.Certificate` and `OCEKeyReference KeyRef`.
-- **Empty-data C-ENC** — *fixed in `scp11-spec-alignment` branch.* New `SecureChannel.EmptyDataEncryption` field selects between `EmptyDataYubico` (default; pads `0x80 || 0x00*15` and encrypts) and `EmptyDataGPLiteral` (skips encryption per literal GP §6.2.4 reading). YubiKey expects the Yubico behavior.
+This library is built and tested against YubiKey-style profiles. It is honest about the boundaries:
 
-Remaining gap (tracked for a follow-up branch using Samsung OpenSCP byte-exact transcripts):
-
-- **Full Samsung SCP11a/SCP11c transcript validation.** The wire-format alignment above unblocks this; the `InsecureTestOnlyEphemeralKey` seam from PR #3 makes deterministic test fixtures possible. Real byte-exact comparison against Samsung's published SCP11a P-256/AES-128/S8 and SCP11c P-256/AES-128/S8 transcripts is the proof of correctness.
+- **SCP11**: P-256 curve only, AES-128 session keys only, full security level only (`C-MAC + C-ENC + R-MAC + R-ENC`). Other curves and partial security levels are not implemented and will be rejected at `Open` time, not silently misbehave.
+- **SCP03**: AES-128/192/256 supported. Mixed key sizes (e.g. ENC=AES-128 + MAC=AES-256) and partial security levels are accepted by the current API; these aren't standard and aren't tested.
+- **GP-proprietary SCP11 certificates**: parsed (public-key extraction works) but not chain-validated. Cards returning only proprietary certs authenticate only when paired with `InsecureSkipCardAuthentication = true`. A custom-validator hook for GP-proprietary chains may be added later.
+- **Security Domain key management**: PUT KEY is implemented for AES-128 SCP03 keys and SCP11 ECKA P-256 keys. PUT KEY for AES-192/256 and other curves is not implemented.
 
 ## License
 

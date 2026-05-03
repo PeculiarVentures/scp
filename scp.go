@@ -52,7 +52,6 @@ import (
 	"context"
 
 	"github.com/PeculiarVentures/scp/apdu"
-	"github.com/PeculiarVentures/scp/kdf"
 )
 
 // Session is the common interface for an established secure channel,
@@ -70,12 +69,15 @@ type Session interface {
 	// Close terminates the session and zeros all key material.
 	Close()
 
-	// SessionKeys returns a defensive copy of the derived session
-	// keys for audit or debugging. Implementations MUST return a copy:
-	// callers cannot be allowed to read or mutate the live key
-	// material the session is using.
-	SessionKeys() *kdf.SessionKeys
-
 	// Protocol returns "SCP03" or "SCP11a" / "SCP11b" / "SCP11c".
 	Protocol() string
+
+	// Note: an earlier version of this interface exposed SessionKeys()
+	// as a public method, with the rationale "for audit or debugging."
+	// That was a footgun: examples become production code, and the
+	// reference example logged S-ENC to stdout, which is a permanent
+	// session compromise. Both implementations still expose the
+	// material — but now via InsecureExportSessionKeysForTestOnly()
+	// on the concrete type, NOT on this interface, so it can't be
+	// reached through a value of interface type Session.
 }

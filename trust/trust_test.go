@@ -342,3 +342,66 @@ func TestValidateSCP11Chain_RespectsExplicitEKUs(t *testing.T) {
 		t.Error("validation accepted a clientAuth cert under an explicit serverAuth policy")
 	}
 }
+
+// TestNormalizeSerial confirms the serial allowlist accepts common
+// hex encoding variants. Earlier the comparison was a literal
+// string match against fmt.Sprintf("%x", big.Int), so callers
+// pasting "0x..." prefixes, uppercase hex, or colon-separated
+// forms got false-negative rejections.
+func TestNormalizeSerial(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"abcd", "abcd"},
+		{"ABCD", "abcd"},
+		{"0xABCD", "abcd"},
+		{"0XAbCd", "abcd"},
+		{"AB:CD", "abcd"},
+		{"AB CD", "abcd"},
+		{"AB-CD", "abcd"},
+		{"00abcd", "abcd"},
+		{"000000ab", "ab"},
+		{"0", "0"}, // leading-zero stripping keeps at least one digit
+	}
+	for _, c := range cases {
+		if got := normalizeSerial(c.in); got != c.want {
+			t.Errorf("normalizeSerial(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestValidateSCP11Chain_AllowedSerials_AcceptsCommonFormats confirms
+// the allowlist works regardless of how a caller spelled the serial.
+func TestValidateSCP11Chain_AllowedSerials_AcceptsCommonFormats(t *testing.T) {
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{
+		// 0x123456 — small enough that fmt.Sprintf("%x", n) prints
+		// "123456" without leading zeros.
+		SerialNumber:          big.NewInt(0x123456),
+		Subject:               pkix.Name{CommonName: "serial-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	leafDER, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &leafKey.PublicKey, leafKey)
+	leaf, _ := x509.ParseCertificate(leafDER)
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	formats := []string{
+		"123456",
+		"123456",
+		"0x123456",
+		"0X123456",
+		"12:34:56",
+		"00123456", // leading zero
+	}
+	for _, f := range formats {
+		policy := Policy{Roots: roots, AllowedSerials: []string{f}}
+		if _, err := ValidateSCP11Chain([]*x509.Certificate{leaf}, policy); err != nil {
+			t.Errorf("AllowedSerials=[%q] rejected matching cert: %v", f, err)
+		}
+	}
+}
