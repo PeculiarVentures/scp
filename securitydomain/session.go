@@ -42,10 +42,39 @@ type Session struct {
 	transport     transport.Transport
 	authenticated bool
 
+	// oceAuthenticated reports whether the off-card entity (us)
+	// proved possession of a long-term secret to the card during
+	// the handshake. This is the gate for OCE-required operations
+	// like PUT KEY, GENERATE EC KEY, DELETE KEY, STORE CERTIFICATES,
+	// and STORE DATA.
+	//
+	//   - SCP03 mutual auth      → true (host proves MAC key knowledge)
+	//   - SCP11a (mutual)        → true (OCE proves possession of OCE static key)
+	//   - SCP11c (mutual)        → true
+	//   - SCP11b (one-way)       → FALSE — card authenticates to host,
+	//                              host does NOT authenticate to card.
+	//                              Card-side authorization will reject
+	//                              OCE-gated commands; reject host-side
+	//                              up front so the failure is clear.
+	//   - Unauthenticated open   → false
+	oceAuthenticated bool
+
 	// dek is the Data Encryption Key from the SCP03 key set used to
 	// authenticate this session. Required for PUT KEY operations that
 	// encrypt key material before transmission. Nil for SCP11 sessions.
 	dek []byte
+}
+
+// isOCEAuthProtocol reports whether the given protocol name (as
+// returned by scp.Session.Protocol()) authenticates the OCE to the
+// card. Anything except SCP11b qualifies.
+func isOCEAuthProtocol(proto string) bool {
+	switch proto {
+	case "SCP03", "SCP11a", "SCP11c":
+		return true
+	default:
+		return false
+	}
 }
 
 // Open establishes an authenticated Security Domain session using SCP03.
@@ -79,10 +108,11 @@ func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, key
 	copy(dek, keys.DEK)
 
 	return &Session{
-		scpSession:    scpSess,
-		transport:     t,
-		authenticated: true,
-		dek:           dek,
+		scpSession:       scpSess,
+		transport:        t,
+		authenticated:    true,
+		oceAuthenticated: true, // SCP03 mutual auth
+		dek:              dek,
 	}, nil
 }
 
@@ -109,9 +139,10 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) 
 	}
 
 	return &Session{
-		scpSession:    scpSess,
-		transport:     t,
-		authenticated: true,
+		scpSession:       scpSess,
+		transport:        t,
+		authenticated:    true,
+		oceAuthenticated: isOCEAuthProtocol(scpSess.Protocol()),
 	}, nil
 }
 
@@ -135,9 +166,10 @@ func OpenWithSession(scpSess scp.Session, t transport.Transport, dek []byte) (*S
 		return nil, errors.New("securitydomain: transport is required")
 	}
 	s := &Session{
-		scpSession:    scpSess,
-		transport:     t,
-		authenticated: true,
+		scpSession:       scpSess,
+		transport:        t,
+		authenticated:    true,
+		oceAuthenticated: isOCEAuthProtocol(scpSess.Protocol()),
 	}
 	if len(dek) > 0 {
 		if err := validateDEK(dek); err != nil {
@@ -199,6 +231,19 @@ func (s *Session) Close() {
 // IsAuthenticated reports whether this session has a secure channel.
 func (s *Session) IsAuthenticated() bool { return s.authenticated }
 
+// OCEAuthenticated reports whether the off-card entity (host) was
+// authenticated to the card during the handshake. SCP03 mutual auth
+// and SCP11a/c return true; SCP11b (one-way card-to-host auth) and
+// unauthenticated sessions return false.
+//
+// Use this to decide whether OCE-gated management operations
+// (PUT KEY, GENERATE EC KEY, DELETE KEY, certificate/data store
+// operations) will succeed. SCP11b is fine for read-only inspection
+// but the card will reject management commands; this method gives
+// callers a way to detect the limitation host-side without needing
+// to attempt the operation.
+func (s *Session) OCEAuthenticated() bool { return s.oceAuthenticated }
+
 // Protocol returns the secure channel protocol in use, or "none".
 func (s *Session) Protocol() string {
 	if s.scpSession != nil {
@@ -258,6 +303,26 @@ func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*a
 func (s *Session) requireAuth() error {
 	if !s.authenticated {
 		return ErrNotAuthenticated
+	}
+	return nil
+}
+
+// requireOCEAuth gates operations that require the off-card entity
+// to have authenticated to the card (PUT KEY, DELETE KEY, GENERATE
+// EC KEY, STORE CERTIFICATES, STORE CA ISSUER, STORE ALLOWLIST,
+// STORE DATA, RESET, and other management operations).
+//
+// On SCP11b the card authenticates to the host but the host does
+// NOT authenticate to the card; the card-side authorization layer
+// will reject these commands. Reject host-side first so the failure
+// is clear rather than an opaque 6982 from the card.
+func (s *Session) requireOCEAuth() error {
+	if err := s.requireAuth(); err != nil {
+		return err
+	}
+	if !s.oceAuthenticated {
+		return fmt.Errorf("%w: this operation requires OCE authentication; %s does not authenticate the off-card entity to the card (use SCP03 or SCP11a/c for management operations)",
+			ErrNotAuthenticated, s.Protocol())
 	}
 	return nil
 }
@@ -496,7 +561,7 @@ func (s *Session) GetSupportedCaIdentifiers(ctx context.Context, kloc, klcc bool
 //
 // Requires an SCP03-authenticated session (DEK must be available).
 func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.StaticKeys, replaceKvn byte) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 	if err := s.requireDEK(); err != nil {
@@ -529,7 +594,7 @@ func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.
 // GenerateECKey generates a new NIST P-256 key pair on the device.
 // The private key never leaves the device.
 func (s *Session) GenerateECKey(ctx context.Context, ref KeyReference, replaceKvn byte) (*ecdsa.PublicKey, error) {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return nil, err
 	}
 
@@ -550,7 +615,7 @@ func (s *Session) GenerateECKey(ctx context.Context, ref KeyReference, replaceKv
 //
 // Requires an SCP03-authenticated session (DEK must be available).
 func (s *Session) PutECPrivateKey(ctx context.Context, ref KeyReference, key *ecdsa.PrivateKey, replaceKvn byte) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 	if err := s.requireDEK(); err != nil {
@@ -577,7 +642,7 @@ func (s *Session) PutECPrivateKey(ctx context.Context, ref KeyReference, key *ec
 // Typically used for OCE public keys in SCP11a/c.
 // Public keys are not encrypted.
 func (s *Session) PutECPublicKey(ctx context.Context, ref KeyReference, key *ecdsa.PublicKey, replaceKvn byte) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 
@@ -608,7 +673,7 @@ func (s *Session) PutECPublicKey(ctx context.Context, ref KeyReference, key *ecd
 // the command so only the 0xD2 (KVN) tag is sent. ref.Version must
 // be set in that case.
 func (s *Session) DeleteKey(ctx context.Context, ref KeyReference, deleteLast bool) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 
@@ -656,7 +721,7 @@ func isSCP03KeyID(kid byte) bool {
 //
 // Ref: Python SecurityDomainSession.reset(), C# SecurityDomainSession.Reset().
 func (s *Session) Reset(ctx context.Context) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 
@@ -708,7 +773,7 @@ func (s *Session) Reset(ctx context.Context) error {
 // StoreCertificates stores X.509 certificates for the given key reference.
 // Certificates should be in order with the leaf certificate last.
 func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs []*x509.Certificate) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 
@@ -766,7 +831,7 @@ func (s *Session) GetCertificates(ctx context.Context, ref KeyReference) ([]*x50
 
 // StoreCaIssuer stores the SKI for the CA associated with a key reference.
 func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byte) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 
@@ -787,7 +852,7 @@ func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byt
 // StoreAllowlist stores a certificate serial number allowlist.
 // Serials are hex-encoded strings. Full replacement semantics.
 func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials []string) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 
@@ -831,7 +896,7 @@ func (s *Session) GetData(ctx context.Context, tag uint16, data []byte) ([]byte,
 // StoreData sends a STORE DATA command, fragmenting the payload into
 // blocks if it exceeds a single APDU.
 func (s *Session) StoreData(ctx context.Context, data []byte) error {
-	if err := s.requireAuth(); err != nil {
+	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
 	resp, err := s.transmitStoreDataChained(ctx, data)
