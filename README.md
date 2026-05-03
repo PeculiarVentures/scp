@@ -226,7 +226,7 @@ GP Amendment F also defines P-384, Brainpool P-256, AES-192/256, and partial sec
 
 For mutual-auth variants, `Open` verifies that `OCEPrivateKey` corresponds to `OCECertificate` before sending anything to the card. A mismatch is rejected immediately rather than discovered in the second ECDH.
 
-## Implementing a Transport
+## Transports
 
 The `transport.Transport` interface is the integration point for connecting to hardware:
 
@@ -239,6 +239,8 @@ type Transport interface {
 ```
 
 Both `scp03.Open` and `session.Open` accept any `Transport`. Whether it's a local PC/SC reader, a remote gRPC relay, or a mock card, the protocol code is identical.
+
+A reference PC/SC transport ships in [`transport/pcsc/`](./transport/pcsc) for USB CCID and NFC readers (YubiKey, JCOP, generic GP cards). It's a separate Go module so the main `scp` library stays CGO-free for consumers that bring their own transport. See that subpackage's README for platform setup (`pcsclite` on Linux/macOS, built-in on Windows).
 
 ## Testing
 
