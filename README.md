@@ -280,7 +280,7 @@ These were identified by cross-referencing Yubico's `yubikit` (Python) and `yubi
 
 Remaining gap (tracked for a follow-up branch using Samsung OpenSCP byte-exact transcripts):
 
-- **Full Samsung SCP11a/SCP11c transcript validation.** The wire-format alignment above unblocks this; the `InsecureTestOnlyEphemeralKey` seam from PR #3 makes deterministic test fixtures possible. Real byte-exact comparison against Samsung's published SCP11a P-256/AES-128/S8 and SCP11c P-256/AES-128/S8 transcripts is the proof of correctness.
+- ~~**Full Samsung SCP11a/SCP11c transcript validation.**~~ *Done for SCP11a in `scp11-samsung-transcripts` branch.* End-to-end transcript test against Samsung OpenSCP-Java's published P-256 / AES-128 / S8 vectors: drives `session.Open` with Samsung's fixed OCE static + ephemeral keys against canned card responses, then sends a wrapped GP GET STATUS through the established channel. MUTUAL_AUTHENTICATE and the first wrapped command match Samsung byte-exact. SCP11c transcript test is the next addition (same fixtures, different variant).
 
 ## License
 
