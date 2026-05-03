@@ -270,6 +270,16 @@ These are byte-exact known-answer tests using a recording transport, so they cat
 | NIST SP 800-38B | AES-CMAC |
 | BSI TR-03111 | ECDH with zero-point validation |
 
+## Known divergences from Yubico's implementation
+
+These are wire-level differences vs Yubico's `yubikit` (Python) and `yubikit-android` (Java) reference implementations, surfaced by cross-referencing both. They are tracked for a follow-up alignment branch:
+
+- **SCP11b receipt verification.** Yubico's `scp11_init` unpacks and verifies a receipt (TLV `0x86`) for *all* SCP11 variants including SCP11b, and seeds the MAC chain with the receipt. This implementation only verifies receipts for SCP11a/c; SCP11b leaves the MAC chain at zeros. If YubiKey's SCP11b returns a receipt and expects MAC chain = receipt, our SCP11b will not interoperate. To be confirmed against hardware or a yubikit byte trace.
+- **Empty-data C-ENC behavior.** When C-DECRYPTION is active and the command data is empty, this implementation skips encryption (matching a literal reading of GP §6.2.4). Yubico's `ScpState.encrypt` instead pads empty data with `0x80 || 0x00*15` and encrypts a single block. The two interpretations diverge silently and one of them will fail against any given card; resolving this needs profile-specific behavior (or hardware confirmation).
+- **SCP11a/c PSO P1/P2 layout.** This implementation sends PERFORM SECURITY OPERATION with `P1=0x00, P2=0x00` (with P1 high-bit set for chained chunks). Yubico sends `P1=oce_ref.kvn, P2=oce_ref.kid | 0x80` for intermediate certs, with the chain bit cleared on the final cert. Only the latter matches GP §7.5.2. Out-of-the-box SCP11a/c against real YubiKeys will likely fail until this is fixed.
+
+These items are scoped to a focused follow-up branch using Yubico's open-source yubikit code as the reference, with Samsung OpenSCP transcripts validating the cryptographic core.
+
 ## License
 
 Apache 2.0
