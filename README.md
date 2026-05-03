@@ -272,13 +272,15 @@ These are byte-exact known-answer tests using a recording transport, so they cat
 
 ## Known divergences from Yubico's implementation
 
-These are wire-level differences vs Yubico's `yubikit` (Python) and `yubikit-android` (Java) reference implementations, surfaced by cross-referencing both. They are tracked for a follow-up alignment branch:
+These were identified by cross-referencing Yubico's `yubikit` (Python) and `yubikit-android` (Java) reference implementations against this code:
 
-- **SCP11b receipt verification.** Yubico's `scp11_init` unpacks and verifies a receipt (TLV `0x86`) for *all* SCP11 variants including SCP11b, and seeds the MAC chain with the receipt. This implementation only verifies receipts for SCP11a/c; SCP11b leaves the MAC chain at zeros. If YubiKey's SCP11b returns a receipt and expects MAC chain = receipt, our SCP11b will not interoperate. To be confirmed against hardware or a yubikit byte trace.
-- **Empty-data C-ENC behavior.** When C-DECRYPTION is active and the command data is empty, this implementation skips encryption (matching a literal reading of GP §6.2.4). Yubico's `ScpState.encrypt` instead pads empty data with `0x80 || 0x00*15` and encrypts a single block. The two interpretations diverge silently and one of them will fail against any given card; resolving this needs profile-specific behavior (or hardware confirmation).
-- **SCP11a/c PSO P1/P2 layout.** This implementation sends PERFORM SECURITY OPERATION with `P1=0x00, P2=0x00` (with P1 high-bit set for chained chunks). Yubico sends `P1=oce_ref.kvn, P2=oce_ref.kid | 0x80` for intermediate certs, with the chain bit cleared on the final cert. Only the latter matches GP §7.5.2. Out-of-the-box SCP11a/c against real YubiKeys will likely fail until this is fixed.
+- **SCP11b receipt verification** — *fixed in `scp11-spec-alignment` branch.* Receipt is now verified whenever returned, regardless of variant. Earlier code used the receipt as MAC chain seed without verification, which would have allowed a malicious card to forge MAC chain state.
+- **SCP11a/c PSO P1/P2 layout** — *fixed in `scp11-spec-alignment` branch.* Now matches Yubico exactly: one PSO per cert (no chunking), `P1=KVN`, `P2=KID|0x80` for non-leaf, `P2=KID` for leaf. Replaced single-cert `OCECertificate` with `OCECertificates []*x509.Certificate` and `OCEKeyReference KeyRef`.
+- **Empty-data C-ENC** — *fixed in `scp11-spec-alignment` branch.* New `SecureChannel.EmptyDataEncryption` field selects between `EmptyDataYubico` (default; pads `0x80 || 0x00*15` and encrypts) and `EmptyDataGPLiteral` (skips encryption per literal GP §6.2.4 reading). YubiKey expects the Yubico behavior.
 
-These items are scoped to a focused follow-up branch using Yubico's open-source yubikit code as the reference, with Samsung OpenSCP transcripts validating the cryptographic core.
+Remaining gap (tracked for a follow-up branch using Samsung OpenSCP byte-exact transcripts):
+
+- **Full Samsung SCP11a/SCP11c transcript validation.** The wire-format alignment above unblocks this; the `InsecureTestOnlyEphemeralKey` seam from PR #3 makes deterministic test fixtures possible. Real byte-exact comparison against Samsung's published SCP11a P-256/AES-128/S8 and SCP11c P-256/AES-128/S8 transcripts is the proof of correctness.
 
 ## License
 

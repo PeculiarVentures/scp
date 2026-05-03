@@ -63,6 +63,15 @@ const (
 	StateFailed
 )
 
+// KeyRef identifies a key set on the card by its Key Identifier
+// (KID) and Key Version Number (KVN). Used in SCP11a/c to address
+// the OCE certificate slot when uploading the OCE certificate chain
+// via PERFORM SECURITY OPERATION.
+type KeyRef struct {
+	KID byte
+	KVN byte
+}
+
 // Config holds the parameters for establishing an SCP11 session.
 type Config struct {
 	// Variant selects SCP11a, SCP11b, or SCP11c.
@@ -99,18 +108,47 @@ type Config struct {
 	KeyID      byte
 	KeyVersion byte
 
-	// OCECertificate is the OCE's certificate, required for SCP11a.
-	// For SCP11b, this is sent but not validated by the card.
-	OCECertificate *x509.Certificate
+	// OCECertificates is the OCE's certificate chain for SCP11a/c,
+	// in leaf-LAST order (intermediates first, OCE's own cert at the
+	// end). Each cert in the chain is sent as a separate PERFORM
+	// SECURITY OPERATION APDU per GP §7.5.2 and Yubico's reference
+	// implementation. The card validates the chain against its trust
+	// anchors before accepting the OCE's authentication.
+	//
+	// Required for SCP11a/c. Not used by SCP11b. A single self-signed
+	// or directly-issued OCE cert is expressed as a one-element slice.
+	OCECertificates []*x509.Certificate
 
-	// OCEPrivateKey is the OCE's long-term ECDSA key for SCP11a
-	// certificate-based authentication. Not needed for SCP11b.
+	// OCEKeyReference identifies the OCE key set on the card. KVN is
+	// sent as P1 of each PERFORM SECURITY OPERATION APDU; KID is sent
+	// as P2 with the chain bit (0x80) set for non-final certs and
+	// cleared for the final (leaf) cert. This matches Yubico's
+	// reference implementation in yubikit-android's
+	// SecurityDomainSession and yubikit's scp.py:
+	//
+	//   p2 = oce_ref.kid | (0x80 if i < n else 0)
+	//
+	// Required for SCP11a/c. Not used by SCP11b.
+	OCEKeyReference KeyRef
+
+	// OCEPrivateKey is the OCE's long-term ECDSA key for SCP11a/c
+	// certificate-based authentication. Must correspond to the LEAF
+	// certificate in OCECertificates (i.e. the last entry). Not
+	// needed for SCP11b.
 	OCEPrivateKey *ecdsa.PrivateKey
 
-	// CardTrustAnchors validates the card's certificate chain.
-	// If nil, the card certificate is not validated (SCP11b behavior).
+	// CardTrustAnchors validates the card's certificate chain via
+	// x509.Verify with this CertPool as Roots. Intermediates from
+	// the card's BF21 certificate store are added automatically.
+	//
+	// At least one of CardTrustAnchors, CardTrustPolicy, or
+	// InsecureSkipCardAuthentication must be set; if all three are
+	// nil, Open fails closed before any ECDH (an SCP11 session
+	// against an unauthenticated card key is opportunistic
+	// encryption, not authenticated key agreement).
+	//
 	// For richer validation (P-256 enforcement, serial allowlists,
-	// SKI matching), use CardTrustPolicy instead.
+	// SKI matching, EKU constraints), use CardTrustPolicy instead.
 	CardTrustAnchors *x509.CertPool
 
 	// CardTrustPolicy, if set, provides full SCP11 certificate chain
@@ -265,27 +303,30 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, fmt.Errorf("get card cert: %w", err)
 	}
 
-	// Step 3 (SCP11a/c): Send OCE certificate via PERFORM SECURITY OPERATION.
-	// Both SCP11a and SCP11c are mutual-auth variants that require the OCE
-	// certificate to be provided to the card before MUTUAL AUTHENTICATE.
+	// Step 3 (SCP11a/c): Send OCE certificate chain via PERFORM SECURITY
+	// OPERATION. Both SCP11a and SCP11c are mutual-auth variants that
+	// require the OCE certificate(s) to be provided to the card before
+	// MUTUAL AUTHENTICATE.
 	if cfg.Variant == SCP11a || cfg.Variant == SCP11c {
 		if cfg.OCEPrivateKey == nil {
 			return nil, errors.New("OCE private key required for SCP11a/c (mutual-auth variants)")
 		}
-		if cfg.OCECertificate == nil {
-			return nil, errors.New("OCE certificate required for SCP11a/c (mutual-auth variants)")
+		if len(cfg.OCECertificates) == 0 {
+			return nil, errors.New("OCE certificate chain required for SCP11a/c (mutual-auth variants); set Config.OCECertificates to a non-empty slice in leaf-last order")
 		}
 		// Defense-in-depth: ensure the configured private key actually
-		// corresponds to the certificate sent to the card. A mismatch
+		// corresponds to the LEAF certificate (last entry) — that's the
+		// cert the card uses to verify the OCE's signature. A mismatch
 		// would either cause MUTUAL AUTHENTICATE to fail (best case) or,
 		// worse, succeed against a permissive card while the host
 		// believes it is presenting one identity but holds another.
-		if err := verifyOCEKeyMatchesCert(cfg.OCEPrivateKey, cfg.OCECertificate); err != nil {
-			return nil, fmt.Errorf("OCE key/certificate mismatch: %w", err)
+		leaf := cfg.OCECertificates[len(cfg.OCECertificates)-1]
+		if err := verifyOCEKeyMatchesCert(cfg.OCEPrivateKey, leaf); err != nil {
+			return nil, fmt.Errorf("OCE key/leaf-certificate mismatch: %w", err)
 		}
 		if err := s.sendOCECertificate(ctx); err != nil {
 			s.state = StateFailed
-			return nil, fmt.Errorf("send OCE cert: %w", err)
+			return nil, fmt.Errorf("send OCE cert chain: %w", err)
 		}
 	}
 
@@ -526,55 +567,65 @@ func (s *Session) validateCardCertChain(data []byte) error {
 	return nil
 }
 
+// sendOCECertificate uploads the OCE certificate chain to the card
+// via PERFORM SECURITY OPERATION (GP §7.5.2).
+//
+// Wire layout follows Yubico's reference implementation, which itself
+// matches the spec:
+//
+//   - Each certificate in the chain is a SEPARATE PSO APDU (not chunks
+//     of one cert across APDUs).
+//   - CLA = 0x80 throughout (no GP command-chaining).
+//   - P1 = OCEKeyReference.KVN.
+//   - P2 = OCEKeyReference.KID, with bit 0x80 set for non-final certs
+//     (i.e. all but the LEAF cert) and cleared for the final cert.
+//   - The chain is sent in leaf-LAST order.
+//
+// Earlier this code chunked a single certificate into 255-byte pieces
+// using GP command-chaining bits on CLA. That's a different protocol
+// shape — what GP §7.5 calls "command chaining" applies when a SINGLE
+// cert exceeds the APDU limit, not when sending multiple certs. Real
+// cards (YubiKey verified through yubikit) expect the chain-of-certs
+// shape, not the chunks-of-one-cert shape.
 func (s *Session) sendOCECertificate(ctx context.Context) error {
-	if s.config.OCECertificate == nil {
-		return errors.New("OCE certificate required for SCP11a/c (mutual-auth variants)")
+	if len(s.config.OCECertificates) == 0 {
+		return errors.New("OCE certificate chain required for SCP11a/c (mutual-auth variants)")
 	}
 
-	// PERFORM SECURITY OPERATION sends the OCE certificate chain.
-	// GP §7.5: Certificate chaining for PERFORM SECURITY OPERATION.
-	//   - Intermediate chunks: CLA |= 0x10 (chaining bit), P1 |= 0x80
-	//   - Final chunk: original CLA, original P1
-	//   - Each chunk max 255 bytes
-	certData := s.config.OCECertificate.Raw
-	p1Base := byte(0x00)
-	p2 := byte(0x00)
+	chain := s.config.OCECertificates
+	lastIdx := len(chain) - 1
 
-	offset := 0
-	maxChunk := 255
-	for offset < len(certData) {
-		remaining := len(certData) - offset
-		chunkLen := remaining
-		if chunkLen > maxChunk {
-			chunkLen = maxChunk
-		}
-		isLast := (offset + chunkLen) >= len(certData)
-
-		cla := byte(0x80)
-		p1 := p1Base
-		if !isLast {
-			cla |= 0x10 // Command chaining
-			p1 |= 0x80  // GP §7.5.2.1: more certificate data follows
+	for i, cert := range chain {
+		// Set chain bit on every cert EXCEPT the last (leaf).
+		// Per yubikit scp.py:
+		//   p2 = oce_ref.kid | (0x80 if i < n else 0)
+		p2 := s.config.OCEKeyReference.KID
+		if i < lastIdx {
+			p2 |= 0x80
 		}
 
+		// Real OCE certs are typically >255 bytes; use extended APDU
+		// encoding so the full cert fits in a single PSO command.
+		// This matches Yubico's behavior — yubikit's protocol layer
+		// auto-promotes to extended encoding when data exceeds the
+		// short-APDU limit.
 		cmd := &apdu.Command{
-			CLA:  cla,
-			INS:  0x2A, // PERFORM SECURITY OPERATION
-			P1:   p1,
-			P2:   p2,
-			Data: certData[offset : offset+chunkLen],
-			Le:   0,
+			CLA:            0x80,
+			INS:            0x2A, // PERFORM SECURITY OPERATION
+			P1:             s.config.OCEKeyReference.KVN,
+			P2:             p2,
+			Data:           cert.Raw,
+			Le:             0,
+			ExtendedLength: len(cert.Raw) > 255,
 		}
 
 		resp, err := s.transport.Transmit(ctx, cmd)
 		if err != nil {
-			return err
+			return fmt.Errorf("PSO cert %d/%d: %w", i+1, len(chain), err)
 		}
 		if !resp.IsSuccess() {
-			return resp.Error()
+			return fmt.Errorf("PSO cert %d/%d: %w", i+1, len(chain), resp.Error())
 		}
-
-		offset += chunkLen
 	}
 
 	return nil
@@ -718,13 +769,38 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 		return fmt.Errorf("derive session keys: %w", err)
 	}
 
-	// For SCP11a/c: verify the receipt.
+	// Receipt verification.
+	//
 	// GP SCP11 §3.1.2: receipt = AES-CMAC(receipt_key, command_data || ePK.SD.TLV)
+	//
+	// Authority for "always verify when present":
+	//
+	//   - GP Amendment F v1.4 specifies receipts for ALL SCP11 variants
+	//     (a/b/c). Newer YubiKey firmware (5.7.2+) follows this profile.
+	//   - Yubico's reference implementation in yubikit's scp.py
+	//     unconditionally unpacks tag 0x86 from the response and verifies
+	//     it via AES-CMAC, regardless of variant.
+	//
+	// Behavior here:
+	//
+	//   - SCP11a/c: receipt is REQUIRED. A missing receipt means mutual
+	//     auth wasn't actually performed; we fail closed.
+	//   - SCP11b: receipt is OPTIONAL on the wire (older Amendment F
+	//     versions did not include one) but if the card sent one, we
+	//     MUST verify it. Earlier code used the receipt bytes as the
+	//     MAC chain seed without any verification — which would have
+	//     let a card forge MAC chain state by returning arbitrary
+	//     bytes as the receipt.
+	//
+	// Either way: if receipt is present, it is verified before being
+	// used to seed the MAC chain.
 	if s.config.Variant == SCP11a || s.config.Variant == SCP11c {
 		if receipt == nil {
 			return errors.New("expected receipt for SCP11a/c but none received")
 		}
-		// Build key agreement data: the MUTUAL AUTH data field we sent,
+	}
+	if receipt != nil {
+		// Build key agreement data: the AUTHENTICATE data we sent,
 		// concatenated with the card's ephemeral public key TLV.
 		cardEphPubTLV := tlv.Build(tlv.TagEphPubKey, cardEphPubBytes)
 		var keyAgreementData []byte
@@ -738,8 +814,8 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 
 	s.sessionKeys = keys
 
-	// GP §5.3.2: macChain is initialized to the receipt for SCP11a/c.
-
+	// MAC chain initialization. If a (now-verified) receipt was
+	// returned, the chain seeds from it; otherwise zeros.
 	if receipt != nil {
 		s.sessionKeys.MACChain = make([]byte, len(receipt))
 		copy(s.sessionKeys.MACChain, receipt)

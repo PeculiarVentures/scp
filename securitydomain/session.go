@@ -87,14 +87,23 @@ func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, key
 }
 
 // OpenSCP11 establishes an authenticated Security Domain session using SCP11.
+//
+// The caller's cfg is not mutated: this function takes a shallow copy
+// before forcing SelectAID = AIDSecurityDomain and ApplicationAID = nil,
+// so configs reused across applets/sessions stay intact. Earlier
+// versions modified cfg in place, which surprised callers reusing a
+// shared config object.
 func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) (*Session, error) {
-	if cfg == nil {
-		cfg = session.DefaultConfig()
+	var local session.Config
+	if cfg != nil {
+		local = *cfg
+	} else {
+		local = *session.DefaultConfig()
 	}
-	cfg.SelectAID = AIDSecurityDomain
-	cfg.ApplicationAID = nil
+	local.SelectAID = AIDSecurityDomain
+	local.ApplicationAID = nil
 
-	scpSess, err := session.Open(ctx, t, cfg)
+	scpSess, err := session.Open(ctx, t, &local)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: open SCP11 session: %w", err)
 	}

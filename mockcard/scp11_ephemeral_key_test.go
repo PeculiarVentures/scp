@@ -4,10 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"fmt"
+	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/session"
@@ -199,3 +206,182 @@ func TestSCP11_InsecureTestOnlyEphemeralKey_RejectsNonP256(t *testing.T) {
 		t.Errorf("error should mention P-256 curve requirement, got: %v", err)
 	}
 }
+
+// TestSCP11a_PSO_WireFormat confirms the PERFORM SECURITY OPERATION
+// APDUs sent during SCP11a OCE certificate upload match the layout
+// from yubikit-android/yubikit Python's reference SCP11 implementation
+// and GP §7.5.2:
+//
+//   - One PSO APDU per certificate (no chunking of a single cert).
+//   - CLA = 0x80 throughout.
+//   - INS = 0x2A.
+//   - P1 = OCEKeyReference.KVN.
+//   - P2 = OCEKeyReference.KID, with bit 0x80 set on every cert
+//     EXCEPT the last (leaf).
+//   - Data = the cert's DER bytes.
+//
+// Earlier this code chunked a single cert into 255-byte pieces with
+// GP CLA-chaining (0x90/0x80). This test documents the corrected
+// behavior and would have caught the regression.
+func TestSCP11a_PSO_WireFormat(t *testing.T) {
+	// Build a synthetic 3-cert chain for the test. Real OCE certs
+	// would be intermediates + OCE leaf; the wire format work doesn't
+	// depend on them being real-issued, so we use generated certs.
+	mkCert := func(t *testing.T, n int) *x509.Certificate {
+		t.Helper()
+		k, _ := ecdsaP256(t)
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(int64(n)),
+			Subject:      pkixName(fmt.Sprintf("OCE-%d", n)),
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+		}
+		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+		c, _ := x509.ParseCertificate(der)
+		return c
+	}
+	leafKey, _ := ecdsaP256(t)
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(99),
+		Subject:      pkixName("OCE-Leaf"),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, leafTmpl, &leafKey.PublicKey, leafKey)
+	leaf, _ := x509.ParseCertificate(leafDER)
+
+	chain := []*x509.Certificate{
+		mkCert(t, 1), // intermediate 1
+		mkCert(t, 2), // intermediate 2
+		leaf,         // leaf — must come last
+	}
+
+	card, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := &recordingTransport{inner: card.Transport()}
+
+	// SCP11a needs the OCE private key to match the leaf cert; we
+	// pass the leaf's actual private key. Open may fail at a later
+	// step (e.g. the mock doesn't synthesize a receipt) but we only
+	// care that PSO went out correctly before any failure — capture
+	// the recorded APDUs regardless.
+	sess, _ := session.Open(context.Background(), rec, &session.Config{
+		Variant:                        session.SCP11a,
+		SelectAID:                      session.AIDSecurityDomain,
+		KeyID:                          0x11,
+		KeyVersion:                     0x01,
+		OCECertificates:                chain,
+		OCEKeyReference:                session.KeyRef{KID: 0x10, KVN: 0x03},
+		OCEPrivateKey:                  leafKey,
+		InsecureSkipCardAuthentication: true,
+	})
+	if sess != nil {
+		defer sess.Close()
+	}
+
+	// Pull out every PSO (INS=0x2A) APDU we actually sent.
+	var pso [][]byte
+	for _, capdu := range rec.sent {
+		if len(capdu) >= 2 && capdu[1] == 0x2A {
+			pso = append(pso, capdu)
+		}
+	}
+	if len(pso) != 3 {
+		t.Fatalf("expected 3 PSO APDUs (one per cert), got %d", len(pso))
+	}
+
+	// Per-APDU header checks.
+	for i, capdu := range pso {
+		isLast := i == len(pso)-1
+		wantP2 := byte(0x10)
+		if !isLast {
+			wantP2 |= 0x80
+		}
+		if capdu[0] != 0x80 {
+			t.Errorf("PSO %d: CLA = %02X, want 80", i, capdu[0])
+		}
+		if capdu[1] != 0x2A {
+			t.Errorf("PSO %d: INS = %02X, want 2A", i, capdu[1])
+		}
+		if capdu[2] != 0x03 {
+			t.Errorf("PSO %d: P1 = %02X, want 03 (KVN)", i, capdu[2])
+		}
+		if capdu[3] != wantP2 {
+			t.Errorf("PSO %d: P2 = %02X, want %02X (KID=10, chain-bit %v)",
+				i, capdu[3], wantP2, !isLast)
+		}
+	}
+}
+
+// helpers used by TestSCP11a_PSO_WireFormat above
+func ecdsaP256(t *testing.T) (*ecdsa.PrivateKey, error) {
+	t.Helper()
+	return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+}
+
+func pkixName(cn string) (n pkix.Name) {
+	n.CommonName = cn
+	return
+}
+
+// TestSCP11b_ForgedReceipt_Rejected confirms the host verifies any
+// receipt the card returns, even for SCP11b where receipts are
+// optional. Earlier the code used a receipt as the MAC chain seed
+// without verification — so a card sending arbitrary bytes as the
+// receipt would have its bytes accepted as MAC chain state. That
+// would let a malicious card forge the post-handshake MAC chain
+// state without holding the receipt key.
+//
+// This test injects a forged receipt into the SCP11b INTERNAL
+// AUTHENTICATE response and asserts session.Open rejects it.
+func TestSCP11b_ForgedReceipt_Rejected(t *testing.T) {
+	// Build a transport that wraps the mock and injects a fake
+	// receipt TLV (0x86 || 0x10 || 16 bytes of 0xAB) into the
+	// INTERNAL AUTHENTICATE response. Everything else passes through.
+	card, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	wrap := &receiptInjector{inner: card.Transport()}
+
+	_, err = session.Open(context.Background(), wrap, &session.Config{
+		Variant:                        session.SCP11b,
+		SelectAID:                      session.AIDSecurityDomain,
+		KeyID:                          0x13,
+		KeyVersion:                     0x01,
+		InsecureSkipCardAuthentication: true,
+	})
+	if err == nil {
+		t.Fatal("Open should reject a forged receipt; instead succeeded")
+	}
+	if !strings.Contains(err.Error(), "receipt") {
+		t.Errorf("error should mention receipt verification; got: %v", err)
+	}
+}
+
+// receiptInjector wraps a transport and rewrites the INTERNAL
+// AUTHENTICATE response (INS=0x88) to append a fake receipt TLV
+// before the SW1/SW2.
+type receiptInjector struct {
+	inner transport.Transport
+}
+
+func (r *receiptInjector) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	resp, err := r.inner.Transmit(ctx, cmd)
+	if err != nil || cmd.INS != 0x88 || !resp.IsSuccess() {
+		return resp, err
+	}
+	// Append a fake receipt TLV: 86 10 ABABAB...
+	fakeReceipt := bytes.Repeat([]byte{0xAB}, 16)
+	resp.Data = append(resp.Data, 0x86, 0x10)
+	resp.Data = append(resp.Data, fakeReceipt...)
+	return resp, nil
+}
+
+func (r *receiptInjector) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+	return r.inner.TransmitRaw(ctx, raw)
+}
+
+func (r *receiptInjector) Close() error { return r.inner.Close() }

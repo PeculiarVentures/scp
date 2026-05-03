@@ -315,7 +315,7 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 		KeyID:                          0x11, // SCP11a KID
 		KeyVersion:                     0x01,
 		OCEPrivateKey:                  oceKey,
-		OCECertificate:                 oceCert,
+		OCECertificates:                []*x509.Certificate{oceCert},
 		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
