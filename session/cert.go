@@ -82,10 +82,14 @@ func parseRawCert(data []byte, trustAnchors, intermediates *x509.CertPool) (*ecd
 		}
 
 		// No trust anchors configured — try GP proprietary format.
-		// Note: GP proprietary certificates are NOT chain-validated by
-		// this path; only X.509 cards get full trust validation. If
-		// you need authenticated GP-proprietary support, configure
-		// CardTrustPolicy with a custom validator.
+		// GP proprietary certificates are NOT chain-validated here; the
+		// trust package only knows how to validate X.509 chains. The
+		// only ways to authenticate a card returning GP-proprietary
+		// certs today are (a) configure InsecureSkipCardAuthentication
+		// for lab use, or (b) implement validation outside this library
+		// and pin the public key. There is no custom-validator hook on
+		// trust.Policy yet; an earlier version of this comment promised
+		// one that doesn't exist.
 		key, gpErr := parseGPCertificate(data)
 		if gpErr == nil {
 			return key, nil

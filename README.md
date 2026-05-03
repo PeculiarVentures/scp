@@ -109,8 +109,6 @@ sd.Reset(ctx)
 
 The full API covers: `PutSCP03Key`, `GenerateECKey`, `PutECPrivateKey`, `PutECPublicKey`, `DeleteKey`, `Reset`, `GetKeyInformation`, `GetCardRecognitionData`, `GetSupportedCaIdentifiers`, `StoreCertificates`, `GetCertificates`, `StoreCaIssuer`, `StoreAllowlist`, `ClearAllowlist`, `StoreData`, `GetData`.
 
-APDU encoding has been validated against the [Yubico .NET SDK](https://github.com/Yubico/Yubico.NET.SDK) and [yubikey-manager](https://github.com/Yubico/yubikey-manager) Python SDK.
-
 ## Certificate Trust Validation
 
 The `trust` package validates SCP11 certificate chains before trusting a card's identity. It is fail-closed: if trust anchors are configured and validation fails, the library will not fall back to raw key extraction.
