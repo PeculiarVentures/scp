@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/kdf"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // --- KCV tests ---
@@ -683,5 +685,51 @@ func TestStoreDataChained_RejectsAPDUChainingPath(t *testing.T) {
 	_, err := s.transmitWithChaining(context.Background(), cmd)
 	if err == nil {
 		t.Fatal("expected error: STORE DATA must not use APDU-level chaining")
+	}
+}
+
+// --- SCP-aware GET RESPONSE bounding ---
+
+// chainingSCPSession is a minimal scp.Session that always replies with
+// "still more data" (61 xx) so we can verify that transmitCollectAll
+// under SCP also enforces the iteration cap. Without bounding, a hostile
+// or buggy card could keep the host looping forever.
+type chainingSCPSession struct {
+	calls    int
+	chunkLen int
+}
+
+func (c *chainingSCPSession) Transmit(_ context.Context, _ *apdu.Command) (*apdu.Response, error) {
+	c.calls++
+	return &apdu.Response{Data: make([]byte, c.chunkLen), SW1: 0x61, SW2: 0xFF}, nil
+}
+
+func (c *chainingSCPSession) Close()                        {}
+func (c *chainingSCPSession) SessionKeys() *kdf.SessionKeys { return nil }
+func (c *chainingSCPSession) Protocol() string              { return "test" }
+
+func TestSCPCollectAll_IterationCap(t *testing.T) {
+	scpSess := &chainingSCPSession{chunkLen: 0}
+	s := &Session{authenticated: true, scpSession: scpSess}
+
+	cmd := &apdu.Command{CLA: 0x00, INS: 0xCA}
+	_, err := s.transmitCollectAll(context.Background(), cmd)
+	if err == nil {
+		t.Fatal("expected iteration cap to fire on infinite 61xx loop")
+	}
+	if scpSess.calls > transport.MaxGetResponseIterations+2 {
+		t.Errorf("scp session invoked %d times; cap is %d",
+			scpSess.calls, transport.MaxGetResponseIterations)
+	}
+}
+
+func TestSCPCollectAll_ByteCap(t *testing.T) {
+	scpSess := &chainingSCPSession{chunkLen: 8 * 1024}
+	s := &Session{authenticated: true, scpSession: scpSess}
+
+	cmd := &apdu.Command{CLA: 0x00, INS: 0xCA}
+	_, err := s.transmitCollectAll(context.Background(), cmd)
+	if err == nil {
+		t.Fatal("expected byte cap to fire on large-chunk infinite loop")
 	}
 }

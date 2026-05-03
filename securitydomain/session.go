@@ -161,7 +161,12 @@ func (s *Session) transmitRaw(ctx context.Context, cmd *apdu.Command) (*apdu.Res
 	return s.transport.Transmit(ctx, cmd)
 }
 
-// transmitCollectAll handles GET RESPONSE chaining.
+// transmitCollectAll handles GET RESPONSE chaining through the secure
+// channel when authenticated, or via the unauthenticated transport path
+// otherwise. Both paths share the same iteration- and byte-count caps
+// from the transport package — a hostile or buggy card cannot loop the
+// host indefinitely or coerce unbounded memory growth, regardless of
+// whether secure messaging is engaged.
 func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	if s.authenticated && s.scpSession != nil {
 		resp, err := s.scpSession.Transmit(ctx, cmd)
@@ -170,7 +175,13 @@ func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*a
 		}
 		var allData []byte
 		allData = append(allData, resp.Data...)
-		for resp.IsMoreData() {
+		for i := 0; resp.IsMoreData(); i++ {
+			if i >= transport.MaxGetResponseIterations {
+				return nil, fmt.Errorf("GET RESPONSE exceeded %d iterations", transport.MaxGetResponseIterations)
+			}
+			if len(allData) > transport.MaxCollectedResponseBytes {
+				return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", transport.MaxCollectedResponseBytes)
+			}
 			getResp := apdu.NewGetResponse(resp.SW2)
 			resp, err = s.scpSession.Transmit(ctx, getResp)
 			if err != nil {

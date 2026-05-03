@@ -195,4 +195,3 @@ func TestSCP03_SamsungOpenSCP_AES128_S16_FullTranscript(t *testing.T) {
 	defer sess.Close()
 	tt.expectConsumedAll()
 }
-

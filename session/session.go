@@ -245,10 +245,13 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	s.channel = channel.New(s.sessionKeys, cfg.SecurityLevel)
 	s.state = StateAuthenticated
 
-	// Step 6: If an application AID is configured, SELECT it through
-	// the secure channel. The SCP layer on the YubiKey intercepts all
-	// CCID traffic once the channel is up, so this SELECT (and everything
-	// after it) is encrypted and MACed.
+	// Step 6: If the caller explicitly set ApplicationAID, SELECT the
+	// applet through the secure channel. This is opt-in: the default
+	// config leaves ApplicationAID nil because some platforms — notably
+	// YubiKey — scope the SCP session to the currently selected applet
+	// and selecting a different one terminates the session. The
+	// supported pattern there is to SELECT the target applet first and
+	// then call Open against that applet.
 	if len(cfg.ApplicationAID) > 0 {
 		if err := s.selectApplication(ctx); err != nil {
 			s.state = StateFailed
