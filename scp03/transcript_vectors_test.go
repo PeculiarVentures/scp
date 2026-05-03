@@ -1,3 +1,23 @@
+// External-vector transcripts for SCP03.
+//
+// Sources and provenance live in testvectors/README.md. The relevant
+// upstream commits at the time of last verification (2026-05-03):
+//
+//   - Samsung/OpenSCP-Java       @ b9876fc36a5b18fb90ce03d0894f39edb08a905b
+//     License: Apache-2.0
+//     Per-test references identify the specific upstream Java fixture
+//     each transcript was extracted from.
+//
+//   - martinpaljak/GlobalPlatformPro @ 6d6c154dd55b3dc5406d980345d44c8e4ed01a72
+//     License: LGPL-3.0-or-later
+//     Real-card JCOP4 dumps for SCP03 INITIALIZE UPDATE and EXTERNAL
+//     AUTHENTICATE.
+//
+// All upstream CAPDU / RAPDU bytes here are preserved verbatim. They
+// are known-answer inputs, not values for the local mock card to
+// derive. When updating provenance, update both this header AND the
+// corresponding "Verified at" SHA in testvectors/README.md.
+
 package scp03
 
 import (
@@ -110,10 +130,12 @@ func hx(s string) []byte {
 // TestSCP03_GlobalPlatformPro_JCOP4_MACOnlyTranscript imports the JCOP4
 // SCP03 transcript from GlobalPlatformPro:
 //
+//	nextgen/src/test/resources/scp03-init-update-jcop4.dump
 //	nextgen/src/test/resources/scp03-auth-jcop4.dump
 //
 // This is a real-card transcript using default AES-128 keys, fixed host
-// challenge 0102030405060708, and MAC-only security level.
+// challenge 0102030405060708, and MAC-only security level. See
+// testvectors/README.md for the verified upstream SHA.
 func TestSCP03_GlobalPlatformPro_JCOP4_MACOnlyTranscript(t *testing.T) {
 	tt := newTranscriptTransport(t, []transcriptStep{
 		{
