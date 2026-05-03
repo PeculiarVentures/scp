@@ -659,11 +659,24 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	// Build the INTERNAL AUTHENTICATE / MUTUAL AUTHENTICATE command.
 	//
 	// Data field per GP SCP11 §7.6.2.3:
-	//   A6 { 90{11, params}, 95{3C}, 80{88}, 81{10} }
+	//   A6 { 90{KID, params}, 95{3C}, 80{88}, 81{10} }
 	//   5F49 { ePK.OCE uncompressed point }
 	//
 	// GP §7.6.2.3 / §7.7.2.3: key params in A6 control reference template.
-	// The params byte varies by variant: SCP11a=0x01, SCP11b=0x00, SCP11c=0x03.
+	// The TagKeyInfo TLV (0x90) carries [KID, params_byte], where:
+	//   - KID is the SCP key set being authenticated against (the same
+	//     value that goes in P2 of this AUTHENTICATE command).
+	//   - params varies by variant: SCP11a=0x01, SCP11b=0x00, SCP11c=0x03
+	//     (per GPC v2.3 Amendment F §7.1.1).
+	//
+	// Yubico's scp.py builds this exactly the same way:
+	//   bytes([key_params.ref.kid]) + params
+	//
+	// Earlier this code hardcoded 0x11 for the KID byte, which silently
+	// "worked" against any card whose SCP key set happens to be at KID
+	// 0x11 (Samsung's reference vectors and some YubiKey configurations)
+	// but would have failed against any other KID — including YubiKey's
+	// SCP11b at KID 0x13.
 	var params byte
 	switch s.config.Variant {
 	case SCP11a:
@@ -675,7 +688,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	}
 
 	controlRef := tlv.BuildConstructed(tlv.TagControlRef,
-		tlv.Build(tlv.TagKeyInfo, []byte{0x11, params}),
+		tlv.Build(tlv.TagKeyInfo, []byte{s.config.KeyID, params}),
 		tlv.Build(tlv.TagKeyUsage, []byte{kdf.KeyUsage}),
 		tlv.Build(tlv.TagKeyType, []byte{kdf.KeyTypeAES}),
 		tlv.Build(tlv.TagKeyLength, []byte{kdf.SessionKeyLen}),

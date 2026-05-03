@@ -264,3 +264,81 @@ func TestValidateSCP11Chain_LeafIsLastInSlice(t *testing.T) {
 		t.Errorf("expected serial 99, got %v", result.Leaf.SerialNumber)
 	}
 }
+
+// TestValidateSCP11Chain_AcceptsCertWithoutServerAuthEKU confirms that
+// when Policy.ExpectedEKUs is empty the validator does NOT silently
+// require ExtKeyUsageServerAuth.
+//
+// Background: Go's x509.VerifyOptions treats an empty KeyUsages slice
+// as the implicit default []ExtKeyUsage{ExtKeyUsageServerAuth}. SCP11
+// card and OCE certs commonly carry EKU=clientAuth or no EKU at all,
+// so the implicit serverAuth requirement silently rejects valid card
+// chains even though the policy comment says "If empty, EKU is not
+// checked." Fix: explicitly opt into ExtKeyUsageAny when the policy
+// doesn't constrain EKUs.
+func TestValidateSCP11Chain_AcceptsCertWithoutServerAuthEKU(t *testing.T) {
+	// Build a self-signed cert with EKU = clientAuth only.
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "SCP11 Card (clientAuth only)"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, // intentionally NOT serverAuth
+		IsCA:         true,
+		BasicConstraintsValid: true,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &leafKey.PublicKey, leafKey)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	leaf, _ := x509.ParseCertificate(leafDER)
+
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	policy := Policy{
+		Roots: roots,
+		// ExpectedEKUs intentionally left empty: per doc, EKU is not checked.
+	}
+
+	if _, err := ValidateSCP11Chain([]*x509.Certificate{leaf}, policy); err != nil {
+		t.Errorf("validation rejected a clientAuth-only cert despite ExpectedEKUs being empty: %v", err)
+	}
+}
+
+// TestValidateSCP11Chain_RespectsExplicitEKUs confirms the inverse: when
+// ExpectedEKUs IS set, the validator enforces it. This guards against a
+// "make everything Any" overcorrection of the bug above.
+func TestValidateSCP11Chain_RespectsExplicitEKUs(t *testing.T) {
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "SCP11 Card (clientAuth)"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		IsCA:         true,
+		BasicConstraintsValid: true,
+	}
+	leafDER, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &leafKey.PublicKey, leafKey)
+	leaf, _ := x509.ParseCertificate(leafDER)
+
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	policy := Policy{
+		Roots:        roots,
+		ExpectedEKUs: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, // explicit serverAuth
+	}
+
+	_, err := ValidateSCP11Chain([]*x509.Certificate{leaf}, policy)
+	if err == nil {
+		t.Error("validation accepted a clientAuth cert under an explicit serverAuth policy")
+	}
+}
