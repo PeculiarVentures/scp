@@ -177,6 +177,9 @@ func sessionDEK(s scp.Session) []byte {
 // management requires a fully-authenticated channel against the ISD,
 // and the wrapper would otherwise silently downgrade.
 func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*Session, error) {
+	if t == nil {
+		return nil, errors.New("securitydomain: transport is required")
+	}
 	if cfg == nil {
 		return nil, errors.New("securitydomain: scp03 Config is required")
 	}
@@ -231,6 +234,9 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 // "SCP03 session required" against an SCP11-authenticated session —
 // even though the SCP11 session DOES derive a usable DEK.
 func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*Session, error) {
+	if t == nil {
+		return nil, errors.New("securitydomain: transport is required")
+	}
 	if cfg == nil {
 		return nil, errors.New("securitydomain: scp11 Config is required (use scp11.YubiKeyDefaultSCP11bConfig() or scp11.StrictGPSCP11bConfig() as a starting point)")
 	}
@@ -339,6 +345,9 @@ func validateDEK(dek []byte) error {
 
 // OpenUnauthenticated opens a read-only session to the Security Domain.
 func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, error) {
+	if t == nil {
+		return nil, errors.New("securitydomain: transport is required")
+	}
 	cmd := apdu.NewSelect(AIDSecurityDomain)
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {

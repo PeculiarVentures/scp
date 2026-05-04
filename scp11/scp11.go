@@ -384,6 +384,9 @@ type Session struct {
 // It performs the complete handshake: SELECT, GET DATA, key agreement,
 // and session key derivation.
 func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, error) {
+	if t == nil {
+		return nil, errors.New("scp11: transport is required")
+	}
 	if cfg == nil {
 		return nil, errors.New("scp11: Config is required (use YubiKeyDefaultSCP11bConfig() or StrictGPSCP11bConfig() as a starting point)")
 	}
