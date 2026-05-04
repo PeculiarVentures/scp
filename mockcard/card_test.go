@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/PeculiarVentures/scp/apdu"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 )
 
 func TestEndToEnd_SCP11b_Handshake(t *testing.T) {
@@ -31,11 +31,11 @@ func TestEndToEnd_SCP11b_Handshake(t *testing.T) {
 	//   3. INTERNAL AUTHENTICATE (ECDH key agreement)
 	//   4. Session key derivation + receipt verification
 	//   5. SELECT PIV application (encrypted + MACed)
-	cfg := session.DefaultConfig()
+	cfg := scp11.DefaultConfig()
 	cfg.InsecureSkipCardAuthentication = true // mock card self-signed key
-	sess, err := session.Open(ctx, transport, cfg)
+	sess, err := scp11.Open(ctx, transport, cfg)
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 
@@ -52,16 +52,16 @@ func TestEndToEnd_SCP11b_EchoCommand(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:                        session.SCP11b,
-		SelectAID:                      session.AIDSecurityDomain,
+	sess, err := scp11.Open(ctx, card.Transport(), &scp11.Config{
+		Variant:                        scp11.SCP11b,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		ApplicationAID:                 nil, // Don't auto-select an app
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
 		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 
@@ -97,16 +97,16 @@ func TestEndToEnd_SCP11b_MultipleCommands(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:                        session.SCP11b,
-		SelectAID:                      session.AIDSecurityDomain,
+	sess, err := scp11.Open(ctx, card.Transport(), &scp11.Config{
+		Variant:                        scp11.SCP11b,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		ApplicationAID:                 nil,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
 		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 
@@ -141,12 +141,12 @@ func TestEndToEnd_SCP11b_PIVGenerateKey(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	cfg := session.DefaultConfig()
-	cfg.ApplicationAID = session.AIDPIV
+	cfg := scp11.DefaultConfig()
+	cfg.ApplicationAID = scp11.AIDPIV
 	cfg.InsecureSkipCardAuthentication = true
-	sess, err := session.Open(ctx, card.Transport(), cfg)
+	sess, err := scp11.Open(ctx, card.Transport(), cfg)
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 
@@ -182,16 +182,16 @@ func TestEndToEnd_SCP11b_EmptyPayload(t *testing.T) {
 	card.Variant = 0
 
 	ctx := context.Background()
-	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:                        session.SCP11b,
-		SelectAID:                      session.AIDSecurityDomain,
+	sess, err := scp11.Open(ctx, card.Transport(), &scp11.Config{
+		Variant:                        scp11.SCP11b,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		ApplicationAID:                 nil,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
 		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 
@@ -239,9 +239,9 @@ func TestEndToEnd_SCP11b_NoReceipt(t *testing.T) {
 	card.LegacySCP11bNoReceipt = true
 
 	ctx := context.Background()
-	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:                           session.SCP11b,
-		SelectAID:                         session.AIDSecurityDomain,
+	sess, err := scp11.Open(ctx, card.Transport(), &scp11.Config{
+		Variant:                           scp11.SCP11b,
+		SelectAID:                         scp11.AIDSecurityDomain,
 		ApplicationAID:                    nil,
 		KeyID:                             0x13,
 		KeyVersion:                        0x01,
@@ -249,7 +249,7 @@ func TestEndToEnd_SCP11b_NoReceipt(t *testing.T) {
 		InsecureAllowSCP11bWithoutReceipt: true,
 	})
 	if err != nil {
-		t.Fatalf("session.Open (SCP11b, no receipt): %v", err)
+		t.Fatalf("scp11.Open (SCP11b, no receipt): %v", err)
 	}
 	defer sess.Close()
 
@@ -311,19 +311,19 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sess, err := session.Open(ctx, card.Transport(), &session.Config{
-		Variant:                        session.SCP11a,
-		SelectAID:                      session.AIDSecurityDomain,
+	sess, err := scp11.Open(ctx, card.Transport(), &scp11.Config{
+		Variant:                        scp11.SCP11a,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		ApplicationAID:                 nil,
 		KeyID:                          0x11, // SCP11a KID
 		KeyVersion:                     0x01,
 		OCEPrivateKey:                  oceKey,
 		OCECertificates:                []*x509.Certificate{oceCert},
-		OCEKeyReference:                session.KeyRef{KID: 0x10, KVN: 0x03}, // YubiKey default
+		OCEKeyReference:                scp11.KeyRef{KID: 0x10, KVN: 0x03}, // YubiKey default
 		InsecureSkipCardAuthentication: true,
 	})
 	if err != nil {
-		t.Fatalf("session.Open (SCP11a): %v", err)
+		t.Fatalf("scp11.Open (SCP11a): %v", err)
 	}
 	defer sess.Close()
 

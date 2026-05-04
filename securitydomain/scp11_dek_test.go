@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 )
 
 // TestOpenSCP11_PopulatesSessionDEK confirms that an SCP11
@@ -52,11 +52,11 @@ func TestOpenSCP11_PopulatesSessionDEK(t *testing.T) {
 		t.Fatalf("parse cert: %v", err)
 	}
 
-	cfg := session.DefaultSCP11aConfig()
+	cfg := scp11.DefaultSCP11aConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	cfg.OCEPrivateKey = oceKey
 	cfg.OCECertificates = []*x509.Certificate{oceCert}
-	cfg.OCEKeyReference = session.KeyRef{KID: 0x10, KVN: 0x03}
+	cfg.OCEKeyReference = scp11.KeyRef{KID: 0x10, KVN: 0x03}
 
 	sd, err := OpenSCP11(context.Background(), card.Transport(), cfg)
 	if err != nil {

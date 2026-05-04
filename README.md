@@ -80,17 +80,17 @@ sess, err := scp03.Open(ctx, transport, &scp03.Config{
 })
 
 // SCP11b — ECDH key agreement, with X.509 card trust anchors
-sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:         session.SCP11b,
+sess, err := scp11.Open(ctx, transport, &scp11.Config{
+    Variant:         scp11.SCP11b,
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 
 // SCP11a — mutual authentication with OCE certificate
-sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:         session.SCP11a,
+sess, err := scp11.Open(ctx, transport, &scp11.Config{
+    Variant:         scp11.SCP11a,
     OCEPrivateKey:   ocePrivateKey,
     OCECertificates: []*x509.Certificate{oceCert},
-    OCEKeyReference: session.KeyRef{KID: 0x10, KVN: 0x03},
+    OCEKeyReference: scp11.KeyRef{KID: 0x10, KVN: 0x03},
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 
@@ -99,7 +99,7 @@ resp, err := sess.Transmit(ctx, myCommand)
 sess.Close()
 ```
 
-`session.Open` requires explicit trust configuration; see [SCP11 Usage](#scp11-usage) for the required fields and the test/lab escape hatch.
+`scp11.Open` requires explicit trust configuration; see [SCP11 Usage](#scp11-usage) for the required fields and the test/lab escape hatch.
 
 ## Architecture
 
@@ -111,7 +111,7 @@ sess.Close()
 │  .Session        │  X.509 chain validation,          │
 │  Key mgmt, certs │  CustomValidator extension hook   │
 ├──────────────────┴───────────────────────────────────┤
-│  scp03.Open()            session.Open() (SCP11)      │
+│  scp03.Open()            scp11.Open() (SCP11)      │
 ├──────────────────────────────────────────────────────┤
 │  scp.Session (common interface)                       │
 │  ┌────────────────────────────────────────────────┐   │
@@ -134,7 +134,7 @@ sess.Close()
 |---------|-------------|
 | `scp` | Common `Session` interface implemented by both protocols |
 | `scp03` | SCP03 handshake: INITIALIZE UPDATE + EXTERNAL AUTHENTICATE; AES-128/192/256 |
-| `session` | SCP11 handshake: ECDH key agreement (variants a/b/c) |
+| `scp11` | SCP11 handshake: ECDH key agreement (variants a/b/c) |
 | `securitydomain` | First typed Security Domain management profile (YubiKey-verified); structure is designed for additional profiles over time |
 | `trust` | SCP11 certificate-chain validation with configurable policy and `CustomValidator` extension |
 | `channel` | Secure messaging shared by both protocols (encrypt, MAC, verify); ISO 7816-4 CLA / logical-channel helpers |
@@ -264,35 +264,35 @@ sess, err := scp03.Open(ctx, transport, &scp03.Config{
 
 ```go
 // SCP11b — one-way auth (card to host)
-sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:         session.SCP11b,
+sess, err := scp11.Open(ctx, transport, &scp11.Config{
+    Variant:         scp11.SCP11b,
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 
 // SCP11a — mutual authentication with certificates
-sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:         session.SCP11a,
+sess, err := scp11.Open(ctx, transport, &scp11.Config{
+    Variant:         scp11.SCP11a,
     KeyID:           0x11,
     OCEPrivateKey:   myECDSAKey,
     OCECertificates: []*x509.Certificate{myOCECert}, // leaf-last; must correspond to OCEPrivateKey
-    OCEKeyReference: session.KeyRef{KID: 0x10, KVN: 0x03}, // card-side OCE key slot (KID 0x10 is the YubiKey default)
+    OCEKeyReference: scp11.KeyRef{KID: 0x10, KVN: 0x03}, // card-side OCE key slot (KID 0x10 is the YubiKey default)
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 ```
 
 ### Card authentication
 
-`session.Open` fails closed unless one of these is set:
+`scp11.Open` fails closed unless one of these is set:
 
 - `CardTrustPolicy` — preferred; full chain validation through the `trust` package, with P-256 enforcement and optional serial / SKI / EKU constraints. `CustomValidator` is the extension point for GP-proprietary certificate stores.
 - `CardTrustAnchors` — full X.509 chain validation against a `*x509.CertPool`. Intermediates from the card's BF21 certificate store are picked up automatically.
-- `InsecureSkipCardAuthentication` — escape hatch for tests and labs only. Without it, `session.Open` against a card that returns a self-signed or proprietary key is rejected before any ECDH.
+- `InsecureSkipCardAuthentication` — escape hatch for tests and labs only. Without it, `scp11.Open` against a card that returns a self-signed or proprietary key is rejected before any ECDH.
 
 This is intentional: an SCP11b session against an unauthenticated card is not authenticated key agreement — it is opportunistic encryption against whoever answered the SELECT.
 
 ### Applet selection
 
-`session.Open` SELECTs `cfg.SelectAID` before the handshake. The applet at that AID is the one whose SCP key set the handshake authenticates against. On YubiKey, different applets hold different SCP key sets:
+`scp11.Open` SELECTs `cfg.SelectAID` before the handshake. The applet at that AID is the one whose SCP key set the handshake authenticates against. On YubiKey, different applets hold different SCP key sets:
 
 - Default: `AIDSecurityDomain` — Issuer Security Domain (`A0 00 00 01 51 00 00 00`).
 - For applet-specific channels (PIV, OATH): set `cfg.SelectAID` to the applet AID and `cfg.ApplicationAID` (if needed for post-handshake re-SELECT) accordingly.

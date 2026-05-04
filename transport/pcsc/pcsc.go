@@ -34,7 +34,7 @@
 //	// Or pick a specific one:
 //	// t, err := pcsc.OpenReader("Yubico YubiKey OTP+FIDO+CCID 00 00")
 //
-//	sess, err := session.Open(ctx, t, &session.Config{...})
+//	sess, err := scp11.Open(ctx, t, &scp11.Config{...})
 package pcsc
 
 import (

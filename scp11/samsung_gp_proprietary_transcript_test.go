@@ -1,4 +1,4 @@
-package session
+package scp11
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 )
 
 // TestSCP11a_SamsungTranscript_GPProprietary_CustomValidator drives
-// session.Open against Samsung OpenSCP-Java's published SCP11a P-256
+// scp11.Open against Samsung OpenSCP-Java's published SCP11a P-256
 // / AES-128 / S8 transcript where the card's certificate store uses
 // the GlobalPlatform proprietary cert format (7F21 wrapper containing
 // a 7F49 SubjectPublicKey TLV) instead of standard X.509.
@@ -210,7 +210,7 @@ func TestSCP11a_SamsungTranscript_GPProprietary_CustomValidator(t *testing.T) {
 		}, nil
 	}
 
-	// --- Drive session.Open ------------------------------------------
+	// --- Drive scp11.Open ------------------------------------------
 
 	cfg := &Config{
 		Variant:                      SCP11a,
@@ -230,7 +230,7 @@ func TestSCP11a_SamsungTranscript_GPProprietary_CustomValidator(t *testing.T) {
 	}
 	sess, err := Open(context.Background(), sx, cfg)
 	if err != nil {
-		t.Fatalf("session.Open: %v\n\nCAPDUs sent:\n%s",
+		t.Fatalf("scp11.Open: %v\n\nCAPDUs sent:\n%s",
 			err, formatCAPDUs(sx.captured))
 	}
 	defer sess.Close()
@@ -307,7 +307,7 @@ func TestSCP11a_GPProprietary_NonP256Key_Rejected(t *testing.T) {
 
 	_, err := Open(context.Background(), sx, cfg)
 	if err == nil {
-		t.Fatal("session.Open accepted a non-P-256 custom-validated key; the post-validator P-256 invariant was bypassed")
+		t.Fatal("scp11.Open accepted a non-P-256 custom-validated key; the post-validator P-256 invariant was bypassed")
 	}
 	// The error message should reference P-256 rejection, not a
 	// downstream parsing failure that happens to occur first.
@@ -344,7 +344,7 @@ func TestSCP11a_GPProprietary_NilResultRejected(t *testing.T) {
 	})
 
 	if _, err := Open(context.Background(), sx, cfg); err == nil {
-		t.Fatal("session.Open accepted a nil Result from CustomValidator; should fail closed")
+		t.Fatal("scp11.Open accepted a nil Result from CustomValidator; should fail closed")
 	}
 }
 

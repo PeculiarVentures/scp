@@ -1,4 +1,4 @@
-package session
+package scp11
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 )
 
 // TestSCP11c_SamsungTranscript_ByteExact is the SCP11c companion to
-// the SCP11a Samsung byte-exact test. It drives session.Open against
+// the SCP11a Samsung byte-exact test. It drives scp11.Open against
 // Samsung OpenSCP-Java's published SCP11c P-256/AES-128/S8 vectors
 // and asserts that every CAPDU we put on the wire matches Samsung's
 // reference byte-for-byte where it should.
@@ -157,11 +157,11 @@ func TestSCP11c_SamsungTranscript_ByteExact(t *testing.T) {
 		{name: "LIST_PACKAGES", matchCLA: 0x84, matchINS: 0xF2, expectExact: listPackagesExpectedCAPDU, response: listPackagesRAPDU},
 	})
 
-	// --- Drive session.Open ------------------------------------------
+	// --- Drive scp11.Open ------------------------------------------
 
 	cfg := &Config{
 		Variant:                        SCP11c,
-		SelectAID:                      nil, // Samsung transcript starts at GET DATA
+		SelectAID:                      nil,  // Samsung transcript starts at GET DATA
 		KeyID:                          0x15, // SCP11c session KID per Samsung
 		KeyVersion:                     0x03,
 		OCECertificates:                []*x509.Certificate{leaf},
@@ -172,7 +172,7 @@ func TestSCP11c_SamsungTranscript_ByteExact(t *testing.T) {
 	}
 	sess, err := Open(context.Background(), sx, cfg)
 	if err != nil {
-		t.Fatalf("session.Open: %v\n\nCAPDUs sent:\n%s",
+		t.Fatalf("scp11.Open: %v\n\nCAPDUs sent:\n%s",
 			err, formatCAPDUs(sx.captured))
 	}
 	defer sess.Close()

@@ -1,4 +1,4 @@
-package session_test
+package scp11_test
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -18,7 +18,7 @@ import (
 // claim made in docs/remote-apdu-transport.md: a server-side SCP11
 // session can drive a card across a relay that only carries opaque
 // APDU bytes, with no library changes required. The "endpoint" is a
-// goroutine holding a mockcard; the "server" runs session.Open
+// goroutine holding a mockcard; the "server" runs scp11.Open
 // against a transport.Transport that ships request bytes over a
 // channel and reads response bytes back from another channel. The
 // only thing crossing the relay boundary is []byte.
@@ -58,8 +58,8 @@ func TestSCP11_OverInMemoryRelayTransport(t *testing.T) {
 
 	// Channels carry RAW APDU bytes only. This is the *only* surface
 	// area the relay sees — no session, no protocol, no keys.
-	reqCh := make(chan []byte)        // server -> endpoint
-	respCh := make(chan []byte)       // endpoint -> server
+	reqCh := make(chan []byte)  // server -> endpoint
+	respCh := make(chan []byte) // endpoint -> server
 	relayDone := make(chan struct{})
 
 	// Endpoint goroutine: holds the card, reads APDU bytes, calls
@@ -107,11 +107,11 @@ func TestSCP11_OverInMemoryRelayTransport(t *testing.T) {
 	// Open SCP11b end-to-end across the relay. Every APDU of the
 	// handshake (SELECT SD, GET DATA for cert, INTERNAL AUTHENTICATE,
 	// receipt verification...) goes through reqCh / respCh.
-	cfg := session.DefaultSCP11bConfig()
+	cfg := scp11.DefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true // mockcard's cert chain isn't a real PKI
-	sess, err := session.Open(ctx, rt, cfg)
+	sess, err := scp11.Open(ctx, rt, cfg)
 	if err != nil {
-		t.Fatalf("session.Open over relay: %v", err)
+		t.Fatalf("scp11.Open over relay: %v", err)
 	}
 
 	// Drive a few encrypted transmits to prove the secure channel

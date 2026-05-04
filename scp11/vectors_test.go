@@ -1,4 +1,4 @@
-package session
+package scp11
 
 // Test vectors from publicly available SCP11 reference implementations.
 // reference manually calculated these because GlobalPlatform does not
@@ -223,7 +223,7 @@ func TestGetDataAPDUConstruction(t *testing.T) {
 	// it matched the reference, which only proved our TLV builders
 	// worked. Meanwhile session.go was sending CLA=0x80, so the
 	// production code path was NOT what the test verified. Now we
-	// drive session.Open() against a recording transport and read out
+	// drive scp11.Open() against a recording transport and read out
 	// what it actually sent.
 
 	// Recording transport: captures sent APDUs, returns a canned error

@@ -1,4 +1,4 @@
-package session
+package scp11
 
 import (
 	"bytes"
@@ -15,19 +15,20 @@ import (
 )
 
 // TestSCP11a_SamsungTranscript_ByteExact is the headline interop proof
-// for this library: drive session.Open end-to-end against Samsung
+// for this library: drive scp11.Open end-to-end against Samsung
 // OpenSCP-Java's published byte-exact SCP11a P-256/AES-128/S8 vectors
 // and assert that every CAPDU we put on the wire matches Samsung's
 // reference byte-for-byte where it should.
 //
 // Vector source:
-//   github.com/Samsung/OpenSCP-Java
-//   verified at SHA b9876fc36a5b18fb90ce03d0894f39edb08a905b (2026-05-03)
-//   license: Apache-2.0
-//   src/test/java/com/samsung/openscp/testdata/
-//     - SmartCardScp11aP256Aes128S8ModeEmulation.java
-//     - Scp11Nist256TestData.java
-//     - Scp11TestData.java
+//
+//	github.com/Samsung/OpenSCP-Java
+//	verified at SHA b9876fc36a5b18fb90ce03d0894f39edb08a905b (2026-05-03)
+//	license: Apache-2.0
+//	src/test/java/com/samsung/openscp/testdata/
+//	  - SmartCardScp11aP256Aes128S8ModeEmulation.java
+//	  - Scp11Nist256TestData.java
+//	  - Scp11TestData.java
 //
 // Provenance and refresh procedure: see testvectors/README.md.
 //
@@ -147,7 +148,7 @@ func TestSCP11a_SamsungTranscript_ByteExact(t *testing.T) {
 		{name: "LIST_PACKAGES", matchCLA: 0x84, matchINS: 0xF2, expectExact: listPackagesExpectedCAPDU, response: listPackagesRAPDU},
 	})
 
-	// --- Drive session.Open ------------------------------------------
+	// --- Drive scp11.Open ------------------------------------------
 
 	cfg := &Config{
 		Variant:                        SCP11a,
@@ -162,7 +163,7 @@ func TestSCP11a_SamsungTranscript_ByteExact(t *testing.T) {
 	}
 	sess, err := Open(context.Background(), sx, cfg)
 	if err != nil {
-		t.Fatalf("session.Open: %v\n\nCAPDUs sent:\n%s",
+		t.Fatalf("scp11.Open: %v\n\nCAPDUs sent:\n%s",
 			err, formatCAPDUs(sx.captured))
 	}
 	defer sess.Close()

@@ -44,7 +44,7 @@ SCP11 traffic, or fabricate authenticated PUT KEY commands.
 │  • Authorization / policy              │
 │  • Card trust validation               │
 │  • OCE private key + cert chain        │
-│  • session.Open(ctx, T, cfg)           │
+│  • scp11.Open(ctx, T, cfg)           │
 │  • securitydomain.OpenSCP11(...)       │
 │  • Audit / evidence                    │
 │                  │                     │
@@ -100,7 +100,7 @@ the same way it would for a local card — the difference is what
 import (
     "github.com/PeculiarVentures/scp/apdu"
     "github.com/PeculiarVentures/scp/securitydomain"
-    "github.com/PeculiarVentures/scp/session"
+    "github.com/PeculiarVentures/scp/scp11"
     "github.com/PeculiarVentures/scp/transport"
     "github.com/PeculiarVentures/scp/trust"
 )
@@ -132,7 +132,7 @@ func (r *relayTransport) Close() error { return r.stream.Close() }
 func adminAgainstRemoteCard(ctx context.Context, stream apduStream, oceTrustRoots *x509.CertPool) error {
     t := &relayTransport{stream: stream}
 
-    cfg := session.DefaultSCP11bConfig()
+    cfg := scp11.DefaultSCP11bConfig()
     cfg.SelectAID = securitydomain.AIDSecurityDomain
     cfg.CardTrustPolicy = &trust.Policy{Roots: oceTrustRoots}
 
@@ -263,8 +263,8 @@ where the caller is co-located with the card.
 * `transport.Transport` — the integration boundary.
 * `transport/pcsc` — a local PC/SC implementation, useful as a
   reference for what an endpoint-side wrapper looks like.
-* `session.DefaultSCP11bConfig`, `DefaultSCP11aConfig`,
-  `DefaultSCP11cConfig` — starting points for `session.Config` with
+* `scp11.DefaultSCP11bConfig`, `DefaultSCP11aConfig`,
+  `DefaultSCP11cConfig` — starting points for `scp11.Config` with
   the right security level and validation defaults.
 * `securitydomain.OpenSCP11` — Security Domain wrapper that captures
   the SCP11-derived DEK for PUT KEY without exposing it to callers.

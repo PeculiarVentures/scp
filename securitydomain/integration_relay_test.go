@@ -17,8 +17,8 @@ import (
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
-	"github.com/PeculiarVentures/scp/session"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -34,7 +34,7 @@ import (
 //     OCE private key, never sees session keys, never sees the
 //     SCP11-derived DEK.
 //   - securitydomain.OpenSCP11 captures the SCP11-derived DEK from
-//     the underlying *session.Session via the unexported dekProvider
+//     the underlying *scp11.Session via the unexported dekProvider
 //     capability interface (PR #20).
 //   - PutSCP03Key wraps an SCP03 key set under the SCP11-derived DEK
 //     and sends it through the encrypted SCP11 channel — the wire
@@ -109,10 +109,10 @@ func TestSCP11a_SecurityDomain_OverRelay_EndToEnd(t *testing.T) {
 	rt := &integrationRelayTransport{reqCh: reqCh, respCh: respCh}
 
 	// --- Server-side: open SCP11a Security Domain across the relay ---
-	cfg := session.DefaultSCP11aConfig()
+	cfg := scp11.DefaultSCP11aConfig()
 	cfg.OCEPrivateKey = oceKey
 	cfg.OCECertificates = chain
-	cfg.OCEKeyReference = session.KeyRef{KID: 0x10, KVN: 0x03}
+	cfg.OCEKeyReference = scp11.KeyRef{KID: 0x10, KVN: 0x03}
 	cfg.InsecureSkipCardAuthentication = true // mockcard isn't a real PKI
 
 	sd, err := securitydomain.OpenSCP11(ctx, rt, cfg)

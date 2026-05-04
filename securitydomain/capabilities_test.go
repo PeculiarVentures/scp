@@ -6,7 +6,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	scp03 "github.com/PeculiarVentures/scp/scp03"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 )
 
 // Compile-time assertions: both production session types must
@@ -15,8 +15,8 @@ import (
 // production code path silently degrades to the string-match
 // fallback.
 var (
-	_ dekProvider  = (*session.Session)(nil)
-	_ oceAuthState = (*session.Session)(nil)
+	_ dekProvider  = (*scp11.Session)(nil)
+	_ oceAuthState = (*scp11.Session)(nil)
 	_ dekProvider  = (*scp03.Session)(nil)
 	_ oceAuthState = (*scp03.Session)(nil)
 )
@@ -28,7 +28,7 @@ var (
 func TestCapabilityInterfaces_ConcreteSessionsSatisfy(t *testing.T) {
 	// Vacuous body — the var block above is the real assertion.
 	// If this file compiles, the property holds.
-	t.Log("compile-time: *session.Session and *scp03.Session satisfy dekProvider + oceAuthState")
+	t.Log("compile-time: *scp11.Session and *scp03.Session satisfy dekProvider + oceAuthState")
 }
 
 // TestSessionOCEAuthenticated_TypedPath confirms the capability-
@@ -68,9 +68,9 @@ type fakeOCESession struct {
 func (f *fakeOCESession) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	return nil, nil
 }
-func (f *fakeOCESession) Close()                  {}
-func (f *fakeOCESession) Protocol() string        { return f.proto }
-func (f *fakeOCESession) OCEAuthenticated() bool  { return f.auth }
+func (f *fakeOCESession) Close()                 {}
+func (f *fakeOCESession) Protocol() string       { return f.proto }
+func (f *fakeOCESession) OCEAuthenticated() bool { return f.auth }
 
 // fakePlainSession is the opposite — minimum-viable scp.Session
 // without any capability methods, to exercise the fallback path.

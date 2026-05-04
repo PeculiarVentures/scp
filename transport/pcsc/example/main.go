@@ -17,7 +17,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/transport/pcsc"
 )
 
@@ -60,12 +60,12 @@ func main() {
 	// production code MUST configure CardTrustPolicy or
 	// CardTrustAnchors. See "Certificate Trust Validation" in the
 	// main README.
-	cfg := session.DefaultSCP11bConfig()
+	cfg := scp11.DefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
-	sess, err := session.Open(ctx, tr, cfg)
+	sess, err := scp11.Open(ctx, tr, cfg)
 	if err != nil {
-		log.Fatalf("session.Open: %v", err)
+		log.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 

@@ -1,4 +1,4 @@
-package session
+package scp11
 
 import (
 	"context"
