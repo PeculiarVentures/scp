@@ -347,3 +347,107 @@ func (c *captureCRDTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, 
 }
 
 func (c *captureCRDTransport) Close() error { return nil }
+
+// TestRecorder_AnnotatesSELECTWithAIDName verifies that SELECT
+// commands targeting registered AIDs produce trace entries with
+// AIDName populated. Three cases:
+//   - SELECT GP ISD via Transmit (cmd struct path)
+//   - SELECT NIST PIV via TransmitRaw (raw bytes path)
+//   - SELECT for an unregistered AID stays empty
+func TestRecorder_AnnotatesSELECTWithAIDName(t *testing.T) {
+	ctx := context.Background()
+	inner := &okTransport{}
+
+	rec := trace.NewRecorder(inner, trace.RecorderConfig{})
+
+	// 1. Transmit path: SELECT GP ISD A0 00 00 01 51 00 00 00
+	if _, err := rec.Transmit(ctx, &apdu.Command{
+		CLA: 0x00, INS: 0xA4, P1: 0x04, P2: 0x00,
+		Data: []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00},
+		Le:   0,
+	}); err != nil {
+		t.Fatalf("Transmit GP ISD: %v", err)
+	}
+
+	// 2. TransmitRaw path: SELECT NIST PIV
+	pivCmd := []byte{
+		0x00, 0xA4, 0x04, 0x00, 0x0B,
+		0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
+		0x00, // Le
+	}
+	if _, err := rec.TransmitRaw(ctx, pivCmd); err != nil {
+		t.Fatalf("TransmitRaw PIV: %v", err)
+	}
+
+	// 3. SELECT a made-up AID — should NOT get an annotation.
+	if _, err := rec.Transmit(ctx, &apdu.Command{
+		CLA: 0x00, INS: 0xA4, P1: 0x04, P2: 0x00,
+		Data: []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00},
+		Le:   0,
+	}); err != nil {
+		t.Fatalf("Transmit unknown: %v", err)
+	}
+
+	// 4. A non-SELECT command (GET DATA) — also no annotation.
+	if _, err := rec.Transmit(ctx, &apdu.Command{
+		CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0x66, Le: 0,
+	}); err != nil {
+		t.Fatalf("Transmit GET DATA: %v", err)
+	}
+
+	snap := rec.Snapshot()
+	if len(snap.Exchanges) != 4 {
+		t.Fatalf("got %d exchanges, want 4", len(snap.Exchanges))
+	}
+	if got, want := snap.Exchanges[0].AIDName, "GP ISD (Issuer Security Domain)"; got != want {
+		t.Errorf("Exchanges[0].AIDName = %q, want %q", got, want)
+	}
+	if got, want := snap.Exchanges[1].AIDName, "NIST PIV"; got != want {
+		t.Errorf("Exchanges[1].AIDName = %q, want %q", got, want)
+	}
+	if snap.Exchanges[2].AIDName != "" {
+		t.Errorf("Exchanges[2].AIDName = %q, want empty (unknown AID)", snap.Exchanges[2].AIDName)
+	}
+	if snap.Exchanges[3].AIDName != "" {
+		t.Errorf("Exchanges[3].AIDName = %q, want empty (not SELECT)", snap.Exchanges[3].AIDName)
+	}
+}
+
+// TestRecorder_AnnotatesExtendedLengthSELECT covers the extended
+// length encoding path. Real cards rarely SELECT with extended
+// length, but YubiKey NFC SCP usage explicitly requires extended
+// APDU support, so the parser has to handle it.
+func TestRecorder_AnnotatesExtendedLengthSELECT(t *testing.T) {
+	ctx := context.Background()
+	inner := &okTransport{}
+	rec := trace.NewRecorder(inner, trace.RecorderConfig{})
+
+	// Extended-length SELECT: CLA INS P1 P2 00 LcHi LcLo Data LeHi LeLo
+	extCmd := []byte{
+		0x00, 0xA4, 0x04, 0x00,
+		0x00, 0x00, 0x08, // extended Lc = 8
+		0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00,
+		0x00, 0x00, // extended Le
+	}
+	if _, err := rec.TransmitRaw(ctx, extCmd); err != nil {
+		t.Fatalf("TransmitRaw extended SELECT: %v", err)
+	}
+
+	snap := rec.Snapshot()
+	if got, want := snap.Exchanges[0].AIDName, "GP ISD (Issuer Security Domain)"; got != want {
+		t.Errorf("AIDName = %q, want %q (extended-length parser regression)", got, want)
+	}
+}
+
+// okTransport answers every command with 9000 + empty data.
+type okTransport struct{}
+
+func (o *okTransport) Transmit(_ context.Context, _ *apdu.Command) (*apdu.Response, error) {
+	return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+}
+
+func (o *okTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return []byte{0x90, 0x00}, nil
+}
+
+func (o *okTransport) Close() error { return nil }

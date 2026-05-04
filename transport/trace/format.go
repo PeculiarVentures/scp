@@ -79,6 +79,7 @@ type Exchange struct {
 	SW          HexBytes `json:"sw,omitempty"`
 	DurationNS  int64    `json:"duration_ns,omitempty"`
 	Error       string   `json:"error,omitempty"`
+	AIDName     string   `json:"aid_name,omitempty"`
 	Annotation  string   `json:"annotation,omitempty"`
 }
 
