@@ -9,6 +9,21 @@ import (
 	"os"
 )
 
+// extractECDSAPublicKey returns the certificate's public key as an
+// *ecdsa.PublicKey on the P-256 curve, or an error explaining why
+// the cert can't be used for SCP11. Centralized so the SCP11a-read
+// and bootstrap-oce paths surface the same error wording.
+func extractECDSAPublicKey(cert *x509.Certificate) (*ecdsa.PublicKey, error) {
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("OCE cert public key is not ECDSA (got %T)", cert.PublicKey)
+	}
+	if pub.Curve.Params().Name != "P-256" {
+		return nil, fmt.Errorf("OCE cert public key curve is %s, SCP11 requires P-256", pub.Curve.Params().Name)
+	}
+	return pub, nil
+}
+
 // loadOCEPrivateKey reads a PEM file containing an EC private key
 // and returns it as an *ecdsa.PrivateKey. Handles both PKCS#8
 // ("PRIVATE KEY") and SEC1 ("EC PRIVATE KEY") encodings — Yubico

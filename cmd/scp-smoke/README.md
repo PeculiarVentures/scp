@@ -137,6 +137,25 @@ The smoke command asserts the SCP11a-specific invariant `Session.OCEAuthenticate
 
 PEM key formats accepted: PKCS#8 (`PRIVATE KEY`, modern `openssl genpkey` default) and SEC1 (`EC PRIVATE KEY`, what older `openssl ecparam -genkey` produces and what Yubico fixtures use). Curve must be P-256 — the loader rejects other curves explicitly.
 
+### bootstrap-oce — Day-1 OCE provisioning
+
+Installs an OCE public key (and optionally a certificate chain + CA Subject Key Identifier) onto a card via SCP03 with factory keys, so subsequent SCP11a sessions can complete mutual auth. This is the step that has to happen *before* `scp11a-sd-read` works against a fresh card.
+
+```bash
+scp-smoke bootstrap-oce \
+  --reader "YubiKey" \
+  --oce-cert /path/to/oce-chain.pem \
+  --store-chain \
+  --ca-ski 0123456789ABCDEF0123456789ABCDEF01234567 \
+  --confirm-write
+```
+
+Without `--confirm-write` the command runs in **dry-run mode**: it loads and validates the cert chain, types the public key, prints what it would do, and exits without transmitting any APDU that mutates card state. This mirrors the safety pattern in the destructive-ops note above and gives operators a way to sanity-check inputs before flipping the card.
+
+The CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK). A card whose SCP03 keys have already been rotated will get an authentication error from `OpenSCP03` — custom-keys flags (`--kvn`, `--enc`, `--mac`, `--dek`) are follow-up work; the structural mechanism is straightforward (build an `scp03.Config` from the flags rather than calling `FactoryYubiKeyConfig`).
+
+`--store-chain` calls `STORE CERTIFICATES` so the card has the full OCE chain locally, useful when its trust model validates against the chain rather than just the root. `--ca-ski` registers a CA Subject Key Identifier via `STORE CA-IDENTIFIER`. Either or both can be omitted; the OCE public-key install is the only required step.
+
 ### `test` aggregator
 
 Runs `probe` + the SCP smoke checks in sequence and prints a single PASS/FAIL/SKIP summary at the end.

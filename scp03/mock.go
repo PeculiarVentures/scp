@@ -32,6 +32,12 @@ type MockCard struct {
 
 	// Session state (nil until EXTERNAL AUTHENTICATE succeeds).
 	session *mockSession
+
+	// recorded captures the post-decryption shape of every
+	// write-class APDU (PUT KEY, STORE DATA, etc.) that the mock
+	// processed under secure messaging. Read-only commands and
+	// pre-handshake commands are not recorded.
+	recorded []RecordedAPDU
 }
 
 type mockSession struct {
@@ -281,9 +287,42 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 		return &apdu.Response{Data: data, SW1: 0x90, SW2: 0x00}, nil
 	case 0xCA: // GET DATA
 		return c.doGetData(p1, p2)
+	case 0xD8, 0xE2, 0xE4, 0xF1:
+		// PUT KEY (0xD8), STORE DATA (0xE2), DELETE KEY (0xE4),
+		// GENERATE EC KEY (0xF1, Yubico extension) — the OCE-write
+		// commands the bootstrap-oce CLI issues. The mock records
+		// each write so tests can assert the host sent the right
+		// shape; the response is unconditionally 9000 because
+		// validating wire format is the securitydomain package's
+		// job, not the mock's. (The mock does not persist anything
+		// — a follow-up GET DATA against the same key reference
+		// will not return what was just PUT.)
+		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	default:
 		return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
 	}
+}
+
+// RecordedAPDU is the post-decryption shape of a write-class APDU
+// that reached the SCP03 mock through secure messaging. Useful in
+// tests that need to confirm the CLI issued the right sequence
+// (e.g. "did bootstrap-oce send a PUT KEY before STORE DATA?")
+// without depending on wire-byte equality.
+type RecordedAPDU struct {
+	INS  byte
+	P1   byte
+	P2   byte
+	Data []byte
+}
+
+// Recorded returns a snapshot of the writes the mock has observed
+// since New. The returned slice is a copy; mutating it does not
+// affect future recordings.
+func (c *MockCard) Recorded() []RecordedAPDU {
+	out := make([]RecordedAPDU, len(c.recorded))
+	copy(out, c.recorded)
+	return out
 }
 
 // doGetData answers the small set of GET DATA tags the host code in
