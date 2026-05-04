@@ -20,6 +20,32 @@
 // leaf certificate's public key is returned. There is no silent fallback
 // to raw key extraction.
 //
+// # X.509 card-trust validation (implemented capability)
+//
+// ValidateSCP11Chain is the standards-compatible X.509 path. It
+// handles leaf-last and leaf-first chain ordering, picks up
+// intermediates that arrive alongside the leaf in BF21 certificate
+// stores, enforces optional EKU / SKI / serial-allowlist constraints
+// from Policy, and applies the SCP11 P-256 protocol precondition
+// regardless of how the chain looked. This is the path SCP11
+// integrations against cards that present standard X.509 chains
+// take.
+//
+// # Custom validation for GP-proprietary certificate stores (extension point)
+//
+// Policy.CustomValidator is the supported extension point for cards
+// that present SCP11 certificates in GP-proprietary formats rather
+// than standard X.509. When set, the validator owns the trust
+// decision in full: roots, EKU, SKI, and serial-allowlist policy
+// fields are not consulted, and the validator returns the
+// authenticated card public key directly. The protocol-layer P-256
+// and ECDH-convertibility checks still run after the validator
+// returns, because the SCP11 ECDH cannot function without them.
+//
+// Generic GP-proprietary parsers (Samsung OpenSCP, NXP J3R200, etc.)
+// can be contributed as additional implementations of CustomValidator
+// without touching the core trust package.
+//
 // # Usage
 //
 //	result, err := trust.ValidateSCP11Chain(certs, trust.Policy{
