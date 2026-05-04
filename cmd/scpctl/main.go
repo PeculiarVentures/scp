@@ -26,8 +26,8 @@
 //	scpctl readers
 //	scpctl probe
 //	scpctl smoke <subcommand>
-//	scpctl piv <subcommand>      (forthcoming)
-//	scpctl sd  <subcommand>      (forthcoming)
+//	scpctl piv <subcommand>
+//	scpctl sd  <subcommand>
 //	scpctl version
 //	scpctl help
 //
@@ -206,10 +206,11 @@ Groups:
               (originally the 'scp-smoke' binary; preserved verbatim).
 
   piv         User-facing PIV operations over piv/session.
-              ('piv info' is wired; full surface forthcoming.)
+              Wired: info, pin, puk, mgmt, key, cert, object, reset.
 
   sd          Security Domain operations.
-              ('sd info' is wired; full surface forthcoming.)
+              Wired: info. SCP-secured read paths still under
+              'scpctl smoke' until they migrate.
 
 Top-level utilities:
   readers     List PC/SC readers visible to the OS.

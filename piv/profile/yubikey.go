@@ -56,13 +56,34 @@ type yubiKeyProfile struct {
 }
 
 // NewYubiKeyProfile returns a YubiKey profile assuming a current
-// firmware (5.7.2+). Use NewYubiKeyProfileVersion to target older
-// firmware explicitly, or call Probe to detect the firmware from a
-// connected card.
+// firmware (5.7.2+).
 //
-// The default targets 5.7+ because that is the current shipping
-// firmware family and the conservative default for new code; older
-// callers must opt in to a narrower capability set explicitly.
+// # When to use this
+//
+// Only when you have an out-of-band guarantee that the target card
+// is on YubiKey firmware 5.7.2 or later. Otherwise, prefer Probe()
+// against the connected transmitter, which selects the right
+// firmware-narrowed profile from a non-destructive SELECT + GET
+// VERSION pair. Probe is the default path inside session.New when
+// no profile is supplied.
+//
+// # Why the default targets 5.7+
+//
+// 5.7+ is the current shipping firmware family. Choosing a narrower
+// default would silently disable Ed25519, X25519, and SCP11b-at-PIV
+// for callers who genuinely have a current YubiKey. The trade-off
+// is that calling NewYubiKeyProfile() on an older card will let
+// the session attempt operations the card cannot perform, and the
+// card will return 6D00 (or worse, undefined behavior).
+//
+// # If you do not know the firmware
+//
+// Use Probe(). The profile returned by Probe carries the actual
+// detected firmware version and gates capabilities accordingly.
+// NewYubiKeyProfile() should be reserved for callers that have
+// already done the version handling themselves.
+//
+// For an explicit older-firmware target, use NewYubiKeyProfileVersion.
 func NewYubiKeyProfile() Profile {
 	return NewYubiKeyProfileVersion(YubiKeyVersion{Major: 5, Minor: 7, Patch: 2})
 }

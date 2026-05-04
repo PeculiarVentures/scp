@@ -133,7 +133,15 @@ func (s *Session) DeleteCertificate(ctx context.Context, slot piv.Slot) error {
 //
 // Returns (nil, nil) when the object is empty (the card returned a
 // well-formed but value-less 0x53 wrapper, the way DeleteCertificate
-// leaves a slot). Any other malformed response is an error.
+// leaves a slot).
+//
+// Lenient TLV handling: if the response does not parse as TLV or
+// does not contain a 0x53 wrapper, ReadObject returns the raw
+// response bytes rather than an error. Some vendor objects deviate
+// from the SP 800-73-4 envelope and a too-strict reader rejects
+// cards in the field. Diagnostic and recovery callers want the raw
+// bytes; provisioning and compliance callers want strict parsing,
+// which is what ReadObjectStrict provides.
 func (s *Session) ReadObject(ctx context.Context, object piv.ObjectID) ([]byte, error) {
 	if len(object) == 0 {
 		return nil, fmt.Errorf("READ OBJECT: %w: object ID is empty", errInvalidArg)
@@ -168,6 +176,40 @@ func (s *Session) ReadObject(ctx context.Context, object piv.ObjectID) ([]byte, 
 		// emptied (the shape DeleteCertificate leaves behind).
 		// Return (nil, nil) so the caller can distinguish absent
 		// from empty.
+		return nil, nil
+	}
+	return wrapper.Value, nil
+}
+
+// ReadObjectStrict is the strict counterpart to ReadObject. The card
+// response must parse as BER-TLV and must contain a 0x53 wrapper;
+// any deviation is an error rather than a fall-through to raw bytes.
+//
+// Use this for compliance, audit, and provisioning code where a
+// silently-malformed card response is a bug, not a vendor quirk.
+// Diagnostic code that needs to surface unparseable bytes to a
+// human should keep using ReadObject.
+func (s *Session) ReadObjectStrict(ctx context.Context, object piv.ObjectID) ([]byte, error) {
+	if len(object) == 0 {
+		return nil, fmt.Errorf("READ OBJECT (strict): %w: object ID is empty", errInvalidArg)
+	}
+	cmd, err := pivapdu.GetData([]byte(object))
+	if err != nil {
+		return nil, fmt.Errorf("READ OBJECT (strict): build: %w", err)
+	}
+	resp, err := s.transmit(ctx, "READ OBJECT (strict)", cmd)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := tlv.Decode(resp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("READ OBJECT (strict): response is not BER-TLV: %w", err)
+	}
+	wrapper := tlv.Find(nodes, 0x53)
+	if wrapper == nil {
+		return nil, fmt.Errorf("READ OBJECT (strict): response missing 0x53 envelope")
+	}
+	if len(wrapper.Value) == 0 {
 		return nil, nil
 	}
 	return wrapper.Value, nil

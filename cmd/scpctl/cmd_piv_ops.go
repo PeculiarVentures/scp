@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/PeculiarVentures/scp/piv"
+	"github.com/PeculiarVentures/scp/piv/profile"
 	"github.com/PeculiarVentures/scp/piv/session"
 )
 
@@ -82,21 +83,62 @@ func cmdPIVMgmt(ctx context.Context, env *runEnv, args []string) error {
 	return &usageError{msg: fmt.Sprintf("unknown mgmt subcommand %q", args[0])}
 }
 
-// authMgmtFromFlag is the shared management-key parser used by every
-// subcommand that needs management auth. It accepts the literal
-// "default" (the well-known 24-byte factory value) or a hex string.
-// The algorithm string is parsed by piv.ParseManagementKeyAlgorithm.
-func authMgmtFromFlag(keyHex, algoStr string) (piv.ManagementKey, error) {
+// resolveMgmtKey turns the (possibly empty) operator-supplied
+// management-key flags into a piv.ManagementKey, deferring the
+// algorithm choice to the session's active profile when the flag
+// was left at its zero value.
+//
+// The fix here is to never default to AES-192 before knowing what
+// card we're talking to. AES-192 is the YubiKey 5.4.2+ factory
+// default; YubiKey pre-5.4.2 ships 3DES, and Standard PIV cards
+// follow SP 800-78-4 which historically meant 3DES (with AES added
+// in SP 800-78-5 but no spec-mandated default). Defaulting to
+// AES-192 unconditionally would silently fail mutual auth on the
+// other classes of card.
+//
+// Callers must call this with a constructed session so the profile
+// is available. keyHex empty means "use the well-known factory
+// default for the active profile's default algorithm". algoStr
+// empty means "use the active profile's default algorithm". Both
+// empty means "factory key, factory algorithm, whatever the profile
+// says that is".
+func resolveMgmtKey(sess sessionForMgmt, keyHex, algoStr string) (piv.ManagementKey, error) {
+	caps := sess.Profile().Capabilities()
+
+	// Algorithm: empty means "profile default".
+	var algo piv.ManagementKeyAlgorithm
+	if algoStr == "" {
+		algo = caps.DefaultMgmtKeyAlg
+	} else {
+		var err error
+		algo, err = piv.ParseManagementKeyAlgorithm(algoStr)
+		if err != nil {
+			return piv.ManagementKey{}, err
+		}
+	}
+
+	// Key: empty means "factory default for the algorithm".
 	if keyHex == "" {
 		keyHex = "default"
 	}
-	if algoStr == "" {
-		algoStr = "aes192"
+
+	mk, err := piv.ParseManagementKey(keyHex, algo.String())
+	if err != nil {
+		// piv.ParseManagementKey accepts the literal "default" only
+		// when the algorithm is one whose key length matches the
+		// 24-byte well-known value (3DES or AES-192). Surface a
+		// clearer error for AES-128/AES-256 + "default" so the
+		// operator knows to supply the actual key bytes.
+		return piv.ManagementKey{}, fmt.Errorf("management key: %w", err)
 	}
-	if _, err := piv.ParseManagementKeyAlgorithm(algoStr); err != nil {
-		return piv.ManagementKey{}, err
-	}
-	return piv.ParseManagementKey(keyHex, algoStr)
+	return mk, nil
+}
+
+// sessionForMgmt is the minimal session interface resolveMgmtKey
+// needs, so tests can pass a stub without standing up a real
+// session.
+type sessionForMgmt interface {
+	Profile() profile.Profile
 }
 
 // cmdPIVKeyGenerate runs GENERATE KEY against a slot. Requires
@@ -112,7 +154,7 @@ func cmdPIVKeyGenerate(ctx context.Context, env *runEnv, args []string) error {
 	pinPolicyStr := fs.String("pin-policy", "default", "PIN policy (YubiKey extension): default, never, once, always, match.")
 	touchPolicyStr := fs.String("touch-policy", "default", "Touch policy (YubiKey extension): default, never, always, cached.")
 	mgmtKey := fs.String("mgmt-key", "default", `Management key (hex or "default").`)
-	mgmtAlgo := fs.String("mgmt-alg", "aes192", "Management-key algorithm: 3des, aes128, aes192, aes256.")
+	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm (3des/aes128/aes192/aes256). Empty = profile default.")
 	pin := fs.String("pin", "", "Application PIN (required because GENERATE KEY is PIN-gated by some policies).")
 	out := fs.String("out", "", "Path to write the generated public key in PEM (SubjectPublicKeyInfo).")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive write to the slot.")
@@ -139,11 +181,6 @@ func cmdPIVKeyGenerate(ctx context.Context, env *runEnv, args []string) error {
 	if err != nil {
 		return err
 	}
-	mk, err := authMgmtFromFlag(*mgmtKey, *mgmtAlgo)
-	if err != nil {
-		return err
-	}
-
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
 		return err
@@ -158,6 +195,11 @@ func cmdPIVKeyGenerate(ctx context.Context, env *runEnv, args []string) error {
 		return err
 	}
 	defer sess.Close()
+
+	mk, err := resolveMgmtKey(sess, *mgmtKey, *mgmtAlgo)
+	if err != nil {
+		return err
+	}
 
 	if err := sess.AuthenticateManagementKey(ctx, mk); err != nil {
 		report.Fail("mgmt auth", err.Error())
@@ -319,11 +361,11 @@ func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
 	slotStr := fs.String("slot", "9a", "PIV slot.")
 	certPath := fs.String("cert", "", "Path to PEM-encoded certificate to install.")
 	mgmtKey := fs.String("mgmt-key", "default", "Management key (hex or 'default').")
-	mgmtAlgo := fs.String("mgmt-alg", "aes192", "Management-key algorithm.")
-	requireBinding := fs.Bool("require-pubkey-binding", false,
-		"Refuse if the cert's public key does not match the slot's most recently generated key (host-side check).")
+	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm. Empty = profile default.")
 	expectedPubKey := fs.String("expected-pubkey", "",
-		"Optional path to the expected public key (PEM) for binding check; if absent and require-pubkey-binding is set, the slot must have a recent in-session generate.")
+		"Path to the expected public key (PEM) for the slot. Required when --no-pubkey-binding is not set, because this CLI does not generate-then-install in one invocation.")
+	noPubKeyBinding := fs.Bool("no-pubkey-binding", false,
+		"Skip the cert-to-public-key binding check. Off by default; the binding check is part of the safe-by-default provisioning posture and skipping it lets a malformed cert install over a slot whose private key it does not match. Use only when you have an out-of-band guarantee.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive write to the slot.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
@@ -335,11 +377,10 @@ func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
 	if *certPath == "" {
 		return &usageError{msg: "--cert is required"}
 	}
-	slot, err := piv.ParseSlot(*slotStr)
-	if err != nil {
-		return err
+	if !*noPubKeyBinding && *expectedPubKey == "" {
+		return &usageError{msg: "binding check is on by default. Supply --expected-pubkey <path> with the public key for this slot, or pass --no-pubkey-binding to skip the check (not recommended for production)."}
 	}
-	mk, err := authMgmtFromFlag(*mgmtKey, *mgmtAlgo)
+	slot, err := piv.ParseSlot(*slotStr)
 	if err != nil {
 		return err
 	}
@@ -370,6 +411,11 @@ func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
+	mk, err := resolveMgmtKey(sess, *mgmtKey, *mgmtAlgo)
+	if err != nil {
+		return err
+	}
+
 	if err := sess.AuthenticateManagementKey(ctx, mk); err != nil {
 		report.Fail("mgmt auth", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -378,14 +424,18 @@ func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("mgmt auth", "authenticated")
 
 	if err := sess.PutCertificate(ctx, slot, cert, session.PutCertificateOptions{
-		RequirePubKeyBinding: *requireBinding,
+		RequirePubKeyBinding: !*noPubKeyBinding,
 		ExpectedPublicKey:    expected,
 	}); err != nil {
 		report.Fail("put cert", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
 	}
-	report.Pass("put cert", fmt.Sprintf("slot=%s subject=%s", slot, cert.Subject))
+	if *noPubKeyBinding {
+		report.Pass("put cert", fmt.Sprintf("slot=%s subject=%s (binding check skipped)", slot, cert.Subject))
+	} else {
+		report.Pass("put cert", fmt.Sprintf("slot=%s subject=%s (binding verified)", slot, cert.Subject))
+	}
 	return report.Emit(env.out, *jsonMode)
 }
 
@@ -394,7 +444,7 @@ func cmdPIVCertDelete(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	slotStr := fs.String("slot", "", "PIV slot to clear.")
 	mgmtKey := fs.String("mgmt-key", "default", "Management key (hex or 'default').")
-	mgmtAlgo := fs.String("mgmt-alg", "aes192", "Management-key algorithm.")
+	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm. Empty = profile default.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive operation.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
@@ -410,11 +460,6 @@ func cmdPIVCertDelete(ctx context.Context, env *runEnv, args []string) error {
 	if err != nil {
 		return err
 	}
-	mk, err := authMgmtFromFlag(*mgmtKey, *mgmtAlgo)
-	if err != nil {
-		return err
-	}
-
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
 		return err
@@ -429,6 +474,11 @@ func cmdPIVCertDelete(ctx context.Context, env *runEnv, args []string) error {
 		return err
 	}
 	defer sess.Close()
+
+	mk, err := resolveMgmtKey(sess, *mgmtKey, *mgmtAlgo)
+	if err != nil {
+		return err
+	}
 
 	if err := sess.AuthenticateManagementKey(ctx, mk); err != nil {
 		report.Fail("mgmt auth", err.Error())
@@ -451,6 +501,8 @@ func cmdPIVObjectGet(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	idHex := fs.String("id", "", "Object ID in hex (e.g. 5fc105 for slot 9a cert).")
 	out := fs.String("out", "", "Path to write the raw object bytes.")
+	strict := fs.Bool("strict", false,
+		"Require the card response to be well-formed BER-TLV with a 0x53 envelope. Off by default for vendor-quirk tolerance; on for compliance, audit, and provisioning paths where a malformed response should fail loudly.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -478,13 +530,22 @@ func cmdPIVObjectGet(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
-	data, err := sess.ReadObject(ctx, id)
+	var data []byte
+	if *strict {
+		data, err = sess.ReadObjectStrict(ctx, id)
+	} else {
+		data, err = sess.ReadObject(ctx, id)
+	}
 	if err != nil {
 		report.Fail("read object", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
 	}
-	report.Pass("read object", fmt.Sprintf("id=%s len=%d", id, len(data)))
+	mode := "lenient"
+	if *strict {
+		mode = "strict"
+	}
+	report.Pass("read object", fmt.Sprintf("id=%s len=%d (%s)", id, len(data), mode))
 
 	if *out != "" {
 		if err := os.WriteFile(*out, data, 0o644); err != nil {
@@ -499,14 +560,33 @@ func cmdPIVObjectGet(ctx context.Context, env *runEnv, args []string) error {
 	return report.Emit(env.out, *jsonMode)
 }
 
+// cmdPIVObjectPut writes a raw PIV data object by ID. This is the
+// generic escape hatch; common objects have dedicated commands that
+// build the right envelope for their semantics:
+//
+//   - Slot certificates: use 'scpctl piv cert put' (builds the
+//     0x70/0x71/0xFE certificate envelope correctly and supports
+//     binding checks).
+//
+//   - YubiKey-vendor objects (CHUID, CCC, etc.) currently have no
+//     dedicated command; this is the way to write them, and the
+//     caller is responsible for the inner payload shape. The
+//     session wraps the supplied bytes in the 0x53 envelope, so
+//     the file passed via --in is the raw payload, not a
+//     pre-wrapped object.
+//
+// Mistakes here can produce a card whose CHUID, CCC, or security
+// object is structurally invalid, which then cascades into PIV
+// authentication failures elsewhere. Use with care, and prefer the
+// dedicated commands for slot certificates.
 func cmdPIVObjectPut(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv object put", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
-	idHex := fs.String("id", "", "Object ID in hex.")
-	in := fs.String("in", "", "Path to file containing the object bytes (raw, not 0x53-wrapped; the session wraps).")
+	idHex := fs.String("id", "", "Object ID in hex (e.g. 5fc102 for CHUID).")
+	in := fs.String("in", "", "Path to file containing the raw object bytes (the session wraps in 0x53 for the SP 800-73-4 envelope).")
 	mgmtKey := fs.String("mgmt-key", "default", "Management key (hex or 'default').")
-	mgmtAlgo := fs.String("mgmt-alg", "aes192", "Management-key algorithm.")
-	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive write.")
+	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm. Empty = profile default.")
+	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive write. Note: this command writes raw PIV data objects. For slot certificates use 'scpctl piv cert put' instead, which builds the correct certificate envelope and supports binding checks.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -525,11 +605,6 @@ func cmdPIVObjectPut(ctx context.Context, env *runEnv, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read input: %w", err)
 	}
-	mk, err := authMgmtFromFlag(*mgmtKey, *mgmtAlgo)
-	if err != nil {
-		return err
-	}
-
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
 		return err
@@ -544,6 +619,11 @@ func cmdPIVObjectPut(ctx context.Context, env *runEnv, args []string) error {
 		return err
 	}
 	defer sess.Close()
+
+	mk, err := resolveMgmtKey(sess, *mgmtKey, *mgmtAlgo)
+	if err != nil {
+		return err
+	}
 
 	if err := sess.AuthenticateManagementKey(ctx, mk); err != nil {
 		report.Fail("mgmt auth", err.Error())
@@ -565,16 +645,11 @@ func cmdPIVMgmtAuth(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv mgmt auth", env)
 	reader := fs.String("reader", "", "PC/SC reader name.")
 	mgmtKey := fs.String("mgmt-key", "default", "Management key (hex or 'default').")
-	mgmtAlgo := fs.String("mgmt-alg", "aes192", "Management-key algorithm.")
+	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm. Empty = profile default.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
-	mk, err := authMgmtFromFlag(*mgmtKey, *mgmtAlgo)
-	if err != nil {
-		return err
-	}
-
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
 		return err
@@ -590,6 +665,11 @@ func cmdPIVMgmtAuth(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
+	mk, err := resolveMgmtKey(sess, *mgmtKey, *mgmtAlgo)
+	if err != nil {
+		return err
+	}
+
 	if err := sess.AuthenticateManagementKey(ctx, mk); err != nil {
 		report.Fail("mgmt auth", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -603,9 +683,9 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 	fs := newSubcommandFlagSet("piv mgmt change-key", env)
 	reader := fs.String("reader", "", "PC/SC reader name.")
 	oldKey := fs.String("old-mgmt-key", "default", "Current management key (hex or 'default').")
-	oldAlgo := fs.String("old-mgmt-alg", "aes192", "Current management-key algorithm.")
+	oldAlgo := fs.String("old-mgmt-alg", "", "Current management-key algorithm. Empty = profile default.")
 	newKey := fs.String("new-mgmt-key", "", "New management key (hex). Required.")
-	newAlgo := fs.String("new-mgmt-alg", "aes192", "New management-key algorithm.")
+	newAlgo := fs.String("new-mgmt-alg", "", "New management-key algorithm. Empty = profile default.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive operation.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
@@ -616,14 +696,6 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 	}
 	if *newKey == "" {
 		return &usageError{msg: "--new-mgmt-key is required"}
-	}
-	oldMK, err := authMgmtFromFlag(*oldKey, *oldAlgo)
-	if err != nil {
-		return fmt.Errorf("old key: %w", err)
-	}
-	newMK, err := authMgmtFromFlag(*newKey, *newAlgo)
-	if err != nil {
-		return fmt.Errorf("new key: %w", err)
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -640,6 +712,18 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 		return err
 	}
 	defer sess.Close()
+
+	// Resolve both keys against the active profile so empty
+	// --old-mgmt-alg / --new-mgmt-alg pick the right default for
+	// the card class we actually probed.
+	oldMK, err := resolveMgmtKey(sess, *oldKey, *oldAlgo)
+	if err != nil {
+		return fmt.Errorf("old key: %w", err)
+	}
+	newMK, err := resolveMgmtKey(sess, *newKey, *newAlgo)
+	if err != nil {
+		return fmt.Errorf("new key: %w", err)
+	}
 
 	if err := sess.AuthenticateManagementKey(ctx, oldMK); err != nil {
 		report.Fail("mgmt auth", err.Error())
