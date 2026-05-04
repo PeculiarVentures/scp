@@ -256,3 +256,94 @@ func mustJSON(t *testing.T, f *trace.File) []byte {
 	}
 	return b
 }
+
+// TestRecorder_CaptureCRD confirms CaptureCRD probes the inner
+// transport, parses the response, and stores the result in the trace
+// header — without showing up as a recorded exchange. The probe is
+// metadata, not something the test code did, so it doesn't belong
+// in the exchanges list.
+func TestRecorder_CaptureCRD(t *testing.T) {
+	ctx := context.Background()
+
+	// Synthetic CRD: GP 2.3.1, SCP03 i=0x65. Hand-assembled per
+	// GP §H.2: outer 66 LL, inner 73 LL list.
+	//
+	// Children of the 0x73 list:
+	//   06 07 ..  GP RID marker  (9 bytes)
+	//   60 0C ..  GP 2.3.1       (14 bytes)
+	//   64 0B ..  SCP03 i=0x65   (13 bytes)
+	// Total: 36 bytes -> list header 73 24, outer 66 26.
+	crd := []byte{
+		0x66, 0x26,
+		0x73, 0x24,
+		0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x01,
+		0x60, 0x0C, 0x06, 0x0A, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x02, 0x02, 0x03, 0x01,
+		0x64, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x03, 0x65,
+	}
+
+	inner := &captureCRDTransport{crdResponse: crd}
+	rec := trace.NewRecorder(inner, trace.RecorderConfig{Profile: "test"})
+
+	// One normal exchange first, so we can verify it remains at
+	// index 0 and the CRD probe didn't push it down.
+	if _, err := rec.Transmit(ctx, &apdu.Command{
+		CLA: 0x00, INS: 0xA4, P1: 0x04, P2: 0x00, Le: -1,
+	}); err != nil {
+		t.Fatalf("Transmit pre-CRD: %v", err)
+	}
+
+	if err := rec.CaptureCRD(ctx); err != nil {
+		t.Fatalf("CaptureCRD: %v", err)
+	}
+
+	snap := rec.Snapshot()
+
+	if snap.CardInfo == nil {
+		t.Fatal("CardInfo is nil; CaptureCRD did not store")
+	}
+	if snap.CardInfo.SCPVersion != 0x03 {
+		t.Errorf("CardInfo.SCPVersion = 0x%02X, want 0x03", snap.CardInfo.SCPVersion)
+	}
+	if snap.CardInfo.SCPParameter != 0x65 {
+		t.Errorf("CardInfo.SCPParameter = 0x%02X, want 0x65", snap.CardInfo.SCPParameter)
+	}
+
+	// Probe must NOT have polluted the exchanges list.
+	if len(snap.Exchanges) != 1 {
+		t.Errorf("Exchanges = %d, want 1 (CaptureCRD must not record)", len(snap.Exchanges))
+	}
+	if len(snap.Exchanges) > 0 && snap.Exchanges[0].INS[0] != 0xA4 {
+		t.Errorf("first exchange INS = 0x%02X, want 0xA4 (SELECT)", snap.Exchanges[0].INS[0])
+	}
+
+	// Verify the JSON round-trip carries CardInfo.
+	var buf bytes.Buffer
+	if err := rec.Flush(&buf); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte(`"card_info"`)) {
+		t.Error("flushed JSON does not contain card_info field")
+	}
+	if _, err := trace.NewReplayerFromBytes(buf.Bytes()); err != nil {
+		t.Errorf("flushed JSON does not parse back: %v", err)
+	}
+}
+
+// captureCRDTransport returns the configured CRD bytes when it sees
+// GET DATA tag 0x66, and a benign 9000 for everything else.
+type captureCRDTransport struct {
+	crdResponse []byte
+}
+
+func (c *captureCRDTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	if cmd.INS == 0xCA && cmd.P1 == 0x00 && cmd.P2 == 0x66 {
+		return &apdu.Response{Data: c.crdResponse, SW1: 0x90, SW2: 0x00}, nil
+	}
+	return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+}
+
+func (c *captureCRDTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return []byte{0x90, 0x00}, nil
+}
+
+func (c *captureCRDTransport) Close() error { return nil }
