@@ -130,6 +130,42 @@ The binding check happens host-side, before any APDU is transmitted. A mismatch 
 
 This is not paranoia. A wrong-cert provisioning that succeeds is a cert that has to be re-issued, with all of the trust-bootstrap cost that implies.
 
+## Channel mode: raw vs SCP11b-on-PIV
+
+Destructive `scpctl piv` commands accept an optional `--scp11b` flag plus the shared trust flags `--trust-roots <pem>` and `--lab-skip-scp11-trust`. The default is raw APDUs; the SCP11b path is opt-in.
+
+The reason for this default is that the threat model splits cleanly along the host-trust boundary:
+
+**Raw is correct when the host between the operator and the card is in the operator's trust boundary.** The dominant case is local USB administration: an operator at a workstation plugging a YubiKey directly into a USB port and running `scpctl piv ...` against it. The PC/SC stack, the kernel, the running shell, and the binary itself are all already in scope. SCP11b in this configuration adds no security: the same host that would attack the raw APDUs would attack the SCP11b key derivation.
+
+**SCP11b is correct when the host between the operator and the card is not in the operator's trust boundary.** This includes:
+
+- APDU relay through an untrusted network or browser. The card is at one end, the operator at the other, and the relay sees every APDU.
+- Remote provisioning where the agent running scpctl is on a remote machine the operator does not fully trust.
+- Multi-tenant CI environments where the runner sees the management key in the clear if the channel is raw.
+- Any path where the card's PIV operations transit a host the operator would not personally administer the YubiKey from.
+
+In those configurations, SCP11b establishes an authenticated key agreement against the card's certificate (with `--trust-roots` providing the issuer chain), and every PIV APDU is then encrypted and integrity-protected end to end through the relay or remote host.
+
+The two configurations require different trust flags:
+
+```
+# Raw (default): local USB, no extra flags.
+scpctl piv key generate --slot 9a --confirm-write ...
+
+# SCP11b with production trust:
+scpctl piv key generate --slot 9a --confirm-write \
+  --scp11b --trust-roots ./oce-issuer-roots.pem ...
+
+# SCP11b for wire-protocol smoke (NOT production):
+scpctl piv key generate --slot 9a --confirm-write \
+  --scp11b --lab-skip-scp11-trust ...
+```
+
+`--lab-skip-scp11-trust` produces an opportunistically-encrypted channel without authenticated key agreement: the card's cert is not validated, so a relay running a swap-the-card MITM is undetectable. Use it only to exercise the wire protocol.
+
+The PIN, PUK, and management-key change paths in `scpctl piv pin`, `scpctl piv puk`, and `scpctl piv mgmt` accept the same flags. They are technically not "destructive" in the `--confirm-write` sense (they manipulate counters that the card itself enforces), but the secret material they carry is exactly what an untrusted host would target. Pass `--scp11b --trust-roots ...` whenever the host between you and the card is not in your trust boundary.
+
 ## Adding a new card profile
 
 When a non-YubiKey card has been validated end to end:

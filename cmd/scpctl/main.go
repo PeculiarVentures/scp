@@ -356,6 +356,21 @@ the active profile does not claim (e.g. ATTEST under StandardPIV,
 Ed25519 under YubiKey 5.6) are refused host-side before any APDU
 goes on the wire, with piv.ErrUnsupportedByProfile.
 
+Channel mode (destructive and credential-bearing subcommands):
+  --scp11b                  Run the operation over an SCP11b-on-PIV
+                            secure channel. Off by default; raw is
+                            correct for local USB administration.
+                            Turn on for any host path not in the
+                            operator's trust boundary (APDU relay,
+                            remote provisioning, multi-tenant CI).
+  --trust-roots <pem>       SCP11 card-cert trust anchors.
+                            Required with --scp11b for production.
+  --lab-skip-scp11-trust    Skip card-cert validation entirely.
+                            Lab use only; opportunistic encryption,
+                            not authenticated key agreement.
+
+See docs/piv.md for the threat-model split between raw and SCP11b.
+
 Use "scpctl piv <subcommand> -h" for per-command flags.
 `)
 }

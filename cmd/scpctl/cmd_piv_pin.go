@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/piv"
-	"github.com/PeculiarVentures/scp/piv/session"
 )
 
 // cmdPIVPin dispatches `scpctl piv pin <verb>` where <verb> is one
@@ -57,6 +56,7 @@ func cmdPIVPinVerify(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv pin verify", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	pin := fs.String("pin", "", "Application PIN to verify.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -72,11 +72,14 @@ func cmdPIVPinVerify(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv pin verify", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -105,6 +108,7 @@ func cmdPIVPinChange(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	oldPIN := fs.String("old-pin", "", "Current application PIN.")
 	newPIN := fs.String("new-pin", "", "New application PIN.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -120,11 +124,14 @@ func cmdPIVPinChange(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv pin change", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -148,6 +155,7 @@ func cmdPIVPinUnblock(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	puk := fs.String("puk", "", "PUK (PIN unblocking key).")
 	newPIN := fs.String("new-pin", "", "New application PIN to set after unblock.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -163,11 +171,14 @@ func cmdPIVPinUnblock(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv pin unblock", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -191,6 +202,7 @@ func cmdPIVPukChange(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	oldPUK := fs.String("old-puk", "", "Current PUK.")
 	newPUK := fs.String("new-puk", "", "New PUK.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -206,11 +218,14 @@ func cmdPIVPukChange(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv puk change", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 

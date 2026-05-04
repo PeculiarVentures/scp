@@ -5,12 +5,14 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"os"
 
 	"github.com/PeculiarVentures/scp/piv"
 	"github.com/PeculiarVentures/scp/piv/profile"
 	"github.com/PeculiarVentures/scp/piv/session"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // cmdPIVKey dispatches `scpctl piv key <verb>`.
@@ -141,6 +143,86 @@ type sessionForMgmt interface {
 	Profile() profile.Profile
 }
 
+// scp11bChannelFlags is the cluster of flags every destructive
+// scpctl piv command exposes for the optional SCP11b channel mode.
+// Default is raw, which is the right default for local USB
+// administration (the dominant use case for these flows). The
+// SCP11b mode is the right choice for any deployment where the
+// host between the operator and the card is not in the operator's
+// trust boundary: APDU relays, browser-mediated sessions, or
+// remote provisioning. See docs/piv.md for the threat-model split.
+type scp11bChannelFlags struct {
+	scp11b *bool
+	trust  *trustFlags
+}
+
+// registerSCP11bChannelFlags adds --scp11b plus the shared trust
+// flags (--trust-roots, --lab-skip-scp11-trust) to fs. Returns a
+// handle that openPIVSession reads.
+func registerSCP11bChannelFlags(fs *flag.FlagSet) *scp11bChannelFlags {
+	return &scp11bChannelFlags{
+		scp11b: fs.Bool("scp11b", false,
+			"Run this destructive operation over an SCP11b-on-PIV secure channel "+
+				"instead of raw APDUs. Off by default because local USB administration "+
+				"does not need the channel; turn on for any host path that is not in "+
+				"the operator's trust boundary (APDU relay, remote provisioning, "+
+				"browser-mediated sessions). See docs/piv.md."),
+		trust: registerTrustFlags(fs),
+	}
+}
+
+// openPIVSession is the session-construction path every destructive
+// scpctl piv handler uses. With --scp11b absent, it just calls
+// session.New over the raw transport (the previous behavior). With
+// --scp11b present, it uses session.OpenSCP11bPIV with the trust
+// posture chosen by --trust-roots / --lab-skip-scp11-trust.
+//
+// When --scp11b is present without a trust posture, the report
+// gets a SKIP entry (consistent with applyTrust for the smoke
+// commands) and the function returns (nil, false, nil); the caller
+// emits the report and returns without a transmit attempt.
+//
+// Returns (sess, true, nil) on success; the caller is responsible
+// for sess.Close(). The bool is "proceed"; false plus nil err
+// means a clean SKIP path.
+func openPIVSession(
+	ctx context.Context,
+	t transportLike,
+	flags *scp11bChannelFlags,
+	report *Report,
+) (*session.Session, bool, error) {
+	if !*flags.scp11b {
+		report.Pass("channel mode", "raw (no SCP11b; suitable for local USB)")
+		sess, err := session.New(ctx, t, session.Options{})
+		if err != nil {
+			return nil, false, err
+		}
+		return sess, true, nil
+	}
+
+	policy, insecureSkip, proceed, err := flags.trust.applyToPIVTrust(report)
+	if err != nil {
+		return nil, false, err
+	}
+	if !proceed {
+		return nil, false, nil
+	}
+	sess, err := session.OpenSCP11bPIV(ctx, t, session.SCP11bPIVOptions{
+		CardTrustPolicy:                policy,
+		InsecureSkipCardAuthentication: insecureSkip,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("scp11b open: %w", err)
+	}
+	report.Pass("channel mode", "scp11b-on-piv")
+	return sess, true, nil
+}
+
+// transportLike is the minimal Transport interface session.New and
+// session.OpenSCP11bPIV both accept. Defined locally so the helper
+// signature does not pull a transport import into every caller.
+type transportLike = transport.Transport
+
 // cmdPIVKeyGenerate runs GENERATE KEY against a slot. Requires
 // --confirm-write because generating a key destroys whatever was in
 // the slot. The session caches the public key so a subsequent
@@ -158,6 +240,7 @@ func cmdPIVKeyGenerate(ctx context.Context, env *runEnv, args []string) error {
 	pin := fs.String("pin", "", "Application PIN (required because GENERATE KEY is PIN-gated by some policies).")
 	out := fs.String("out", "", "Path to write the generated public key in PEM (SubjectPublicKeyInfo).")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive write to the slot.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -188,11 +271,14 @@ func cmdPIVKeyGenerate(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv key generate", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -367,6 +453,7 @@ func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
 	noPubKeyBinding := fs.Bool("no-pubkey-binding", false,
 		"Skip the cert-to-public-key binding check. Off by default; the binding check is part of the safe-by-default provisioning posture and skipping it lets a malformed cert install over a slot whose private key it does not match. Use only when you have an out-of-band guarantee.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive write to the slot.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -403,11 +490,14 @@ func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv cert put", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -446,6 +536,7 @@ func cmdPIVCertDelete(ctx context.Context, env *runEnv, args []string) error {
 	mgmtKey := fs.String("mgmt-key", "default", "Management key (hex or 'default').")
 	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm. Empty = profile default.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive operation.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -467,11 +558,14 @@ func cmdPIVCertDelete(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv cert delete", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -587,6 +681,7 @@ func cmdPIVObjectPut(ctx context.Context, env *runEnv, args []string) error {
 	mgmtKey := fs.String("mgmt-key", "default", "Management key (hex or 'default').")
 	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm. Empty = profile default.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive write. Note: this command writes raw PIV data objects. For slot certificates use 'scpctl piv cert put' instead, which builds the correct certificate envelope and supports binding checks.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -612,11 +707,14 @@ func cmdPIVObjectPut(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv object put", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -646,6 +744,7 @@ func cmdPIVMgmtAuth(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name.")
 	mgmtKey := fs.String("mgmt-key", "default", "Management key (hex or 'default').")
 	mgmtAlgo := fs.String("mgmt-alg", "", "Management-key algorithm. Empty = profile default.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -657,11 +756,14 @@ func cmdPIVMgmtAuth(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv mgmt auth", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -687,6 +789,7 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 	newKey := fs.String("new-mgmt-key", "", "New management key (hex). Required.")
 	newAlgo := fs.String("new-mgmt-alg", "", "New management-key algorithm. Empty = profile default.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive operation.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -705,11 +808,14 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv mgmt change-key", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 
@@ -751,6 +857,7 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv reset", env)
 	reader := fs.String("reader", "", "PC/SC reader name.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive operation.")
+	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -766,11 +873,14 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report := &Report{Subcommand: "piv reset", Reader: *reader}
-	sess, err := session.New(ctx, t, session.Options{})
+	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
+	}
+	if !proceed {
+		return report.Emit(env.out, *jsonMode)
 	}
 	defer sess.Close()
 

@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/trust"
 )
 
 // trustFlags is the flag set every SCP11 command shares for
@@ -89,6 +90,42 @@ func (tf *trustFlags) applyTrust(cfg *scp11.Config, report *Report) (proceed boo
 		"no trust roots configured; pass --trust-roots <pem> for production "+
 			"or --lab-skip-scp11-trust for wire-protocol smoke")
 	return false, nil
+}
+
+// applyToPIVTrust is the trust-flag projection for piv/session's
+// SCP11b helper, which takes a trust.Policy plus an explicit
+// InsecureSkipCardAuthentication bool rather than an scp11.Config.
+//
+// Returns:
+//   - (policy, false, true, nil) for --trust-roots: production path.
+//   - (nil, true, true, nil) for --lab-skip-scp11-trust: lab.
+//   - (nil, false, false, nil) for neither: caller should refuse to
+//     proceed with a SKIP, the same shape applyTrust uses.
+//   - (nil, false, false, err) for usage errors (both flags set, or
+//     --trust-roots load failure).
+//
+// The report receives the same "trust mode" line applyTrust writes,
+// so JSON output is consistent across raw and SCP11b paths.
+func (tf *trustFlags) applyToPIVTrust(report *Report) (policy *trust.Policy, insecureSkip bool, proceed bool, err error) {
+	if *tf.labSkip && *tf.rootsPath != "" {
+		return nil, false, false, &usageError{msg: "--trust-roots and --lab-skip-scp11-trust are mutually exclusive"}
+	}
+	if *tf.labSkip {
+		report.Pass("trust mode", "lab-skip (card cert NOT validated)")
+		return nil, true, true, nil
+	}
+	if *tf.rootsPath != "" {
+		pool, n, lerr := loadTrustRoots(*tf.rootsPath)
+		if lerr != nil {
+			return nil, false, false, &usageError{msg: fmt.Sprintf("--trust-roots: %v", lerr)}
+		}
+		report.Pass("trust mode", fmt.Sprintf("validating against %d root(s) from %s", n, *tf.rootsPath))
+		return &trust.Policy{Roots: pool}, false, true, nil
+	}
+	report.Skip("trust mode",
+		"no trust roots configured; pass --trust-roots <pem> for production "+
+			"or --lab-skip-scp11-trust for wire-protocol smoke")
+	return nil, false, false, nil
 }
 
 // loadTrustRoots reads a PEM file and returns an x509.CertPool
