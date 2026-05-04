@@ -96,13 +96,13 @@ func (tf *trustFlags) applyTrust(cfg *scp11.Config, report *Report) (proceed boo
 		return true, nil
 	}
 	if *tf.yubicoRoots {
-		pool, lerr := yubico.Roots()
+		pool, lerr := yubico.Pool()
 		if lerr != nil {
 			return false, &usageError{msg: fmt.Sprintf("--yubico-roots: %v", lerr)}
 		}
 		cfg.CardTrustAnchors = pool
 		cfg.InsecureSkipCardAuthentication = false
-		report.Pass("trust mode", "validating against embedded Yubico root bundle")
+		report.Pass("trust mode", "validating against embedded Yubico bundle (roots + intermediates)")
 		return true, nil
 	}
 	if *tf.rootsPath != "" {
@@ -185,11 +185,11 @@ func (tf *trustFlags) applyToPIVTrust(report *Report) (policy *trust.Policy, ins
 		return nil, true, true, nil
 	}
 	if *tf.yubicoRoots {
-		pool, lerr := yubico.Roots()
+		pool, lerr := yubico.Pool()
 		if lerr != nil {
 			return nil, false, false, &usageError{msg: fmt.Sprintf("--yubico-roots: %v", lerr)}
 		}
-		report.Pass("trust mode", "validating against embedded Yubico root bundle")
+		report.Pass("trust mode", "validating against embedded Yubico bundle (roots + intermediates)")
 		return &trust.Policy{Roots: pool}, false, true, nil
 	}
 	if *tf.rootsPath != "" {
