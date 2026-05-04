@@ -14,6 +14,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/piv"
+	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
 	"github.com/PeculiarVentures/scp/piv/profile"
 )
 
@@ -264,7 +265,7 @@ func TestSession_GenerateKey_GenerateThenInstall(t *testing.T) {
 	if slot != piv.SlotPIVAuthentication {
 		t.Errorf("cached slot = %s, want 9a", slot)
 	}
-	if !piv.PublicKeysEqual(cached, pub) {
+	if !pivapdu.PublicKeysEqual(cached, pub) {
 		t.Error("cached pub does not match returned pub")
 	}
 
@@ -389,7 +390,7 @@ func TestSession_Reset_ClearsAuthState(t *testing.T) {
 	// session method for unblock-with-wrong-PUK; the test only needs
 	// to drive the mock's PUK counter to zero.
 	for i := 0; i < 5; i++ {
-		cmd, err := piv.ResetRetryCounter([]byte("00000000"), []byte("999999"))
+		cmd, err := pivapdu.ResetRetryCounter([]byte("00000000"), []byte("999999"))
 		if err != nil {
 			t.Fatalf("build RESET RETRY COUNTER: %v", err)
 		}

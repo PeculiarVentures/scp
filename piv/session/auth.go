@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/piv"
+	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
 )
 
 // VerifyPIN issues VERIFY against the PIV applet (NIST SP 800-73-4
@@ -22,7 +23,7 @@ import (
 // the returned error. On 6983 (PIN blocked), use UnblockPIN with
 // the PUK.
 func (s *Session) VerifyPIN(ctx context.Context, pin []byte) error {
-	cmd, err := piv.VerifyPIN(pin)
+	cmd, err := pivapdu.VerifyPIN(pin)
 	if err != nil {
 		return fmt.Errorf("VERIFY PIN: %w", err)
 	}
@@ -74,20 +75,20 @@ func (s *Session) AuthenticateManagementKey(ctx context.Context, key piv.Managem
 	algoByte := key.Algorithm.Byte()
 
 	// Step 1: request the card's witness.
-	chCmd := piv.MgmtKeyMutualAuthChallenge(algoByte)
+	chCmd := pivapdu.MgmtKeyMutualAuthChallenge(algoByte)
 	chResp, err := s.transmit(ctx, "AUTH MGMT KEY (witness request)", chCmd)
 	if err != nil {
 		s.mgmtAuthed = false
 		return err
 	}
-	witness, err := piv.ParseMutualAuthWitness(chResp.Data, algoByte)
+	witness, err := pivapdu.ParseMutualAuthWitness(chResp.Data, algoByte)
 	if err != nil {
 		s.mgmtAuthed = false
 		return fmt.Errorf("AUTH MGMT KEY: parse witness: %w", err)
 	}
 
 	// Step 2: decrypt the witness, send response + fresh challenge.
-	respCmd, hostChallenge, err := piv.MgmtKeyMutualAuthRespond(witness, key.Key, algoByte)
+	respCmd, hostChallenge, err := pivapdu.MgmtKeyMutualAuthRespond(witness, key.Key, algoByte)
 	if err != nil {
 		s.mgmtAuthed = false
 		return fmt.Errorf("AUTH MGMT KEY: build response: %w", err)
@@ -99,7 +100,7 @@ func (s *Session) AuthenticateManagementKey(ctx context.Context, key piv.Managem
 	}
 
 	// Verify the card's response to our challenge.
-	if err := piv.VerifyMutualAuthResponse(finalResp.Data, hostChallenge, key.Key, algoByte); err != nil {
+	if err := pivapdu.VerifyMutualAuthResponse(finalResp.Data, hostChallenge, key.Key, algoByte); err != nil {
 		s.mgmtAuthed = false
 		return fmt.Errorf("AUTH MGMT KEY: verify card response: %w", err)
 	}

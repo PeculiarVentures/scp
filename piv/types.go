@@ -338,6 +338,41 @@ func ParseManagementKeyAlgorithm(s string) (ManagementKeyAlgorithm, error) {
 		"piv: management-key algorithm %q not recognized (3des, aes128, aes192, aes256)", s)
 }
 
+// DefaultMgmtKey is the well-known 24-byte management key value
+// shipped on YubiKeys with default PIV settings. The same byte
+// pattern serves as both the 3DES default (firmware < 5.7) and the
+// AES-192 default (firmware 5.7+) — Yubico's PIV docs are explicit
+// that "the default management key uses the same default value
+// (3DES and AES-192 keys are the same length)."
+//
+// Reference: developers.yubico.com/PIV/Introduction/YubiKey_and_PIV.html
+//
+// Including it here so callers don't have to type the bytes;
+// production deployments must rotate it via SetManagementKey before
+// relying on the card for anything sensitive.
+//
+// Defined alongside ManagementKey rather than in piv/apdu because
+// the value is a constant, not protocol behavior, and types.go is
+// the natural home for shared management-key vocabulary.
+var DefaultMgmtKey = []byte{
+	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+}
+
+// DefaultMgmt3DESKey is a backward-compatibility alias for callers
+// that imported the original name. Both names point at the same
+// 24-byte buffer; see DefaultMgmtKey for current naming.
+//
+// Deprecated: Prefer DefaultMgmtKey. The 3DES suffix was misleading
+// because the same value is the 5.7+ AES-192 default too.
+var DefaultMgmt3DESKey = DefaultMgmtKey
+
+// MgmtKeyRef is the PIV key reference for the management key
+// (NIST SP 800-73-4 Part 2 §3.2.4). Goes into P2 of GENERAL
+// AUTHENTICATE for mgmt-key auth.
+const MgmtKeyRef byte = 0x9B
+
 // ManagementKey is a PIV management key plus its algorithm. The Label
 // field is a free-form display label used in reports; it is not sent
 // to the card.
@@ -438,3 +473,63 @@ func ParseObjectID(s string) (ObjectID, error) {
 	}
 	return ObjectID(b), nil
 }
+
+// Wire-byte constants. The typed forms above (Slot, Algorithm,
+// ManagementKeyAlgorithm, PINPolicy, TouchPolicy) are preferred in
+// new code. The bare byte forms below match the names used by the
+// pre-refactor piv package and the cmd/scpctl provisioning code; they
+// stay in piv (rather than moving to piv/apdu with the builders) so
+// they share the typed-vocabulary file and so existing callers do
+// not have to switch import paths to reach them.
+
+// Slot wire-byte aliases (match SP 800-73-4 Part 1 Table 4b).
+const (
+	SlotAuthentication byte = 0x9A
+	SlotSignature      byte = 0x9C
+	SlotKeyManagement  byte = 0x9D
+	SlotCardAuth       byte = 0x9E
+	SlotRetired1       byte = 0x82
+	SlotRetired20      byte = 0x95
+	SlotAttestation    byte = 0xF9
+)
+
+// Algorithm wire-byte aliases (match SP 800-78-4 §3.1, plus YubiKey
+// 5.7+ extensions for Ed25519 / X25519).
+const (
+	AlgoRSA2048 byte = 0x07
+	AlgoECCP256 byte = 0x11
+	AlgoECCP384 byte = 0x14
+	AlgoEd25519 byte = 0xE0
+	AlgoX25519  byte = 0xE1
+)
+
+// PIN policy wire-byte aliases (YubiKey extension).
+const (
+	PINPolicyDefault byte = 0x00
+	PINPolicyNever   byte = 0x01
+	PINPolicyOnce    byte = 0x02
+	PINPolicyAlways  byte = 0x03
+	PINPolicyMatch   byte = 0x04
+)
+
+// Touch policy wire-byte aliases (YubiKey extension).
+const (
+	TouchPolicyDefault byte = 0x00
+	TouchPolicyNever   byte = 0x01
+	TouchPolicyAlways  byte = 0x02
+	TouchPolicyCached  byte = 0x03
+)
+
+// Management-key algorithm wire-byte aliases (SP 800-78-4 §3.1 plus
+// SP 800-78-5 AES additions).
+const (
+	AlgoMgmt3DES   byte = 0x03
+	AlgoMgmtAES128 byte = 0x08
+	AlgoMgmtAES192 byte = 0x0A
+	AlgoMgmtAES256 byte = 0x0C
+)
+
+// MaxPINLength is the maximum PIN length accepted by VerifyPIN. PIV
+// VERIFY (NIST SP 800-73-4 Part 2 §3.2.1) sends a fixed 8-byte data
+// field padded with 0xFF, so 8 bytes is the inherent ceiling.
+const MaxPINLength = 8

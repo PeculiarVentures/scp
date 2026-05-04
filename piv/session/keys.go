@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/piv"
+	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
 )
 
 // GenerateKeyOptions configures a GENERATE KEY call.
@@ -66,9 +67,9 @@ func (s *Session) GenerateKey(ctx context.Context, slot piv.Slot, opts GenerateK
 		return nil, err
 	}
 
-	var cmd = piv.GenerateKey(slot.Byte(), opts.Algorithm.Byte())
+	var cmd = pivapdu.GenerateKey(slot.Byte(), opts.Algorithm.Byte())
 	if hasPolicy {
-		cmd = piv.GenerateKeyWithPolicy(
+		cmd = pivapdu.GenerateKeyWithPolicy(
 			slot.Byte(),
 			opts.Algorithm.Byte(),
 			opts.PINPolicy.Byte(),
@@ -81,7 +82,7 @@ func (s *Session) GenerateKey(ctx context.Context, slot piv.Slot, opts GenerateK
 		return nil, err
 	}
 
-	pub, err := piv.ParseGeneratedPublicKey(resp.Data, opts.Algorithm.Byte())
+	pub, err := pivapdu.ParseGeneratedPublicKey(resp.Data, opts.Algorithm.Byte())
 	if err != nil {
 		return nil, fmt.Errorf("GENERATE KEY: parse response: %w", err)
 	}
@@ -160,7 +161,7 @@ func (s *Session) PutCertificate(ctx context.Context, slot piv.Slot, cert *x509.
 			}
 			expected = cached
 		}
-		if !piv.PublicKeysEqual(cert.PublicKey, expected) {
+		if !pivapdu.PublicKeysEqual(cert.PublicKey, expected) {
 			return fmt.Errorf("PUT CERTIFICATE: certificate public key does not match expected key for slot %s",
 				slot)
 		}
@@ -170,7 +171,7 @@ func (s *Session) PutCertificate(ctx context.Context, slot piv.Slot, cert *x509.
 		return err
 	}
 
-	cmd, err := piv.PutCertificate(slot.Byte(), cert)
+	cmd, err := pivapdu.PutCertificate(slot.Byte(), cert)
 	if err != nil {
 		return fmt.Errorf("PUT CERTIFICATE: build: %w", err)
 	}
@@ -198,7 +199,7 @@ func (s *Session) Attest(ctx context.Context, slot piv.Slot) (*x509.Certificate,
 			piv.ErrUnsupportedByProfile, slot, s.profile.Name())
 	}
 
-	cmd := piv.Attest(slot.Byte())
+	cmd := pivapdu.Attest(slot.Byte())
 	resp, err := s.transmit(ctx, "ATTEST", cmd)
 	if err != nil {
 		return nil, err
@@ -230,7 +231,7 @@ func (s *Session) Reset(ctx context.Context, _ ResetOptions) error {
 		return fmt.Errorf("%w: reset not supported by profile %s",
 			piv.ErrUnsupportedByProfile, s.profile.Name())
 	}
-	cmd := piv.Reset()
+	cmd := pivapdu.Reset()
 	if _, err := s.transmit(ctx, "RESET", cmd); err != nil {
 		return err
 	}

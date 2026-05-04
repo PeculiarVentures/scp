@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/piv"
+	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/transport"
 )
@@ -193,7 +193,7 @@ func TestPIVReset_RefusedWhenCountersNotBlocked(t *testing.T) {
 	}
 	defer sess.Close()
 
-	resp, err := sess.Transmit(context.Background(), piv.Reset())
+	resp, err := sess.Transmit(context.Background(), pivapdu.Reset())
 	if err != nil {
 		t.Fatalf("Transmit: %v", err)
 	}
