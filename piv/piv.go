@@ -35,7 +35,8 @@ const (
 	SlotSignature      byte = 0x9C // Digital Signature
 	SlotKeyManagement  byte = 0x9D // Key Management
 	SlotCardAuth       byte = 0x9E // Card Authentication
-	SlotRetired1       byte = 0x82 // Retired Key Management 1
+	SlotRetired1       byte = 0x82 // Retired Key Management 1 (start of retired range)
+	SlotRetired20      byte = 0x95 // Retired Key Management 20 (end of retired range)
 	SlotAttestation    byte = 0xF9 // Attestation (YubiKey specific)
 )
 

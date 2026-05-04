@@ -1996,3 +1996,60 @@ func TestPIVProvision_MgmtKeyDefault_3DES_StillWorks(t *testing.T) {
 		t.Errorf("expected mgmt-key auth PASS with 3DES; got:\n%s", out)
 	}
 }
+
+// TestParsePIVSlot_RetiredRange confirms the CLI accepts the full
+// retired-key-management slot range (0x82..0x95, slots 1..20)
+// rather than only SlotRetired1. The underlying piv.slotToObjectID
+// already supported the full range; the bug was that parsePIVSlot
+// rejected anything except 0x82, making the other 19 retired slots
+// unreachable from the CLI.
+func TestParsePIVSlot_RetiredRange(t *testing.T) {
+	// Walk the entire 0x82..0x95 range and confirm every byte parses.
+	for slot := byte(0x82); slot <= 0x95; slot++ {
+		s := fmt.Sprintf("%02x", slot)
+		got, err := parsePIVSlot(s)
+		if err != nil {
+			t.Errorf("slot %s: unexpected error: %v", s, err)
+			continue
+		}
+		if got != slot {
+			t.Errorf("slot %s: got 0x%02X want 0x%02X", s, got, slot)
+		}
+	}
+
+	// 0x96 is just past the retired range — must be rejected.
+	if _, err := parsePIVSlot("96"); err == nil {
+		t.Error("0x96 should be rejected (one past retired range)")
+	}
+	// 0x81 is just before — must be rejected.
+	if _, err := parsePIVSlot("81"); err == nil {
+		t.Error("0x81 should be rejected (one before retired range)")
+	}
+}
+
+// TestParsePIVSlot_NamedSlots pins the four primary PIV slots and
+// the YubiKey attestation slot still parse, plus an unknown slot
+// is rejected with a helpful error.
+func TestParsePIVSlot_NamedSlots(t *testing.T) {
+	cases := map[string]byte{
+		"9a": piv.SlotAuthentication,
+		"9c": piv.SlotSignature,
+		"9d": piv.SlotKeyManagement,
+		"9e": piv.SlotCardAuth,
+		"f9": piv.SlotAttestation,
+	}
+	for s, want := range cases {
+		t.Run(s, func(t *testing.T) {
+			got, err := parsePIVSlot(s)
+			if err != nil {
+				t.Fatalf("%s: %v", s, err)
+			}
+			if got != want {
+				t.Errorf("%s: got 0x%02X want 0x%02X", s, got, want)
+			}
+		})
+	}
+	if _, err := parsePIVSlot("01"); err == nil {
+		t.Error("0x01 should be rejected")
+	}
+}
