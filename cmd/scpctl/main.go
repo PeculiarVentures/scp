@@ -1,0 +1,279 @@
+// Command scpctl is the unified administrative CLI for the
+// PeculiarVentures/scp library. It groups three layers of
+// functionality:
+//
+//   - smoke   hardware validation and regression checks (the
+//             original scp-smoke surface, preserved unchanged
+//             behaviorally)
+//   - piv     user-facing PIV operations (PIN, key, cert, attest,
+//             reset) over the piv/session library
+//   - sd      Security Domain read and bootstrap operations
+//
+// plus a small set of top-level utilities (readers, probe, version,
+// help) that do not belong to any group.
+//
+// # Safety
+//
+// All destructive operations require --confirm-write. SCP11 trust
+// validation is on by default; --lab-skip-scp11-trust opts out and
+// is visible in JSON output. Security Domain writes are never
+// attempted over SCP11b. Authentication lockouts are never used as
+// a recovery mechanism except by the explicit `smoke piv-reset`
+// command and only behind --confirm-write.
+//
+// # Subcommands
+//
+//	scpctl readers
+//	scpctl probe
+//	scpctl smoke <subcommand>
+//	scpctl piv <subcommand>      (forthcoming)
+//	scpctl sd  <subcommand>      (forthcoming)
+//	scpctl version
+//	scpctl help
+//
+// Use `scpctl <group> <subcommand> -h` for per-command flags.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+// version is set at build time via -ldflags. Unset in `go run` builds.
+var version = "dev"
+
+// smokeCommands maps the smoke-group subcommand names to handlers.
+// These are the original scp-smoke commands; the names are preserved
+// verbatim (including hyphens like scp03-sd-read) so existing
+// scripts that called `scp-smoke scp03-sd-read` translate to
+// `scpctl smoke scp03-sd-read` with no other changes.
+var smokeCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
+	"readers":           cmdReaders,
+	"probe":             cmdProbe,
+	"scp03-sd-read":     cmdSCP03SDRead,
+	"scp11b-sd-read":    cmdSCP11bSDRead,
+	"scp11a-sd-read":    cmdSCP11aSDRead,
+	"scp11b-piv-verify": cmdSCP11bPIVVerify,
+	"bootstrap-oce":     cmdBootstrapOCE,
+	"piv-provision":     cmdPIVProvision,
+	"piv-reset":         cmdPIVReset,
+	"test":              cmdTest,
+}
+
+// topLevelCommands maps top-level utility subcommands. readers and
+// probe are also reachable under `scpctl smoke` because they were
+// originally part of the smoke harness; exposing them at the top
+// level mirrors how operators reach for them.
+var topLevelCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
+	"readers": cmdReaders,
+	"probe":   cmdProbe,
+}
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if len(os.Args) < 2 {
+		printUsage(os.Stderr)
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "-h", "--help", "help":
+		printUsage(os.Stdout)
+		return
+	case "-v", "--version", "version":
+		fmt.Println("scpctl", version)
+		return
+	}
+
+	env := &runEnv{
+		out:     os.Stdout,
+		errOut:  os.Stderr,
+		connect: pcscConnect,
+	}
+
+	group := os.Args[1]
+	switch group {
+	case "smoke":
+		runGroup(ctx, env, "smoke", smokeCommands, os.Args[2:], smokeUsage)
+		return
+	case "piv":
+		// Reserved for piv/session-backed user surface. Until
+		// commands land here, point users at smoke piv-provision /
+		// piv-reset which exercise the same flows directly.
+		fmt.Fprintln(os.Stderr,
+			`scpctl: 'piv' subgroup is not yet wired; use 'scpctl smoke piv-provision' / 'piv-reset' for now`)
+		os.Exit(2)
+	case "sd":
+		fmt.Fprintln(os.Stderr,
+			`scpctl: 'sd' subgroup is not yet wired; use 'scpctl smoke scp03-sd-read' / 'scp11b-sd-read' / 'scp11a-sd-read' / 'bootstrap-oce' for now`)
+		os.Exit(2)
+	}
+
+	// Top-level utility subcommands.
+	if handler, ok := topLevelCommands[group]; ok {
+		if err := handler(ctx, env, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "scpctl:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "scpctl: unknown subcommand %q\n\n", group)
+	printUsage(os.Stderr)
+	os.Exit(2)
+}
+
+// runGroup dispatches a `scpctl <group> <sub>` invocation. Extracted
+// so future groups (piv, sd) reuse identical error and usage handling.
+func runGroup(
+	ctx context.Context,
+	env *runEnv,
+	groupName string,
+	registry map[string]func(context.Context, *runEnv, []string) error,
+	args []string,
+	usage func(io.Writer),
+) {
+	if len(args) == 0 {
+		usage(os.Stderr)
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		usage(os.Stdout)
+		return
+	}
+	sub := args[0]
+	handler, ok := registry[sub]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "scpctl %s: unknown subcommand %q\n\n", groupName, sub)
+		usage(os.Stderr)
+		os.Exit(2)
+	}
+	if err := handler(ctx, env, args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "scpctl "+groupName+":", err)
+		os.Exit(1)
+	}
+}
+
+// runEnv is the runtime environment shared across subcommands. It
+// carries the writers used for output and the function used to
+// obtain a transport; both can be replaced by tests.
+type runEnv struct {
+	out     io.Writer
+	errOut  io.Writer
+	connect connectFunc
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `scpctl - administrative CLI for github.com/PeculiarVentures/scp
+
+Usage:
+  scpctl <group> <subcommand> [flags]
+  scpctl <utility> [flags]
+
+Groups:
+  smoke       Hardware smoke tests and regression checks
+              (originally the 'scp-smoke' binary; preserved verbatim).
+
+  piv         User-facing PIV operations over piv/session.
+              (forthcoming; commands not yet wired.)
+
+  sd          Security Domain operations.
+              (forthcoming; commands not yet wired.)
+
+Top-level utilities:
+  readers     List PC/SC readers visible to the OS.
+  probe       Open an unauthenticated SD session and report card
+              capabilities.
+  version     Print the binary version.
+  help        Print this message.
+
+Smoke subcommands:
+  scpctl smoke readers
+  scpctl smoke probe
+  scpctl smoke scp03-sd-read
+  scpctl smoke scp11b-sd-read
+  scpctl smoke scp11a-sd-read
+  scpctl smoke scp11b-piv-verify
+  scpctl smoke bootstrap-oce
+  scpctl smoke piv-provision
+  scpctl smoke piv-reset
+  scpctl smoke test
+
+Common flags (all subcommands that touch hardware):
+  --reader NAME              PC/SC reader name (substring match).
+  --json                     Emit machine-readable JSON output.
+  --lab-skip-scp11-trust     Skip card certificate validation for
+                             SCP11; lab use only.
+  --assume-yubikey           Allow YubiKey-specific defaults when
+                             the probe cannot positively identify
+                             the card.
+
+This tool will never intentionally cause authentication lockouts,
+will never rotate SCP03 keys silently, and will refuse Security
+Domain write operations over SCP11b. See "scpctl <group> <cmd> -h"
+for per-command details and safety notes.
+`)
+}
+
+func smokeUsage(w io.Writer) {
+	fmt.Fprint(w, `scpctl smoke - hardware smoke tests and regression checks
+
+Usage:
+  scpctl smoke <subcommand> [flags]
+
+Subcommands:
+  readers              List PC/SC readers visible to the OS.
+  probe                Open an unauthenticated SD session, read CRD,
+                       parse, and print the card's claimed capabilities.
+  scp03-sd-read        Open an SCP03 SD session and verify a read works.
+                       Defaults to YubiKey factory credentials.
+  scp11b-sd-read       Open an SCP11b SD session and verify a read works.
+  scp11a-sd-read       Open an SCP11a (mutual-auth) SD session and verify
+                       a read works. Requires --oce-key and --oce-cert
+                       and a card with OCE provisioned.
+  scp11b-piv-verify    Open an SCP11b session against the PIV applet
+                       and verify the PIN.
+  bootstrap-oce        Install an OCE public key (and optionally cert
+                       chain + CA SKI) onto a card via SCP03. Day-1
+                       provisioning step that enables scp11a-sd-read.
+                       Destructive; gated by --confirm-write.
+  piv-provision        Generate a PIV slot keypair and optionally install
+                       a certificate / fetch attestation, all over an
+                       SCP11b session targeting the PIV applet.
+                       Destructive; gated by --confirm-write.
+  piv-reset            Reset the YubiKey PIV applet to factory state by
+                       deliberately blocking PIN and PUK, then sending
+                       INS=0xFB. Erases ALL slot keys and certs.
+                       Destructive; gated by --confirm-write.
+  test                 Run probe + the three smoke tests; emit a
+                       PASS/FAIL/SKIP summary.
+
+Use "scpctl smoke <subcommand> -h" for per-command flags.
+`)
+}
+
+// usageError is returned by subcommands when flag parsing fails.
+// Wrapping in a distinct type lets the dispatcher distinguish "user
+// passed bad flags" from "the card said no."
+type usageError struct{ msg string }
+
+func (u *usageError) Error() string { return u.msg }
+
+// newSubcommandFlagSet creates a FlagSet that prints to env.errOut on
+// usage errors and uses ContinueOnError so errors propagate up rather
+// than calling os.Exit inside the flag library.
+//
+// The flag-set name is the full "scpctl smoke <sub>" form so flag
+// usage messages match what the user typed.
+func newSubcommandFlagSet(name string, env *runEnv) *flag.FlagSet {
+	fs := flag.NewFlagSet("scpctl smoke "+name, flag.ContinueOnError)
+	fs.SetOutput(env.errOut)
+	return fs
+}
