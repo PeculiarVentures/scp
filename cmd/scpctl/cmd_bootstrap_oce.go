@@ -27,6 +27,20 @@ type bootstrapOCEData struct {
 // authentication error because the card has no OCE root to verify
 // the host's chain against.
 //
+// IMPORTANT — fresh-card sequencing: on YubiKey 5.7.4 (and per
+// Yubico's documented behavior more broadly), the first PUT KEY a
+// caller issues against the SD over factory SCP03 (KVN=0xFF)
+// causes the card to delete those factory keys. So an immediately
+// following bootstrap-scp11a-sd run cannot reopen SCP03 and fails
+// INITIALIZE UPDATE with SW=6A88. If you need to install BOTH the
+// OCE public key AND the SCP11a SD key on a fresh card, use the
+// combined `bootstrap-scp11a` command, which performs both writes
+// inside a single SCP03 session. Use bootstrap-oce alone when:
+//   - you only need to install/rotate the OCE side, or
+//   - you have a custom SCP03 key set installed (so factory keys
+//     being consumed isn't a problem because subsequent commands
+//     can pass --scp03-* flags to authenticate with the new keys).
+//
 // The session used is SCP03 (the only protocol that gives mutual
 // auth without already having an OCE provisioned). Default keys are
 // the YubiKey factory keys (KVN 0xFF, key
