@@ -147,17 +147,21 @@ func New(ctx context.Context, tx Transmitter, opts Options) (*Session, error) {
 	// channel is read as a fresh-handshake signal by some cards and
 	// tears the session down.
 	if !opts.SkipSelect {
-		selectCmd := &apdu.Command{
-			CLA:  0x00,
-			INS:  0xA4,
-			P1:   0x04,
-			P2:   0x00,
-			Data: profile.AIDPIV,
-			Le:   0,
-		}
-		selectResp, err := tx.Transmit(ctx, selectCmd)
+		// Try the full PIV AID first per SP 800-73-4 Part 1 §2.2;
+		// fall back to the truncated 5-byte form on 6A82 for cards
+		// that match by exact AID rather than prefix. See
+		// profile.AIDPIVFull for the rationale; the same shape lives
+		// here because session.New is the ground-floor path that
+		// runs without a Probe (when opts.Profile is supplied).
+		selectResp, err := selectPIV(ctx, tx, profile.AIDPIVFull)
 		if err != nil {
 			return nil, fmt.Errorf("piv/session: SELECT AID PIV transport: %w", err)
+		}
+		if !selectResp.IsSuccess() && selectResp.StatusWord() == 0x6A82 {
+			selectResp, err = selectPIV(ctx, tx, profile.AIDPIV)
+			if err != nil {
+				return nil, fmt.Errorf("piv/session: SELECT AID PIV (truncated) transport: %w", err)
+			}
 		}
 		if !selectResp.IsSuccess() {
 			return nil, fmt.Errorf("piv/session: SELECT AID PIV failed (SW=%04X)",
@@ -235,4 +239,20 @@ type transmitterAdapter struct {
 
 func (a transmitterAdapter) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	return a.tx.Transmit(ctx, cmd)
+}
+
+// selectPIV sends a SELECT AID PIV with the given AID bytes. Errors
+// are transport-level only; status-word interpretation is the
+// caller's job because New wants to branch on 6A82 specifically
+// before treating it as terminal.
+func selectPIV(ctx context.Context, tx Transmitter, aid []byte) (*apdu.Response, error) {
+	cmd := &apdu.Command{
+		CLA:  0x00,
+		INS:  0xA4,
+		P1:   0x04,
+		P2:   0x00,
+		Data: aid,
+		Le:   0,
+	}
+	return tx.Transmit(ctx, cmd)
 }

@@ -289,6 +289,9 @@ func TestProbe_StandardPIV_When_GetVersion_6D00(t *testing.T) {
 func TestProbe_NoApplet(t *testing.T) {
 	tx := &fakeTransmitter{
 		responses: []apduPair{
+			// Full AID: card has no PIV applet.
+			{resp: &apdu.Response{Data: nil, SW1: 0x6A, SW2: 0x82}},
+			// Truncated AID fallback: same card, same answer.
 			{resp: &apdu.Response{Data: nil, SW1: 0x6A, SW2: 0x82}},
 		},
 	}
