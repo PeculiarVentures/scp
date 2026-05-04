@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/piv"
@@ -392,5 +393,115 @@ func TestSession_New_SkipSelectRequiresProfile(t *testing.T) {
 	_, err := New(context.Background(), c.Transport(), Options{SkipSelect: true})
 	if err == nil {
 		t.Fatal("expected error when SkipSelect is true and Profile is nil")
+	}
+}
+
+// TestSession_ChangeManagementKey_ClearsAuthState verifies that a
+// successful management-key change clears the in-memory mgmtAuthed
+// flag. The card invalidates the prior auth on key change; the
+// session must reflect that so subsequent mgmt-gated operations
+// re-authenticate with the new key rather than fail with a stale
+// "already authenticated" assumption.
+//
+// This guards against the regression class where a host-side cache
+// drifts out of sync with the card after a credential change. The
+// operator pattern (rotate management key, then immediately do
+// another mgmt-gated operation) must work and must use the new
+// key, not silently rely on stale session state.
+func TestSession_ChangeManagementKey_ClearsAuthState(t *testing.T) {
+	c := newYKMock(t)
+	sess := newSessionWithProfile(t, c, profile.NewYubiKeyProfile())
+	defer sess.Close()
+	ctx := context.Background()
+
+	// Authenticate with the factory key.
+	oldMK := piv.ManagementKey{
+		Algorithm: piv.ManagementKeyAlgAES192,
+		Key:       piv.DefaultMgmtKey,
+	}
+	if err := sess.AuthenticateManagementKey(ctx, oldMK); err != nil {
+		t.Fatalf("AuthenticateManagementKey: %v", err)
+	}
+	if !sess.MgmtKeyAuthenticated() {
+		t.Fatal("MgmtKeyAuthenticated should be true after auth")
+	}
+
+	// Rotate to a new key.
+	newKeyBytes := make([]byte, 24)
+	for i := range newKeyBytes {
+		newKeyBytes[i] = 0x42
+	}
+	newMK := piv.ManagementKey{
+		Algorithm: piv.ManagementKeyAlgAES192,
+		Key:       newKeyBytes,
+	}
+	if err := sess.ChangeManagementKey(ctx, newMK, ChangeManagementKeyOptions{}); err != nil {
+		t.Fatalf("ChangeManagementKey: %v", err)
+	}
+
+	// Auth state must be cleared after a successful rotation.
+	if sess.MgmtKeyAuthenticated() {
+		t.Error("MgmtKeyAuthenticated should be cleared after ChangeManagementKey")
+	}
+
+	// Mgmt-gated operations should now refuse without re-auth.
+	if err := sess.ChangeManagementKey(ctx, oldMK, ChangeManagementKeyOptions{}); err == nil {
+		t.Error("expected ErrNotAuthenticated when running mgmt-gated op after rotation")
+	} else if !errors.Is(err, piv.ErrNotAuthenticated) {
+		t.Errorf("expected ErrNotAuthenticated, got %v", err)
+	}
+
+	// Re-authenticate with the new key.
+	if err := sess.AuthenticateManagementKey(ctx, newMK); err != nil {
+		t.Fatalf("re-auth with new key: %v", err)
+	}
+	// And the old key should no longer work.
+	if err := sess.AuthenticateManagementKey(ctx, oldMK); err == nil {
+		t.Error("expected old key to fail after rotation")
+	}
+}
+
+// TestSession_ChangeManagementKey_RejectsRequireTouch verifies the
+// host-side rejection of opts.RequireTouch. The pivapdu builder
+// hardcodes the no-touch P1 byte, so silently accepting the option
+// would let a caller think they enabled touch enforcement when
+// they actually got a touch-disabled key. Reject explicitly with
+// ErrUnsupportedByProfile until the encoding work lands; see the
+// commit message of 9fabdd8 for the design choice.
+func TestSession_ChangeManagementKey_RejectsRequireTouch(t *testing.T) {
+	c := newYKMock(t)
+	sess := newSessionWithProfile(t, c, profile.NewYubiKeyProfile())
+	defer sess.Close()
+	ctx := context.Background()
+
+	// Authenticate with the factory key first; otherwise we'd hit
+	// ErrNotAuthenticated before reaching the RequireTouch gate.
+	if err := sess.AuthenticateManagementKey(ctx, piv.ManagementKey{
+		Algorithm: piv.ManagementKeyAlgAES192,
+		Key:       piv.DefaultMgmtKey,
+	}); err != nil {
+		t.Fatalf("mgmt auth: %v", err)
+	}
+
+	newKeyBytes := make([]byte, 24)
+	err := sess.ChangeManagementKey(ctx,
+		piv.ManagementKey{Algorithm: piv.ManagementKeyAlgAES192, Key: newKeyBytes},
+		ChangeManagementKeyOptions{RequireTouch: true},
+	)
+	if err == nil {
+		t.Fatal("expected refusal of RequireTouch")
+	}
+	if !errors.Is(err, piv.ErrUnsupportedByProfile) {
+		t.Errorf("expected ErrUnsupportedByProfile, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("error should explain why: %v", err)
+	}
+
+	// The card must NOT have been touched: auth state should still
+	// be set because the rejection happened host-side before any
+	// CHANGE MGMT KEY APDU went on the wire.
+	if !sess.MgmtKeyAuthenticated() {
+		t.Error("MgmtKeyAuthenticated should still be true after a host-side rejection")
 	}
 }

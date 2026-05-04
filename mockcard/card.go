@@ -503,6 +503,45 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		}
 		return c.handlePIVMgmtAuth(cmd)
 
+	case 0xFF: // PIV SET MANAGEMENT KEY (YubiKey-specific extension to
+		// SP 800-73-4 — 5.7+ accepts AES variants in addition to 3DES).
+		// Wire format per piv/apdu/commands.go SetManagementKey:
+		// CLA=00 INS=FF P1=FF P2=FF, data = algorithm-byte || TLV(0x9B, newKey).
+		// The mock accepts any well-formed input and updates its own
+		// in-memory PIVMgmtKey/PIVMgmtKeyAlgo so subsequent mgmt-auth
+		// calls validate against the new key. The mock does not gate
+		// on "currently authenticated" because the witness state is
+		// per-handshake rather than per-session; the host side
+		// (piv/session.requireMgmtAuth) is what enforces "must be
+		// authenticated to rotate", and that path is tested
+		// independently. The mock's job here is to model the wire
+		// shape and the post-rotation card state (new key live,
+		// prior auth invalidated), not the access-control policy.
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		if len(cmd.Data) < 4 {
+			return mkSW(0x6700), nil // wrong length
+		}
+		algo := cmd.Data[0]
+		if cmd.Data[1] != 0x9B {
+			return mkSW(0x6A80), nil // wrong data
+		}
+		// Skip the algorithm byte and TLV header (tag 0x9B at index 1,
+		// length at index 2). Body starts at index 3 because all
+		// management-key sizes (16/24/32 bytes) fit in single-byte
+		// length encoding.
+		bodyStart := 3
+		keyLen := int(cmd.Data[2])
+		if len(cmd.Data) < bodyStart+keyLen {
+			return mkSW(0x6700), nil
+		}
+		c.PIVMgmtKey = append([]byte(nil), cmd.Data[bodyStart:bodyStart+keyLen]...)
+		c.PIVMgmtKeyAlgo = algo
+		// Post-rotation: any prior witness state is stale.
+		c.pivMgmtAuthWitness = nil
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+
 	default:
 		return mkSW(0x6D00), nil // instruction not supported
 	}
