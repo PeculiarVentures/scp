@@ -45,6 +45,33 @@ func extractCardPublicKey(data []byte, trustAnchors *x509.CertPool) (*ecdh.Publi
 	}
 
 	if len(certNodes) == 0 {
+		// Yubikit shape: BF21 GET DATA against YubiKey returns a list of
+		// raw DER certificates concatenated at the top level, with no
+		// 7F21 or BF21 wrapping. Each cert is a SEQUENCE TLV (tag 0x30),
+		// which tlv.Decode happily parses — but the resulting nodes
+		// don't match TagCertificate (7F21) or TagCertStore (BF21), so
+		// the loops above missed them. Detect this by checking whether
+		// every top-level node has tag 0x30 (DER SEQUENCE), and if so
+		// rebuild a synthetic certNodes list whose Value is the entire
+		// re-encoded TLV — that's the DER cert bytes parseRawCert wants.
+		//
+		// References:
+		//   - Yubico yubikit.securitydomain.get_certificate_bundle uses
+		//     Tlv.parse_list followed by load_der_x509_certificate on
+		//     each entry.
+		//   - Same shape is what scpctl smoke scp11b-sd-read hits on
+		//     a real YubiKey 5.7+, which rejected the previous pure-7F21
+		//     parser as "no EC public key found in data".
+		if certs := derCertList(data); len(certs) > 0 {
+			synth := make([]*tlv.Node, len(certs))
+			for i, c := range certs {
+				synth[i] = &tlv.Node{Tag: tlv.TagCertificate, Value: c}
+			}
+			certNodes = synth
+		}
+	}
+
+	if len(certNodes) == 0 {
 		// Last resort: try the raw data as a DER certificate.
 		return parseRawCert(data, trustAnchors, nil)
 	}
@@ -232,6 +259,61 @@ func verifyOCEKeyMatchesCert(priv *ecdsa.PrivateKey, cert *x509.Certificate) err
 		return errors.New("private key does not correspond to certificate public key")
 	}
 	return nil
+}
+
+// derCertList splits a buffer of one-or-more concatenated DER X.509
+// certificates and returns each as a complete encoded TLV (tag, length,
+// value). Returns nil if the buffer is empty, doesn't start with a DER
+// SEQUENCE tag, or any cert is structurally malformed.
+//
+// This matches the shape Yubico yubikit emits for GET DATA BF21: a top-
+// level concatenation of DER certs (each is `30 LL ...`), no GP 7F21 or
+// BF21 wrapping. We split here and let parseRawCert validate each one.
+func derCertList(data []byte) [][]byte {
+	if len(data) == 0 || data[0] != 0x30 {
+		return nil
+	}
+	var certs [][]byte
+	rest := data
+	for len(rest) > 0 {
+		if rest[0] != 0x30 {
+			// Trailing junk after one or more well-formed certs is
+			// suspicious — bail out rather than guess.
+			return nil
+		}
+		valLen, hdrLen, err := derLength(rest[1:])
+		if err != nil {
+			return nil
+		}
+		total := 1 + hdrLen + valLen
+		if total > len(rest) {
+			return nil
+		}
+		certs = append(certs, rest[:total])
+		rest = rest[total:]
+	}
+	return certs
+}
+
+// derLength reads a DER length field and returns the value length and
+// the number of bytes the length field itself consumed.
+func derLength(b []byte) (length, headerBytes int, err error) {
+	if len(b) == 0 {
+		return 0, 0, errors.New("empty DER length")
+	}
+	first := b[0]
+	if first < 0x80 {
+		return int(first), 1, nil
+	}
+	n := int(first & 0x7F)
+	if n == 0 || n > 4 || 1+n > len(b) {
+		return 0, 0, errors.New("invalid DER length")
+	}
+	v := 0
+	for i := 1; i <= n; i++ {
+		v = (v << 8) | int(b[i])
+	}
+	return v, 1 + n, nil
 }
 
 // findECPointInNodes recursively searches TLV nodes for a 65-byte

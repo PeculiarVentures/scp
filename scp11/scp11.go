@@ -174,6 +174,27 @@ type Config struct {
 	// callers should configure CardTrustPolicy or CardTrustAnchors.
 	InsecureSkipCardAuthentication bool
 
+	// PreverifiedCardStaticPublicKey supplies PK.SD.ECKA — the card's
+	// static SCP11 public key — that the caller has already obtained
+	// and validated (typically by reading the Security Domain's
+	// certificate store via securitydomain.Session.GetCertificates and
+	// validating the chain). When non-nil, Open skips its internal
+	// GET DATA BF21 step and uses this key directly.
+	//
+	// This split is required for SCP11b-on-PIV: the certificate lives
+	// on the Security Domain (BF21 against PIV returns SW=6D00), while
+	// the secure channel is established against PIV. Callers fetch and
+	// verify the key against the SD, then open SCP11 against PIV with
+	// the key already in hand.
+	//
+	// Setting this field does NOT bypass the trust posture requirement.
+	// One of CardTrustPolicy, CardTrustAnchors, or
+	// InsecureSkipCardAuthentication must still be set — the field
+	// asserts "key already obtained," not "trust validation already
+	// completed." Callers that have validated upstream should set
+	// InsecureSkipCardAuthentication to declare that explicitly.
+	PreverifiedCardStaticPublicKey *ecdh.PublicKey
+
 	// HostID is the optional OCE identifier included in the KDF shared
 	// info per GP SCP11 §3.1.2. If set, it is appended to the shared
 	// info as a length-value pair: len(HostID) || HostID.
@@ -424,6 +445,25 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, errors.New("SCP11 HostID/CardGroupID identifiers are not fully implemented (KDF inclusion is wired but the AUTHENTICATE parameter bit and tag 0x84 are not); leave both nil")
 	}
 
+	// Trust-posture guard. Caller must declare one of:
+	//   - CardTrustPolicy: chain validation runs in legacyExtractAndStoreKey.
+	//   - CardTrustAnchors: chain validation runs in extractCardPublicKey.
+	//   - InsecureSkipCardAuthentication: explicit lab-mode opt-out.
+	//
+	// When PreverifiedCardStaticPublicKey is supplied the cert-fetch
+	// path never runs, so the lazy guard inside legacyExtractAndStoreKey
+	// would never fire. Check here so the same posture requirement
+	// applies regardless of which discovery path the caller took.
+	if cfg.CardTrustAnchors == nil &&
+		cfg.CardTrustPolicy == nil &&
+		!cfg.InsecureSkipCardAuthentication {
+		return nil, errors.New(
+			"SCP11 requires an explicit trust posture: set CardTrustPolicy " +
+				"or CardTrustAnchors for production, or InsecureSkipCardAuthentication " +
+				"for lab use",
+		)
+	}
+
 	s := &Session{
 		config:    cfg,
 		transport: t,
@@ -438,7 +478,13 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	}
 
 	// Step 2: Retrieve the card's certificate and extract PK.SD.ECKA.
-	if err := s.getCardCertificate(ctx); err != nil {
+	// If the caller pre-supplied the public key (typical for SCP11b-on-
+	// PIV, where PK.SD.ECKA must come from the Security Domain rather
+	// than the target applet), skip the GET DATA BF21 round-trip.
+	if cfg.PreverifiedCardStaticPublicKey != nil {
+		s.cardStaticPubKey = cfg.PreverifiedCardStaticPublicKey
+		s.state = StateCertRetrieved
+	} else if err := s.getCardCertificate(ctx); err != nil {
 		s.state = StateFailed
 		return nil, fmt.Errorf("get card cert: %w", err)
 	}

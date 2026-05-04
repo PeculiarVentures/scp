@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	pivsession "github.com/PeculiarVentures/scp/piv/session"
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/trust"
 )
@@ -90,6 +91,20 @@ func (tf *trustFlags) applyTrust(cfg *scp11.Config, report *Report) (proceed boo
 		"no trust roots configured; pass --trust-roots <pem> for production "+
 			"or --lab-skip-scp11-trust for wire-protocol smoke")
 	return false, nil
+}
+
+// applyTrustToPIV mutates a piv/session.SCP11bPIVOptions to reflect
+// the trust-flag selection, mirroring applyTrust's signature so the
+// SCP11b-on-PIV smoke command reads the same way as the other smoke
+// commands.
+func (tf *trustFlags) applyTrustToPIV(opts *pivsession.SCP11bPIVOptions, report *Report) (proceed bool, err error) {
+	policy, skip, proceed, err := tf.applyToPIVTrust(report)
+	if err != nil || !proceed {
+		return proceed, err
+	}
+	opts.CardTrustPolicy = policy
+	opts.InsecureSkipCardAuthentication = skip
+	return true, nil
 }
 
 // applyToPIVTrust is the trust-flag projection for piv/session's
