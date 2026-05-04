@@ -113,7 +113,93 @@ func TestParse_SyntheticSCP03(t *testing.T) {
 	}
 }
 
-// TestParse_AcceptsValueWithoutOuterTag verifies Parse handles input
+// TestParse_SyntheticSCP11 verifies that an SCP11 CRD with a 2-byte
+// `i` parameter parses correctly. GP Card Spec v2.3 Amendment F (SCP11
+// v1.3 §6.2) widens the i-parameter from one byte to one-or-two bytes,
+// and real YubiKey 5 firmware ≥5.7.2 emits the 2-byte form. Before this
+// test, the parser rejected the OID outright as "arcs out of byte range".
+//
+// The OID under tag 0x64 is 1.2.840.114283.4.17.3462, where:
+//   - Arc 17 (= 0x11) identifies SCP11 (GP encodes versions in BCD-ish
+//     form: SCP02→0x02, SCP03→0x03, SCP10→0x10, SCP11→0x11).
+//   - Arc 3462 (= 0x0D86) is the variant-flags bitmap packed into a
+//     single OID arc whose integer value exceeds 0xFF.
+//
+// 3462 in ASN.1 OID base-128 encoding takes two bytes: 27*128 + 6,
+// encoded as 0x9B 0x06 (0x80|27 continuation, then terminator 0x06).
+// The full inner OID (tag-0x06 contents) is therefore 10 bytes:
+//
+//	2A 86 48 86 FC 6B   -- 1.2.840.114283 (GP RID)
+//	04                  -- card recognition data sub-tree
+//	11                  -- SCP version byte (SCP11)
+//	9B 06               -- i-parameter packed into one arc (= 3462)
+func TestParse_SyntheticSCP11(t *testing.T) {
+	raw := buildCRD(t,
+		// GP RID marker
+		mustHex(t, "06072A864886FC6B01"),
+		// GP 2.3.1
+		wrap(t, 0x60, mustHex(t, "060A2A864886FC6B02020301")),
+		// SCP11 i=0x0D86: tag 0x06 + length 0x0A + 10 bytes of OID.
+		wrap(t, 0x64, mustHex(t, "060A2A864886FC6B04119B06")),
+	)
+
+	info, err := cardrecognition.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if info.SCPVersion != 0x11 {
+		t.Errorf("SCPVersion = 0x%02X, want 0x11", info.SCPVersion)
+	}
+	if info.SCPParameter != 0x0D86 {
+		t.Errorf("SCPParameter = 0x%04X, want 0x0D86", info.SCPParameter)
+	}
+}
+
+// TestParse_RejectsSCPIParameterTooLarge confirms the 16-bit ceiling on
+// the SCP i-parameter. GP SCP11 v1.3 §6.2 caps the i-parameter at two
+// bytes; anything larger is malformed CRD, not a future encoding we
+// should silently accept.
+//
+// OID 1.2.840.114283.4.17.65536 — last arc is 0x10000, just past the
+// 16-bit boundary. ASN.1 base-128 encodes 65536 as 0x84 0x80 0x00.
+func TestParse_RejectsSCPIParameterTooLarge(t *testing.T) {
+	raw := buildCRD(t,
+		mustHex(t, "06072A864886FC6B01"),
+		// 06 0B 2A864886FC6B 04 11 84 80 00 — 11-byte OID content,
+		// last arc is 65536 which exceeds the 16-bit limit.
+		wrap(t, 0x64, mustHex(t, "060B2A864886FC6B0411848000")),
+	)
+	_, err := cardrecognition.Parse(raw)
+	if !errors.Is(err, cardrecognition.ErrMalformed) {
+		t.Fatalf("expected ErrMalformed, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "i-parameter") {
+		t.Errorf("error should mention i-parameter; got: %v", err)
+	}
+}
+
+// TestParse_RejectsSCPOIDWrongShape covers the tightened length check.
+// A 6-arc OID (missing the i-parameter, or one extra/missing arc
+// elsewhere) is no longer accepted with last-two-arcs heuristics; it's
+// reported as malformed because GP §H.2 fixes the shape at exactly
+// seven arcs.
+func TestParse_RejectsSCPOIDWrongShape(t *testing.T) {
+	raw := buildCRD(t,
+		mustHex(t, "06072A864886FC6B01"),
+		// OID 1.2.840.114283.4.3 — only six arcs, no i-parameter.
+		// 06 07 2A864886FC6B 04 03  (7-byte OID content).
+		wrap(t, 0x64, mustHex(t, "06072A864886FC6B0403")),
+	)
+	_, err := cardrecognition.Parse(raw)
+	if !errors.Is(err, cardrecognition.ErrMalformed) {
+		t.Fatalf("expected ErrMalformed, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "unexpected shape") {
+		t.Errorf("error should mention shape; got: %v", err)
+	}
+}
+
+
 // that's already unwrapped from the outer tag 0x66. Real callers
 // using Probe will get unwrapped value bytes from apdu.Response.Data.
 func TestParse_AcceptsValueWithoutOuterTag(t *testing.T) {
