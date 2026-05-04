@@ -8,6 +8,7 @@ import (
 	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/cmac"
 	"github.com/PeculiarVentures/scp/kdf"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // MockCard simulates a GlobalPlatform card supporting SCP03 for
@@ -420,3 +421,11 @@ func (t *MockTransport) TransmitRaw(_ context.Context, raw []byte) ([]byte, erro
 // Close is a no-op for the SCP03 mock transport. The mock has no
 // physical resource to release.
 func (t *MockTransport) Close() error { return nil }
+
+// TrustBoundary reports TrustBoundaryUnknown for the same reasons
+// the mockcard MockTransport does: this is a test fixture, not a
+// physical transport, and callers gating raw-mode operations
+// should refuse it by default.
+func (t *MockTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

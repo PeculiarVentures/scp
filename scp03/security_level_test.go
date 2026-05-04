@@ -8,6 +8,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/channel"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // erroringTransport rejects every command. Used to drive Open past
@@ -80,4 +81,8 @@ func TestOpen_AllowsPartialSecurityWithEscapeHatch(t *testing.T) {
 	if strings.Contains(err.Error(), "R-ENC without R-MAC") {
 		t.Errorf("escape hatch should bypass partial-security check; got: %v", err)
 	}
+}
+
+func (erroringTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
 }

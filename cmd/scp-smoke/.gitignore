@@ -1,4 +1,0 @@
-# scp-smoke binary built by `go build .` in this directory.
-# Submodules don't inherit the root .gitignore for `go build` outputs
-# whose name matches the module name, so list it explicitly here.
-scp-smoke

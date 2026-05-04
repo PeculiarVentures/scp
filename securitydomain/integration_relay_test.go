@@ -331,3 +331,7 @@ func (r *integrationRelayTransport) Close() error {
 }
 
 var _ transport.Transport = (*integrationRelayTransport)(nil)
+
+func (r *integrationRelayTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

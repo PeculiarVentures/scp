@@ -39,6 +39,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"sync"
@@ -49,6 +50,7 @@ import (
 	"github.com/PeculiarVentures/scp/cmac"
 	"github.com/PeculiarVentures/scp/kdf"
 	"github.com/PeculiarVentures/scp/tlv"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // Card simulates a GP Security Domain with SCP11b support.
@@ -127,6 +129,18 @@ type Card struct {
 	pivPUK        []byte
 	pivPINCounter int
 	pivPUKCounter int
+
+	// pivObjects is the in-memory PIV data object store, keyed by
+	// the 3-byte object ID rendered as a hex string. PUT DATA
+	// (INS=0xDB) writes here; GET DATA (INS=0xCB) reads from here.
+	// Tests use this to verify round-trips through ReadObject /
+	// WriteObject and through GetCertificate / DeleteCertificate.
+	//
+	// Stored values are the inner-payload bytes (the contents of
+	// the 0x53 wrapper that PUT DATA receives). The wrapper is
+	// stripped on write and reapplied on read so callers see the
+	// same shape regardless of which path they took in.
+	pivObjects map[string][]byte
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -175,6 +189,7 @@ func New() (*Card, error) {
 		pivPUK:        []byte("12345678"),
 		pivPINCounter: 3,
 		pivPUKCounter: 3,
+		pivObjects:    make(map[string][]byte),
 	}, nil
 }
 
@@ -348,10 +363,94 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		c.pivPUKCounter = 3
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 
-	case 0xDB: // PIV PUT DATA (cert install on a slot)
+	case 0x24: // PIV CHANGE REFERENCE DATA (PIN or PUK)
 		if !c.pivSelected {
 			return mkSW(0x6985), nil
 		}
+		// Data: oldRef (8 bytes 0xFF-padded) || newRef (8 bytes
+		// 0xFF-padded). P2 selects PIN (0x80) or PUK (0x81).
+		if len(cmd.Data) != 16 {
+			return mkSW(0x6A80), nil
+		}
+		oldRef := cmd.Data[:8]
+		newRef := cmd.Data[8:]
+		switch cmd.P2 {
+		case 0x80: // PIN
+			if c.pivPINCounter == 0 {
+				return mkSW(0x6983), nil
+			}
+			if !bytesEqualPadded(oldRef, c.pivPIN) {
+				c.pivPINCounter--
+				if c.pivPINCounter == 0 {
+					return mkSW(0x6983), nil
+				}
+				return mkSW(0x6300 | uint16(c.pivPINCounter)), nil
+			}
+			c.pivPIN = stripPINPad(newRef)
+			c.pivPINCounter = 3
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		case 0x81: // PUK
+			if c.pivPUKCounter == 0 {
+				return mkSW(0x6983), nil
+			}
+			if !bytesEqualPadded(oldRef, c.pivPUK) {
+				c.pivPUKCounter--
+				if c.pivPUKCounter == 0 {
+					return mkSW(0x6983), nil
+				}
+				return mkSW(0x6300 | uint16(c.pivPUKCounter)), nil
+			}
+			c.pivPUK = stripPINPad(newRef)
+			c.pivPUKCounter = 3
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		default:
+			return mkSW(0x6A86), nil
+		}
+
+	case 0xCB: // PIV GET DATA
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		// Data is a 0x5C-tagged object ID.
+		nodes, err := tlv.Decode(cmd.Data)
+		if err != nil {
+			return mkSW(0x6A80), nil
+		}
+		idTag := tlv.Find(nodes, 0x5C)
+		if idTag == nil || len(idTag.Value) == 0 {
+			return mkSW(0x6A80), nil
+		}
+		key := hex.EncodeToString(idTag.Value)
+		stored, ok := c.pivObjects[key]
+		if !ok {
+			return mkSW(0x6A82), nil // file not found
+		}
+		// Wrap stored payload in 0x53 for the response.
+		wrapper := tlv.Build(tlv.Tag(0x53), stored)
+		return &apdu.Response{
+			Data: wrapper.Encode(),
+			SW1:  0x90, SW2: 0x00,
+		}, nil
+
+	case 0xDB: // PIV PUT DATA (cert install on a slot, generic objects)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		// Data is 0x5C-tagged objectID followed by 0x53-tagged value.
+		nodes, err := tlv.Decode(cmd.Data)
+		if err != nil {
+			// Fall back to the original lenient behavior: any PUT
+			// DATA we cannot parse simply succeeds. Tests written
+			// against the older mock used unstructured payloads.
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		}
+		idTag := tlv.Find(nodes, 0x5C)
+		valTag := tlv.Find(nodes, 0x53)
+		if idTag == nil || valTag == nil {
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		}
+		key := hex.EncodeToString(idTag.Value)
+		c.pivObjects[key] = append([]byte{}, valTag.Value...)
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 
 	case 0xFB: // YubiKey PIV RESET (Yubico extension)
@@ -404,6 +503,45 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 			return mkSW(0x6985), nil
 		}
 		return c.handlePIVMgmtAuth(cmd)
+
+	case 0xFF: // PIV SET MANAGEMENT KEY (YubiKey-specific extension to
+		// SP 800-73-4 — 5.7+ accepts AES variants in addition to 3DES).
+		// Wire format per piv/apdu/commands.go SetManagementKey:
+		// CLA=00 INS=FF P1=FF P2=FF, data = algorithm-byte || TLV(0x9B, newKey).
+		// The mock accepts any well-formed input and updates its own
+		// in-memory PIVMgmtKey/PIVMgmtKeyAlgo so subsequent mgmt-auth
+		// calls validate against the new key. The mock does not gate
+		// on "currently authenticated" because the witness state is
+		// per-handshake rather than per-session; the host side
+		// (piv/session.requireMgmtAuth) is what enforces "must be
+		// authenticated to rotate", and that path is tested
+		// independently. The mock's job here is to model the wire
+		// shape and the post-rotation card state (new key live,
+		// prior auth invalidated), not the access-control policy.
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		if len(cmd.Data) < 4 {
+			return mkSW(0x6700), nil // wrong length
+		}
+		algo := cmd.Data[0]
+		if cmd.Data[1] != 0x9B {
+			return mkSW(0x6A80), nil // wrong data
+		}
+		// Skip the algorithm byte and TLV header (tag 0x9B at index 1,
+		// length at index 2). Body starts at index 3 because all
+		// management-key sizes (16/24/32 bytes) fit in single-byte
+		// length encoding.
+		bodyStart := 3
+		keyLen := int(cmd.Data[2])
+		if len(cmd.Data) < bodyStart+keyLen {
+			return mkSW(0x6700), nil
+		}
+		c.PIVMgmtKey = append([]byte(nil), cmd.Data[bodyStart:bodyStart+keyLen]...)
+		c.PIVMgmtKeyAlgo = algo
+		// Post-rotation: any prior witness state is stale.
+		c.pivMgmtAuthWitness = nil
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 
 	default:
 		return mkSW(0x6D00), nil // instruction not supported
@@ -837,4 +975,18 @@ func stripPINPad(padded []byte) []byte {
 		}
 	}
 	return nil
+}
+
+// TrustBoundary reports TrustBoundaryUnknown. The mock is a test
+// fixture that has no notion of where the host running the
+// program sits relative to anything; it does not represent a
+// physical trust posture. Callers gating raw-mode operations on
+// transport.TrustBoundaryLocalPCSC will refuse this transport,
+// which is the right behavior: tests that need to exercise raw
+// destructive paths against the mock do so by wrapping the
+// transport in a test-only override that explicitly claims
+// TrustBoundaryLocalPCSC and acknowledges the override in its
+// type name.
+func (t *MockTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
 }

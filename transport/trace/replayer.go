@@ -184,5 +184,12 @@ func (r *Replayer) recordedError() error {
 	return errors.New(r.file.Exchanges[r.pos-1].Error)
 }
 
+// TrustBoundary reports TrustBoundaryUnknown. The replayer is a
+// fixture-driven transport with no card behind it; raw-mode gates
+// should refuse it for the same reason they refuse the mocks.
+func (r *Replayer) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
+
 // Compile-time assertion: Replayer is a Transport.
 var _ transport.Transport = (*Replayer)(nil)

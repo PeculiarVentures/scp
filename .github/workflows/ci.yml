@@ -114,13 +114,13 @@ jobs:
           go build -o /tmp/cardrelay-server ./server
           go build -o /tmp/cardrelay-client ./client
 
-      - name: cmd/scp-smoke — verify, vet, test, build
-        working-directory: cmd/scp-smoke
+      - name: cmd/scpctl — verify, vet, test, build
+        working-directory: cmd/scpctl
         run: |
           go mod verify
           go vet ./...
           go test -v -race -count=1 ./...
-          go build -o /tmp/scp-smoke .
+          go build -o /tmp/scpctl .
 
   # Lint for the CGo submodules. Shares the apt install with the
   # test job above but kept separate so a lint failure doesn't
@@ -168,9 +168,9 @@ jobs:
           working-directory: transport/grpc/example
           args: --timeout=5m
 
-      - name: golangci-lint cmd/scp-smoke
+      - name: golangci-lint cmd/scpctl
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-          working-directory: cmd/scp-smoke
+          working-directory: cmd/scpctl
           args: --timeout=5m

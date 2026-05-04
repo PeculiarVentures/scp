@@ -1,0 +1,8 @@
+# scpctl binary built by `go build .` in this directory.
+# Submodules don't inherit the root .gitignore for `go build` outputs
+# whose name matches the module name, so list it explicitly here.
+scpctl
+
+# Pre-rename name retained briefly so a stale tree from before the
+# rename does not accidentally commit the old binary.
+scp-smoke

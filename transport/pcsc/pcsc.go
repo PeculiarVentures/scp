@@ -48,6 +48,7 @@ import (
 	"github.com/ebfe/scard"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // Transport is a PC/SC-backed implementation of the SCP transport
@@ -280,4 +281,12 @@ func isTimeoutError(err error) bool {
 	}
 	return strings.Contains(err.Error(), "timeout") ||
 		strings.Contains(err.Error(), "TIMEOUT")
+}
+
+// TrustBoundary reports that this transport speaks PC/SC directly
+// against a card plugged into the local host. The whole APDU path
+// is in the operator's trust boundary, so raw-mode PIV operations
+// are acceptable when an operator explicitly opts in.
+func (t *Transport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryLocalPCSC
 }
