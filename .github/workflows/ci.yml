@@ -60,10 +60,13 @@ jobs:
   # Without macOS coverage, every Mac-side regression has to wait
   # for a developer to run it locally.
   #
-  # All three submodules share one job: parallelism here costs more
-  # in apt-install overhead than it saves in test time. If any
-  # individual submodule grows large enough to be worth its own
-  # job, split it then.
+  # transport/grpc and transport/grpc/example are split into their
+  # own job below because their go directive is 1.24+ (forced by
+  # google.golang.org/grpc >= 1.79.3, the first release that fixes
+  # CVE-2026-33186). Keeping them in the same matrix here would
+  # mean either dropping Go 1.22 coverage from the rest of the
+  # repo or testing the grpc submodules under a Go version they
+  # can't actually build with.
   submodules:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -99,6 +102,44 @@ jobs:
           go vet ./...
           go build -o /tmp/scp-pcsc-demo .
 
+      - name: cmd/scpctl — verify, vet, test, build
+        working-directory: cmd/scpctl
+        run: |
+          go mod verify
+          go vet ./...
+          go test -v -race -count=1 ./...
+          go build -o /tmp/scpctl .
+
+  # transport/grpc + transport/grpc/example — separate from the
+  # main submodules job because they require Go 1.24+ (forced by
+  # google.golang.org/grpc >= 1.79.3, which is the first release
+  # that includes the CVE-2026-33186 authorization-bypass fix).
+  #
+  # transport/grpc/example/server imports transport/pcsc (CGo) so
+  # this job needs libpcsclite-dev on Linux just like the
+  # submodules job. macOS has PC/SC built into the OS, no install
+  # needed.
+  grpc-submodules:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go-version: ['1.24', '1.25']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Install pcsclite headers (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcsclite-dev
+
       - name: transport/grpc — verify, vet, test
         working-directory: transport/grpc
         run: |
@@ -113,14 +154,6 @@ jobs:
           go vet ./...
           go build -o /tmp/cardrelay-server ./server
           go build -o /tmp/cardrelay-client ./client
-
-      - name: cmd/scpctl — verify, vet, test, build
-        working-directory: cmd/scpctl
-        run: |
-          go mod verify
-          go vet ./...
-          go test -v -race -count=1 ./...
-          go build -o /tmp/scpctl .
 
   # Lint for the CGo submodules. Shares the apt install with the
   # test job above but kept separate so a lint failure doesn't
@@ -154,6 +187,31 @@ jobs:
           working-directory: transport/pcsc/example
           args: --timeout=5m
 
+      - name: golangci-lint cmd/scpctl
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: cmd/scpctl
+          args: --timeout=5m
+
+  # Lint for the grpc submodules — separate from submodules-lint
+  # because they require Go 1.24+. transport/grpc/example/server
+  # imports transport/pcsc (CGo) so libpcsclite-dev is required.
+  grpc-submodules-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install pcsclite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcsclite-dev
+
       - name: golangci-lint transport/grpc
         uses: golangci/golangci-lint-action@v6
         with:
@@ -166,11 +224,4 @@ jobs:
         with:
           version: latest
           working-directory: transport/grpc/example
-          args: --timeout=5m
-
-      - name: golangci-lint cmd/scpctl
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          working-directory: cmd/scpctl
           args: --timeout=5m
