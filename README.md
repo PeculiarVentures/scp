@@ -444,7 +444,8 @@ For end-to-end verification against an actual card, the [`cmd/scp-smoke`](./cmd/
 | `scp11a-sd-read` | Mutual auth using a host OCE keypair + cert chain. Asserts the SCP11a-specific invariant `OCEAuthenticated() == true`. Requires a card with the OCE root pre-provisioned (see `bootstrap-oce`). |
 | `scp11b-piv-verify` | Open SCP11b targeting the PIV applet; `VERIFY PIN` over the wrapped channel. |
 | `bootstrap-oce` | Day-1 provisioning: install OCE public key (and optionally cert chain + CA SKI) onto a card via SCP03 with factory keys. Destructive; gated by `--confirm-write` (dry-run otherwise). |
-| `piv-provision` | Generate a PIV slot keypair, optionally install a cert and fetch attestation, all over an SCP11b session. Destructive; same `--confirm-write` gate. |
+| `piv-provision` | Generate a PIV slot keypair, optionally install a cert and fetch attestation, all over an SCP11b session. Includes management-key mutual auth and cert-to-pubkey binding check. Destructive; same `--confirm-write` gate. |
+| `piv-reset` | Block PIN and PUK, then send the YubiKey PIV reset APDU. Erases ALL 24 PIV slots, certs, and resets PIN/PUK/management key to factory defaults. Use to recover from a wrong-cert provisioning. Destructive; gated by `--confirm-write`. |
 | `test` | Run probe + the SD/PIV reads in sequence with a single PASS/FAIL/SKIP summary. Provisioning commands are not in `test` (they're destructive and sequencing-sensitive). |
 
 ```
