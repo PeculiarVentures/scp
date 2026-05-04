@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/piv"
 )
 
 // PUKKeyRef is the PIV key reference for the PUK
@@ -29,13 +30,13 @@ const PINKeyRef byte = 0x80
 // (sending wrong PUKs in a loop until 6983) as a precondition for
 // the reset APDU — that's how YubiKey gates accidental wipes.
 func ResetRetryCounter(puk, newPIN []byte) (*apdu.Command, error) {
-	if len(puk) == 0 || len(puk) > MaxPINLength {
-		return nil, fmt.Errorf("PUK length %d outside [1, %d]", len(puk), MaxPINLength)
+	if len(puk) == 0 || len(puk) > piv.MaxPINLength {
+		return nil, fmt.Errorf("PUK length %d outside [1, %d]", len(puk), piv.MaxPINLength)
 	}
-	if len(newPIN) == 0 || len(newPIN) > MaxPINLength {
-		return nil, fmt.Errorf("new PIN length %d outside [1, %d]", len(newPIN), MaxPINLength)
+	if len(newPIN) == 0 || len(newPIN) > piv.MaxPINLength {
+		return nil, fmt.Errorf("new PIN length %d outside [1, %d]", len(newPIN), piv.MaxPINLength)
 	}
-	data := make([]byte, 0, 2*MaxPINLength)
+	data := make([]byte, 0, 2*piv.MaxPINLength)
 	data = append(data, padPIN(puk)...)
 	data = append(data, padPIN(newPIN)...)
 	return &apdu.Command{
@@ -48,10 +49,10 @@ func ResetRetryCounter(puk, newPIN []byte) (*apdu.Command, error) {
 	}, nil
 }
 
-// padPIN right-pads a PIN/PUK to MaxPINLength bytes with 0xFF per
-// NIST SP 800-73-4 Part 2 §3.2.1. Caller guarantees len <= MaxPINLength.
+// padPIN right-pads a PIN/PUK to piv.MaxPINLength bytes with 0xFF per
+// NIST SP 800-73-4 Part 2 §3.2.1. Caller guarantees len <= piv.MaxPINLength.
 func padPIN(p []byte) []byte {
-	out := make([]byte, MaxPINLength)
+	out := make([]byte, piv.MaxPINLength)
 	for i := range out {
 		out[i] = 0xFF
 	}

@@ -26,6 +26,7 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/piv"
 	"github.com/PeculiarVentures/scp/tlv"
 )
 
@@ -212,10 +213,8 @@ func SetManagementKey(algorithm byte, newKey []byte) (*apdu.Command, error) {
 	}, nil
 }
 
-// MaxPINLength is the maximum PIN length accepted by VerifyPIN. PIV
-// VERIFY (NIST SP 800-73-4 Part 2 §3.2.1) sends a fixed 8-byte data
-// field padded with 0xFF, so 8 bytes is the inherent ceiling.
-const MaxPINLength = 8
+// piv.MaxPINLength is defined in the parent piv package
+// (piv/types.go) and referenced here as piv.piv.MaxPINLength.
 
 // VerifyPIN builds a VERIFY command for PIN authentication. The PIN
 // is padded to 8 bytes with 0xFF.
@@ -227,10 +226,10 @@ func VerifyPIN(pin []byte) (*apdu.Command, error) {
 	if len(pin) == 0 {
 		return nil, errors.New("PIN cannot be empty")
 	}
-	if len(pin) > MaxPINLength {
-		return nil, fmt.Errorf("PIN exceeds %d bytes (got %d)", MaxPINLength, len(pin))
+	if len(pin) > piv.MaxPINLength {
+		return nil, fmt.Errorf("PIN exceeds %d bytes (got %d)", piv.MaxPINLength, len(pin))
 	}
-	padded := make([]byte, MaxPINLength)
+	padded := make([]byte, piv.MaxPINLength)
 	for i := range padded {
 		padded[i] = 0xFF
 	}
