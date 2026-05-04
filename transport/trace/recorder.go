@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PeculiarVentures/scp/aid"
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/transport"
@@ -86,6 +87,7 @@ func (r *Recorder) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respo
 	} else {
 		ex.CommandHex = cmdBytes
 		fillHeaderFields(&ex, cmdBytes)
+		annotateAID(&ex, cmdBytes)
 	}
 	if err != nil {
 		ex.Error = err.Error()
@@ -115,6 +117,7 @@ func (r *Recorder) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) 
 		DurationNS: dur.Nanoseconds(),
 	}
 	fillHeaderFields(&ex, raw)
+	annotateAID(&ex, raw)
 	if err != nil {
 		ex.Error = err.Error()
 	} else {
@@ -216,6 +219,57 @@ func fillHeaderFields(ex *Exchange, cmd []byte) {
 	ex.INS = HexBytes{cmd[1]}
 	ex.P1 = HexBytes{cmd[2]}
 	ex.P2 = HexBytes{cmd[3]}
+}
+
+// annotateAID populates ex.AIDName when the command is SELECT-by-AID
+// (INS=0xA4, P1=0x04) and the data field matches a registered AID.
+//
+// Best-effort: a malformed APDU, an AID not in the registry, or a
+// non-SELECT command all leave AIDName empty. Callers reading the
+// JSON should treat AIDName as a hint, not authoritative metadata
+// about what the card actually selected.
+func annotateAID(ex *Exchange, cmd []byte) {
+	aidBytes := extractSelectAID(cmd)
+	if len(aidBytes) == 0 {
+		return
+	}
+	if entry := aid.Lookup(aidBytes); entry != nil {
+		ex.AIDName = entry.Name
+	}
+}
+
+// extractSelectAID returns the AID bytes from a SELECT-by-AID APDU,
+// or nil if cmd is not a SELECT-by-AID or is malformed. Handles both
+// short and extended length encodings per ISO 7816-4 §5.1.
+//
+// Wire shapes accepted:
+//
+//	short:    00 A4 04 .. Lc <AID> [Le]
+//	extended: 00 A4 04 .. 00 LcHi LcLo <AID> [LeHi LeLo]
+//
+// We don't bother validating CLA — proprietary CLAs (0x80, 0x84) are
+// fine for SELECT in practice, and the lookup is best-effort anyway.
+func extractSelectAID(cmd []byte) []byte {
+	if len(cmd) < 6 || cmd[1] != 0xA4 || cmd[2] != 0x04 {
+		return nil
+	}
+	if cmd[4] != 0x00 {
+		// Short form: byte 4 is Lc.
+		lc := int(cmd[4])
+		if lc == 0 || 5+lc > len(cmd) {
+			return nil
+		}
+		return cmd[5 : 5+lc]
+	}
+	// Extended form: bytes 5-6 are Lc.
+	if len(cmd) < 8 {
+		return nil
+	}
+	lc := int(cmd[5])<<8 | int(cmd[6])
+	if lc == 0 || 7+lc > len(cmd) {
+		return nil
+	}
+	return cmd[7 : 7+lc]
 }
 
 // encodeResponse serializes a *apdu.Response back to wire bytes.
