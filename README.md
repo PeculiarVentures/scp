@@ -5,7 +5,7 @@ A Go implementation of GlobalPlatform Secure Channel Protocols for establishing 
 Two protocols are supported through a unified API:
 
 - **SCP03** (Amendment D) — Symmetric key protocol using pre-shared AES keys (AES-128/192/256, S8 and S16 modes)
-- **SCP11** (Amendment F) — Asymmetric protocol using ECDH key agreement and X.509 certificates, with variants SCP11a, SCP11b, and SCP11c. **YubiKey-compatible full-security profile only**: NIST P-256, AES-128 session keys, and `C-MAC | C-DEC | R-MAC | R-ENC`. Other GP Amendment F security levels and curves are out of scope; see the [Profile and limitations](#profile-and-limitations) section for specifics.
+- **SCP11** (Amendment F) — Asymmetric protocol using ECDH key agreement and X.509 certificates, with variants SCP11a, SCP11b, and SCP11c. **YubiKey-compatible full-security profile only**: NIST P-256, AES-128 session keys, 8-byte cryptograms and MACs (S8), and `C-MAC | C-DEC | R-MAC | R-ENC`. Other GP Amendment F security levels and curves (P-384, Brainpool, S16 16-byte MACs, partial security levels) are out of scope; see the [Profile and limitations](#profile-and-limitations) section for specifics.
 
 Both protocols produce a `scp.Session` with the same `Transmit` method. The consumer writes protocol-agnostic code after the initial `Open` call.
 
@@ -210,10 +210,11 @@ sess, err := session.Open(ctx, transport, &session.Config{
 
 // SCP11a — mutual authentication with certificates
 sess, err := session.Open(ctx, transport, &session.Config{
-    Variant:        session.SCP11a,
-    KeyID:          0x11,
-    OCEPrivateKey:  myECDSAKey,
-    OCECertificate: myCert, // must correspond to OCEPrivateKey
+    Variant:         session.SCP11a,
+    KeyID:           0x11,
+    OCEPrivateKey:   myECDSAKey,
+    OCECertificates: []*x509.Certificate{myOCECert}, // leaf-last; must correspond to OCEPrivateKey
+    OCEKeyReference: session.KeyRef{KID: 0x10, KVN: 0x03}, // card-side OCE key slot (KID 0x10 is the YubiKey default)
     CardTrustPolicy: &trust.Policy{Roots: rootPool},
 })
 ```
@@ -269,7 +270,7 @@ GP Amendment F also defines P-384, Brainpool P-256, AES-192/256, and partial sec
 
 ### SCP11a/c key/certificate consistency
 
-For mutual-auth variants, `Open` verifies that `OCEPrivateKey` corresponds to `OCECertificate` before sending anything to the card. A mismatch is rejected immediately rather than discovered in the second ECDH.
+For mutual-auth variants, `Open` verifies that `OCEPrivateKey` corresponds to the leaf entry in `OCECertificates` before sending anything to the card. A mismatch is rejected immediately rather than discovered in the second ECDH.
 
 ### SCP11a/c transport requirements
 
@@ -315,7 +316,7 @@ These are byte-exact known-answer tests using a recording transport, so they cat
 |---|---|
 | GP Card Spec v2.3.1 §11 | Security Domain APDU commands: PUT KEY, DELETE, STORE DATA, GET DATA |
 | GP Amendment D (SCP03) v1.2 | INITIALIZE UPDATE, EXTERNAL AUTHENTICATE, session key derivation, secure messaging, S8 and S16 modes |
-| GP Amendment F (SCP11) v1.3 | SCP11a, SCP11b, SCP11c; ECKA; X9.63 KDF; receipt verification (all variants). **Subset only** — full-security profile, P-256, AES-128 session keys; other security levels, curves, and v1.4 features (extended X.509 handling, additional auth-rule options) are out of scope. |
+| GP Amendment F (SCP11) v1.3 / v1.4 (subset) | SCP11a, SCP11b, SCP11c; ECKA; X9.63 KDF; **8-byte cryptograms and MACs (S8 only)**; receipt verification required by default for all three variants. **Subset only** — full-security profile, P-256, AES-128 session keys; the receipt-required-for-SCP11b default tracks Amendment F v1.4 and modern YubiKey behavior (older v1.3 cards that omit the SCP11b receipt need `InsecureAllowSCP11bWithoutReceipt`); other security levels, curves, S16 16-byte MACs, and remaining v1.4 features (extended X.509 handling, HostID/CardGroupID auth-rule options) are out of scope. |
 | GP Card Spec v2.3 §10.8 | Secure messaging: C-MAC, C-ENC, R-MAC, R-ENC |
 | NIST SP 800-108 | KDF in counter mode with AES-CMAC |
 | NIST SP 800-38B | AES-CMAC |

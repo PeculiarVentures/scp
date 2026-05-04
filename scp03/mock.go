@@ -257,11 +257,17 @@ type MockTransport struct {
 	card *MockCard
 }
 
-func (t *MockTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+// Transmit dispatches a parsed APDU to the mock card and returns
+// the parsed response. Implements transport.Transport.
+func (t *MockTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	return t.card.processAPDU(cmd)
 }
 
-func (t *MockTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+// TransmitRaw parses the raw request bytes (short-form ISO 7816-4
+// only — the SCP03 mock does not support extended-length APDUs)
+// and dispatches them to the mock card. Implements
+// transport.Transport.
+func (t *MockTransport) TransmitRaw(_ context.Context, raw []byte) ([]byte, error) {
 	cmd := &apdu.Command{Le: -1}
 	if len(raw) >= 4 {
 		cmd.CLA = raw[0]
@@ -282,4 +288,6 @@ func (t *MockTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, er
 	return append(resp.Data, resp.SW1, resp.SW2), nil
 }
 
+// Close is a no-op for the SCP03 mock transport. The mock has no
+// physical resource to release.
 func (t *MockTransport) Close() error { return nil }

@@ -340,14 +340,19 @@ type MockTransport struct {
 	closed bool
 }
 
-func (t *MockTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+// Transmit dispatches a parsed APDU to the mock card and returns
+// the parsed response. Implements transport.Transport.
+func (t *MockTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	if t.closed {
 		return nil, errors.New("transport closed")
 	}
 	return t.card.processAPDU(cmd)
 }
 
-func (t *MockTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+// TransmitRaw parses raw request bytes (short or extended ISO 7816-4
+// form) via parseRaw and dispatches them to the mock card.
+// Implements transport.Transport.
+func (t *MockTransport) TransmitRaw(_ context.Context, raw []byte) ([]byte, error) {
 	if t.closed {
 		return nil, errors.New("transport closed")
 	}
@@ -358,6 +363,9 @@ func (t *MockTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, er
 	return append(resp.Data, resp.SW1, resp.SW2), nil
 }
 
+// Close marks the transport closed; subsequent Transmit / TransmitRaw
+// calls return an error. The underlying mock card is not destroyed —
+// a fresh transport can be obtained from the same card.
 func (t *MockTransport) Close() error { t.closed = true; return nil }
 
 // --- Helpers ---

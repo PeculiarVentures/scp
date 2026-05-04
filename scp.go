@@ -19,7 +19,7 @@
 //
 //	// SCP11b with mock card (for testing):
 //	card, _ := mockcard.New()
-//	sess, _ := scp11.Open(ctx, card.Transport(), scp11.DefaultConfig())
+//	sess, _ := session.Open(ctx, card.Transport(), session.DefaultConfig())
 //	defer sess.Close()
 //
 //	// SCP03 with static keys:
@@ -36,7 +36,7 @@
 // The library is layered so each component can be used independently:
 //
 //	┌─────────────────────────────────┐
-//	│  scp03.Open() / scp11.Open()    │  Protocol-specific handshake
+//	│  scp03.Open() / session.Open()  │  Protocol-specific handshake
 //	├─────────────────────────────────┤
 //	│  scp.Session (common interface) │  Transmit, Close
 //	├─────────────────────────────────┤

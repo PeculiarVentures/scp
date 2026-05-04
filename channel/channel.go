@@ -15,7 +15,6 @@
 //
 // This implementation follows GP Card Spec v2.3 §10.8 and matches
 // the SCP11 state machine defined in GP Card Spec v2.3 Amendment D §10.8.
-
 package channel
 
 import (
@@ -88,6 +87,9 @@ const (
 // SecurityLevel defines which secure messaging operations to apply.
 type SecurityLevel uint8
 
+// SecurityLevel-related constants used to negotiate which secure-
+// messaging operations apply to commands and responses, plus the
+// MAC truncation lengths for S8 vs S16 mode.
 const (
 	LevelCMAC  SecurityLevel = 0x01 // Command MAC
 	LevelCDEC  SecurityLevel = 0x02 // Command decryption (encryption)
