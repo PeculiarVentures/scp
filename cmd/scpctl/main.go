@@ -88,8 +88,9 @@ var smokeCommands = map[string]func(ctx context.Context, env *runEnv, args []str
 	"scp11b-sd-read":    cmdSCP11bSDRead,
 	"scp11a-sd-read":    cmdSCP11aSDRead,
 	"scp11b-piv-verify": cmdSCP11bPIVVerify,
-	"bootstrap-oce":     cmdBootstrapOCE,
-	"piv-provision":     cmdPIVProvision,
+	"bootstrap-oce":         cmdBootstrapOCE,
+	"bootstrap-scp11a-sd":   cmdBootstrapSCP11aSD,
+	"piv-provision":         cmdPIVProvision,
 	"piv-reset":         cmdPIVReset,
 	"test":              cmdTest,
 }
@@ -278,6 +279,13 @@ Subcommands:
                        chain + CA SKI) onto a card via SCP03. Day-1
                        provisioning step that enables scp11a-sd-read.
                        Destructive; gated by --confirm-write.
+  bootstrap-scp11a-sd  Install the card-side SCP11a SD ECDH key
+                       (SK.SD.ECKA, KID=0x11/KVN=0x01 by default)
+                       via SCP03. Two modes: 'oncard' uses Yubico's
+                       GENERATE KEY extension so the private key
+                       never leaves the SE; 'import' uses GP PUT KEY
+                       to install a host-generated or supplied
+                       keypair. Destructive; gated by --confirm-write.
   piv-provision        Generate a PIV slot keypair and optionally install
                        a certificate / fetch attestation, all over an
                        SCP11b session targeting the PIV applet.
@@ -433,10 +441,11 @@ Subcommands:
            'scpctl smoke probe'. Read-only.
 
 Forthcoming subcommands (still reachable under 'scpctl smoke' for now):
-  scp03-read     SCP03 SD session read.
-  scp11b-read    SCP11b SD session read.
-  scp11a-read    SCP11a (mutual auth) SD session read.
-  bootstrap-oce  Install OCE public key onto a card via SCP03.
+  scp03-read           SCP03 SD session read.
+  scp11b-read          SCP11b SD session read.
+  scp11a-read          SCP11a (mutual auth) SD session read.
+  bootstrap-oce        Install OCE public key onto a card via SCP03.
+  bootstrap-scp11a-sd  Install card-side SCP11a SD ECDH key via SCP03.
 
 Use "scpctl sd <subcommand> -h" for per-command flags.
 `)
