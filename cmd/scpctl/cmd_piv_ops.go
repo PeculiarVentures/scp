@@ -879,10 +879,23 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 // blocks here would be an opinionated choice that doesn't belong in
 // a session method. The smoke piv-reset subcommand has the
 // block-then-reset flow for hardware harnesses.
+//
+// Reset is the most-destructive PIV operation: every slot keypair
+// is erased, every certificate is dropped, PIN/PUK/management-key
+// all return to factory defaults. A wrong-card reset is a card
+// that has to be re-enrolled, with all of the trust-bootstrap cost
+// that implies. So this command takes a second gate beyond
+// --confirm-write: --confirm-reset-piv. The two-flag pattern
+// distinguishes 'I am about to overwrite a slot' from 'I am about
+// to wipe the whole applet' so an operator who pastes a stale
+// command line cannot accidentally turn a slot rotation into a
+// full reset.
 func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv reset", env)
 	reader := fs.String("reader", "", "PC/SC reader name.")
 	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive operation.")
+	confirmReset := fs.Bool("confirm-reset-piv", false,
+		"Required (in addition to --confirm-write): confirm the operator understands this is a full PIV applet reset, not a single-slot operation. Erases all 24 slot keys, all certificates, and resets PIN/PUK/management-key to factory defaults.")
 	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
@@ -890,6 +903,9 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if !*confirm {
 		return fmt.Errorf("piv reset erases all slots, certificates, and credentials; pass --confirm-write to proceed")
+	}
+	if !*confirmReset {
+		return fmt.Errorf("piv reset additionally requires --confirm-reset-piv to distinguish a full applet wipe from a single-slot operation; pass both flags to proceed")
 	}
 
 	t, err := env.connect(ctx, *reader)

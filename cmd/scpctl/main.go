@@ -345,13 +345,18 @@ Subcommands:
 
   reset                 Reset the PIV applet to factory state. Erases
                         all slots, certificates, and credentials.
-                        YubiKey-only. Destructive. The card-side
-                        precondition (PIN and PUK both blocked) is
-                        the operator's responsibility; for the
-                        block-then-reset harness flow, see
-                        'scpctl smoke piv-reset'.
+                        YubiKey-only. Destructive. Requires both
+                        --confirm-write and --confirm-reset-piv.
+                        The card-side precondition (PIN and PUK
+                        both blocked) is the operator's
+                        responsibility; for the block-then-reset
+                        harness flow, see 'scpctl smoke piv-reset'.
 
-Destructive subcommands all require --confirm-write. Operations that
+Destructive subcommands all require --confirm-write. 'reset' takes
+the additional --confirm-reset-piv flag because a full applet wipe
+is qualitatively different from a single-slot operation; the second
+flag prevents an operator from accidentally turning a slot rotation
+into a full reset by pasting a stale command line. Operations that
 the active profile does not claim (e.g. ATTEST under StandardPIV,
 Ed25519 under YubiKey 5.6) are refused host-side before any APDU
 goes on the wire, with piv.ErrUnsupportedByProfile.
