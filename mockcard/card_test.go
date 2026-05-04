@@ -448,3 +448,55 @@ func TestCard_HandshakeINS_RefusedUnderSM(t *testing.T) {
 		}
 	}
 }
+
+// TestCard_SecureMessaging_ExtendedLcMAC is a regression test for
+// the MAC input encoding when wrapped APDU data exceeds 255 bytes.
+// Pre-fix, the mock computed the C-MAC with byte(len(data)) for the
+// Lc field unconditionally; the host uses extended-length encoding
+// (0x00 || hi || lo) for the same Lc, so any command whose
+// wrapped data exceeded 255 bytes (cert installs, large STORE DATA
+// chunks) failed MAC verification on the mock and got 6982 back.
+//
+// piv-provision's PUT CERTIFICATE step surfaced this — the cert
+// PUT DATA APDU is ~280 bytes — and the fix makes the mock's MAC
+// input layout track channel.SecureChannel.Wrap's: extended Lc
+// when len(data) > 0xFF.
+//
+// The test exercises a >255-byte echo round-trip (INS 0xFD echoes
+// data back) and asserts the wrapped command verifies and the
+// response decrypts cleanly.
+func TestCard_SecureMessaging_ExtendedLcMAC(t *testing.T) {
+	ctx := context.Background()
+	card, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg.InsecureSkipCardAuthentication = true
+	sess, err := scp11.Open(ctx, card.Transport(), cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+
+	// 300-byte payload — comfortably over the 255-byte threshold.
+	// Echo (INS 0xFD) returns the same data; we just need any
+	// command whose wrapped form crosses into extended-Lc territory.
+	payload := make([]byte, 300)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	resp, err := sess.Transmit(ctx, &apdu.Command{
+		CLA: 0x80, INS: 0xFD, P1: 0, P2: 0,
+		Data: payload, Le: 0,
+	})
+	if err != nil {
+		t.Fatalf("transmit large payload: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("SW=%04X (extended-Lc MAC verification failed?)", resp.StatusWord())
+	}
+	if !bytes.Equal(resp.Data, payload) {
+		t.Errorf("echoed data differs from sent (lengths sent=%d got=%d)", len(payload), len(resp.Data))
+	}
+}

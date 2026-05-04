@@ -156,6 +156,26 @@ The CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK). A card who
 
 `--store-chain` calls `STORE CERTIFICATES` so the card has the full OCE chain locally, useful when its trust model validates against the chain rather than just the root. `--ca-ski` registers a CA Subject Key Identifier via `STORE CA-IDENTIFIER`. Either or both can be omitted; the OCE public-key install is the only required step.
 
+### piv-provision — generate a slot keypair (and optionally install a cert)
+
+Provisions a PIV slot through an SCP11b-secured channel: `VERIFY PIN` → `GENERATE KEY` → optional `PUT CERTIFICATE` → optional `ATTESTATION`. Same `--confirm-write` dry-run gating as `bootstrap-oce`.
+
+```bash
+scp-smoke piv-provision \
+  --reader "YubiKey" \
+  --pin 123456 \
+  --slot 9a \
+  --algorithm eccp256 \
+  --cert /path/to/leaf.pem \
+  --attest \
+  --lab-skip-scp11-trust \
+  --confirm-write
+```
+
+Slots: `9a` (PIV Authentication), `9c` (Digital Signature), `9d` (Key Management), `9e` (Card Authentication), and the `82` retired-key range. Algorithms: `rsa2048`, `eccp256`, `eccp384`, plus YubiKey 5.7+ exclusives `ed25519` and `x25519`.
+
+**Real-card authorization caveat.** PIV `GENERATE KEY` and `PUT CERTIFICATE` are gated on PIV management-key authentication on stock cards. The library doesn't yet expose a management-key auth builder, so against a card with a non-default management key these writes will be refused with `6982`. On YubiKey 5.7+ with an SCP11 session, the firmware may accept SCP-authenticated provisioning in lieu of management auth; this varies by firmware. The mock card does not enforce PIV authorization, so the smoke test exercises wire-layer correctness, not real-world provisioning policy.
+
 ### `test` aggregator
 
 Runs `probe` + the SCP smoke checks in sequence and prints a single PASS/FAIL/SKIP summary at the end.
@@ -192,7 +212,7 @@ The library implementations and behaviors validated by this tool are documented 
 
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `test`.
-- Next: `bootstrap-oce` (provision an OCE root onto a card with an SCP03 session), PIV provisioning commands (key generation, certificate install) over an SCP session, custom SCP03 key flags.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision`, `test`.
+- Next: PIV management-key authentication builder in the `piv` package (so `piv-provision` works against cards with non-default management keys), custom SCP03 key flags for `bootstrap-oce` against rotated cards.
 - Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
 - Deferred: `restore-yubikey-factory` (destructive; needs explicit-destructive-confirmation flag, OCE-auth requirement, SCP11b refusal, YubiKey-only).

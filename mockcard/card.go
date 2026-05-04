@@ -199,6 +199,31 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		_, _ = rand.Read(pub[1:])
 		return &apdu.Response{Data: pub, SW1: 0x90, SW2: 0x00}, nil
 
+	case 0x20: // PIV VERIFY (PIN)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		// Mock does not validate PIN — accepts any value. Real cards
+		// gate writes (PUT DATA, GENERATE KEY) on PIN, but the mock's
+		// purpose is to verify the host's APDU sequencing, not to
+		// model PIV authorization state.
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+
+	case 0xDB: // PIV PUT DATA (cert install on a slot)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+
+	case 0xF9: // YubiKey ATTESTATION (Yubico extension)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		// Return a small synthetic blob that looks like cert data so
+		// the host can decode "got a non-empty response." Not a real
+		// attestation; the mock can't sign a meaningful one.
+		return &apdu.Response{Data: []byte{0x30, 0x82, 0x01, 0x00}, SW1: 0x90, SW2: 0x00}, nil
+
 	default:
 		return mkSW(0x6D00), nil // instruction not supported
 	}
@@ -397,7 +422,19 @@ func (c *Card) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	var macInput []byte
 	macInput = append(macInput, sess.ch.ExportMACChain()...)
 	macInput = append(macInput, cmd.CLA, cmd.INS, cmd.P1, cmd.P2)
-	macInput = append(macInput, byte(len(data)))
+	// Lc encoding must match what channel.SecureChannel.Wrap puts in
+	// the MAC input on the host side: extended length (3 bytes:
+	// 0x00 || hi || lo) when len(data) > 0xFF, otherwise single
+	// byte. Pre-fix the mock used byte(len(data)) unconditionally,
+	// which silently truncated for any wrapped payload over 255 bytes
+	// (cert installs, large STORE DATA chunks) and produced a MAC
+	// mismatch the mock returned as 6982. piv-provision tripping on
+	// PUT CERTIFICATE is what surfaced this.
+	if len(data) > 0xFF {
+		macInput = append(macInput, 0x00, byte(len(data)>>8), byte(len(data)))
+	} else {
+		macInput = append(macInput, byte(len(data)))
+	}
 	macInput = append(macInput, encData...)
 
 	expectedMAC, err := cmac.AESCMAC(sess.keys.SMAC, macInput)

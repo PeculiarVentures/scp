@@ -716,3 +716,144 @@ func writeOCEFixturePEMs(t *testing.T) (keyPath, certPath string) {
 	}
 	return keyPath, certPath
 }
+
+// TestPIVProvision_DryRun confirms --confirm-write is required for
+// any APDU transmission. Without it the mock connect must not be
+// called.
+func TestPIVProvision_DryRun(t *testing.T) {
+	connectCalled := false
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			connectCalled = true
+			return nil, errors.New("dry-run should not connect")
+		},
+	}
+	if err := cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+	}); err != nil {
+		t.Fatalf("dry-run cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	}
+	if connectCalled {
+		t.Error("dry-run should not have connected")
+	}
+	if !strings.Contains(buf.String(), "dry-run") {
+		t.Errorf("output should mention dry-run; got:\n%s", buf.String())
+	}
+}
+
+// TestPIVProvision_GenerateKey_Smoke runs the full provisioning flow
+// against the SCP11 mock. Asserts the host issued VERIFY PIN and
+// GENERATE KEY in order, the smoke output reports PASS for both, and
+// the mock returned a non-empty pubkey blob.
+func TestPIVProvision_GenerateKey_Smoke(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+		"--algorithm", "eccp256",
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err != nil {
+		t.Fatalf("cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"open SCP11b vs PIV",
+		"VERIFY PIN",
+		"GENERATE KEY",
+		"PASS",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, " FAIL") {
+		t.Errorf("output contains FAIL\n--- output ---\n%s", out)
+	}
+}
+
+// TestPIVProvision_WithCertAndAttest exercises the optional flags:
+// --cert installs a cert via PUT CERTIFICATE, --attest fetches
+// the attestation. The mock ACKs both with synthetic data.
+func TestPIVProvision_WithCertAndAttest(t *testing.T) {
+	_, certPath := writeOCEFixturePEMs(t) // any cert works for the mock
+
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9c",
+		"--cert", certPath,
+		"--attest",
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err != nil {
+		t.Fatalf("cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"PUT CERTIFICATE",
+		"ATTESTATION",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}
+
+// TestPIVProvision_RejectsBadSlotAndAlgo confirms inputs are
+// validated at the CLI boundary, not deferred to opaque card errors.
+func TestPIVProvision_RejectsBadSlotAndAlgo(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"unknown slot", []string{"--reader", "f", "--pin", "1", "--slot", "ab"}},
+		{"unknown algorithm", []string{"--reader", "f", "--pin", "1", "--algorithm", "frob256"}},
+		{"missing pin", []string{"--reader", "f"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			env := &runEnv{out: &buf, errOut: &buf, connect: nil}
+			err := cmdPIVProvision(context.Background(), env, tc.args)
+			if err == nil {
+				t.Fatal("expected usage error")
+			}
+			var ue *usageError
+			if !errors.As(err, &ue) {
+				t.Errorf("expected *usageError; got %T: %v", err, err)
+			}
+		})
+	}
+}
