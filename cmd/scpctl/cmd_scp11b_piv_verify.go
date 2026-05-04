@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/PeculiarVentures/scp/piv"
+	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
 	"github.com/PeculiarVentures/scp/scp11"
 )
 
@@ -77,7 +77,7 @@ func cmdSCP11bPIVVerify(ctx context.Context, env *runEnv, args []string) error {
 	// VerifyPIN may return an error if the PIN bytes are an invalid
 	// shape (wrong length / non-numeric). Surface that as a usage
 	// error rather than a card error; we never reached the card.
-	cmd, err := piv.VerifyPIN([]byte(*pin))
+	cmd, err := pivapdu.VerifyPIN([]byte(*pin))
 	if err != nil {
 		return &usageError{msg: fmt.Sprintf("invalid PIN: %v", err)}
 	}

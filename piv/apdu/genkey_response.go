@@ -1,4 +1,4 @@
-package piv
+package pivapdu
 
 import (
 	"crypto"

@@ -18,7 +18,7 @@
 //
 // Each function returns a plain *apdu.Command; the session's Transmit
 // method wraps it with secure messaging before sending.
-package piv
+package pivapdu
 
 import (
 	"crypto/x509"

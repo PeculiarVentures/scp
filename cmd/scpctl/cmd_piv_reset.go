@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
-	"github.com/PeculiarVentures/scp/piv"
+	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
 	"github.com/PeculiarVentures/scp/scp11"
 )
 
@@ -135,7 +135,7 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("block PUK", fmt.Sprintf("blocked after %d wrong attempts", pukAttempts))
 
 	// Step 3: send the reset APDU.
-	resetCmd := piv.Reset()
+	resetCmd := pivapdu.Reset()
 	resp, err := sess.Transmit(ctx, resetCmd)
 	if err != nil {
 		report.Fail("PIV reset (transmit)", err.Error())
@@ -180,7 +180,7 @@ type sessionTransmitter interface {
 func blockPIVPIN(ctx context.Context, sess sessionTransmitter, maxAttempts int) (int, error) {
 	wrong := []byte("00000000")
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		cmd, err := piv.VerifyPIN(wrong)
+		cmd, err := pivapdu.VerifyPIN(wrong)
 		if err != nil {
 			return attempt - 1, fmt.Errorf("build VERIFY PIN: %w", err)
 		}
@@ -210,7 +210,7 @@ func blockPIVPUK(ctx context.Context, sess sessionTransmitter, maxAttempts int) 
 	wrongPUK := []byte("00000000")
 	dummyPIN := []byte("11111111")
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		cmd, err := piv.ResetRetryCounter(wrongPUK, dummyPIN)
+		cmd, err := pivapdu.ResetRetryCounter(wrongPUK, dummyPIN)
 		if err != nil {
 			return attempt - 1, fmt.Errorf("build RESET RETRY COUNTER: %w", err)
 		}

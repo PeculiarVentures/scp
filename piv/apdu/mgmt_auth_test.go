@@ -1,4 +1,4 @@
-package piv
+package pivapdu
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PeculiarVentures/scp/piv"
 	"github.com/PeculiarVentures/scp/tlv"
 )
 
@@ -239,7 +240,7 @@ func TestMgmtKey_RejectsMalformedTLV(t *testing.T) {
 
 // TestMgmtKey_DefaultKeyMatchesYubicoConstant pins the well-known
 // pre-5.7 default to the documented value. If anyone changes
-// DefaultMgmt3DESKey by accident, this catches it. The value is
+// piv.DefaultMgmt3DESKey by accident, this catches it. The value is
 // public — there's nothing sensitive about it.
 func TestMgmtKey_DefaultKeyMatchesYubicoConstant(t *testing.T) {
 	want := []byte{
@@ -247,12 +248,12 @@ func TestMgmtKey_DefaultKeyMatchesYubicoConstant(t *testing.T) {
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 	}
-	if !bytes.Equal(DefaultMgmt3DESKey, want) {
-		t.Errorf("DefaultMgmt3DESKey changed: got %X want %X", DefaultMgmt3DESKey, want)
+	if !bytes.Equal(piv.DefaultMgmt3DESKey, want) {
+		t.Errorf("piv.DefaultMgmt3DESKey changed: got %X want %X", piv.DefaultMgmt3DESKey, want)
 	}
 	// Smoke-check the cipher works with this key length.
-	if _, err := des.NewTripleDESCipher(DefaultMgmt3DESKey); err != nil {
-		t.Errorf("DefaultMgmt3DESKey not a valid 3DES key: %v", err)
+	if _, err := des.NewTripleDESCipher(piv.DefaultMgmt3DESKey); err != nil {
+		t.Errorf("piv.DefaultMgmt3DESKey not a valid 3DES key: %v", err)
 	}
 }
 

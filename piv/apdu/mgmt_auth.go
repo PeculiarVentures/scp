@@ -1,4 +1,4 @@
-package piv
+package pivapdu
 
 import (
 	"crypto/aes"
@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/piv"
 	"github.com/PeculiarVentures/scp/tlv"
 )
 
@@ -29,36 +30,10 @@ const (
 	AlgoMgmtAES256 byte = 0x0C
 )
 
-// MgmtKeyRef is the PIV key reference for the management key
-// (NIST SP 800-73-4 Part 2 §3.2.4). Goes into P2 of GENERAL
-// AUTHENTICATE for mgmt-key auth.
-const MgmtKeyRef byte = 0x9B
-
-// DefaultMgmtKey is the well-known 24-byte management key value
-// shipped on YubiKeys with default PIV settings. The same byte
-// pattern serves as both the 3DES default (firmware < 5.7) and the
-// AES-192 default (firmware 5.7+) — Yubico's PIV docs are explicit
-// that "the default management key uses the same default value
-// (3DES and AES-192 keys are the same length)."
-//
-// Reference: developers.yubico.com/PIV/Introduction/YubiKey_and_PIV.html
-//
-// Including it here so callers don't have to type the bytes;
-// production deployments must rotate it via SetManagementKey before
-// relying on the card for anything sensitive.
-var DefaultMgmtKey = []byte{
-	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-}
-
-// DefaultMgmt3DESKey is a backward-compatibility alias for callers
-// that imported the original name. Both names point at the same
-// 24-byte buffer — see DefaultMgmtKey for current naming.
-//
-// Deprecated: Prefer DefaultMgmtKey. The 3DES suffix was misleading
-// because the same value is the 5.7+ AES-192 default too.
-var DefaultMgmt3DESKey = DefaultMgmtKey
+// MgmtKeyRef and DefaultMgmtKey/DefaultMgmt3DESKey are defined in
+// the parent piv package (piv/types.go) so the typed ManagementKey
+// vocabulary lives in one place. They are referenced here as
+// piv.MgmtKeyRef and piv.DefaultMgmtKey.
 
 // PIV mutual-authentication TLV tags inside the 7C Authentication
 // Template (NIST SP 800-73-4 Part 2 §3.2.4).
@@ -90,7 +65,7 @@ func MgmtKeyMutualAuthChallenge(algorithm byte) *apdu.Command {
 		CLA:  0x00,
 		INS:  0x87,
 		P1:   algorithm,
-		P2:   MgmtKeyRef,
+		P2:   piv.MgmtKeyRef,
 		Data: body,
 		Le:   -1,
 	}
@@ -177,7 +152,7 @@ func MgmtKeyMutualAuthRespond(witness, mgmtKey []byte, algorithm byte) (cmd *apd
 		CLA:  0x00,
 		INS:  0x87,
 		P1:   algorithm,
-		P2:   MgmtKeyRef,
+		P2:   piv.MgmtKeyRef,
 		Data: body,
 		Le:   -1,
 	}

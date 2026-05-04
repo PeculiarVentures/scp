@@ -17,6 +17,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/piv"
+	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
 	"github.com/PeculiarVentures/scp/scp11"
 )
 
@@ -180,7 +181,7 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 		report.Skip("MGMT-KEY AUTH", "no --mgmt-key supplied; GENERATE KEY/PUT CERTIFICATE may be refused with 6982")
 	}
 
-	verifyCmd, err := piv.VerifyPIN([]byte(*pin))
+	verifyCmd, err := pivapdu.VerifyPIN([]byte(*pin))
 	if err != nil {
 		report.Fail("VERIFY PIN (build)", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -199,7 +200,7 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 	}
 	report.Pass("VERIFY PIN", "")
 
-	genCmd := piv.GenerateKey(slot, algo)
+	genCmd := pivapdu.GenerateKey(slot, algo)
 	resp, err = sess.Transmit(ctx, genCmd)
 	if err != nil {
 		report.Fail("GENERATE KEY (transmit)", err.Error())
@@ -220,13 +221,13 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 	// Parse the generated public key. Used both for the cert-binding
 	// check below and to surface a clean error if the card returned
 	// something the parser doesn't understand. X25519 returns
-	// piv.ErrNoCertBinding here, which is fine — we just don't get
+	// pivapdu.ErrNoCertBinding here, which is fine — we just don't get
 	// a key to compare against and skip the binding check.
 	var generatedPub crypto.PublicKey
 	if data.KeyGenerated {
-		k, err := piv.ParseGeneratedPublicKey(resp.Data, algo)
+		k, err := pivapdu.ParseGeneratedPublicKey(resp.Data, algo)
 		switch {
-		case errors.Is(err, piv.ErrNoCertBinding):
+		case errors.Is(err, pivapdu.ErrNoCertBinding):
 			report.Skip("parse pubkey", "X25519 — no cert binding applies")
 		case err != nil:
 			report.Fail("parse pubkey", err.Error())
@@ -244,7 +245,7 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 		// intend. The check refuses PUT CERTIFICATE on mismatch
 		// rather than installing the misleading cert.
 		if generatedPub != nil {
-			if !piv.PublicKeysEqual(generatedPub, cert.PublicKey) {
+			if !pivapdu.PublicKeysEqual(generatedPub, cert.PublicKey) {
 				report.Fail("cert binding", fmt.Sprintf(
 					"cert public key does not match slot 0x%02X generated key — refusing to install",
 					slot))
@@ -257,7 +258,7 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 			report.Skip("cert binding", "no parsed pubkey to compare against")
 		}
 
-		putCmd, err := piv.PutCertificate(slot, cert)
+		putCmd, err := pivapdu.PutCertificate(slot, cert)
 		if err != nil {
 			report.Fail("PUT CERTIFICATE (build)", err.Error())
 		} else {
@@ -280,7 +281,7 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	if *doAttest && data.KeyGenerated {
-		attestCmd := piv.Attest(slot)
+		attestCmd := pivapdu.Attest(slot)
 		resp, err = sess.Transmit(ctx, attestCmd)
 		switch {
 		case err != nil:
@@ -389,7 +390,7 @@ func runMgmtKeyMutualAuth(ctx context.Context, sess interface {
 	Transmit(context.Context, *apdu.Command) (*apdu.Response, error)
 }, mgmtKey []byte, algo byte, algoName string, report *Report) error {
 	// Step 1: request witness.
-	chal := piv.MgmtKeyMutualAuthChallenge(algo)
+	chal := pivapdu.MgmtKeyMutualAuthChallenge(algo)
 	resp, err := sess.Transmit(ctx, chal)
 	if err != nil {
 		report.Fail("MGMT-KEY AUTH (request witness)", err.Error())
@@ -399,14 +400,14 @@ func runMgmtKeyMutualAuth(ctx context.Context, sess interface {
 		report.Fail("MGMT-KEY AUTH (request witness)", fmt.Sprintf("SW=%04X", resp.StatusWord()))
 		return fmt.Errorf("mgmt-key auth request witness: SW=%04X", resp.StatusWord())
 	}
-	witness, err := piv.ParseMutualAuthWitness(resp.Data, algo)
+	witness, err := pivapdu.ParseMutualAuthWitness(resp.Data, algo)
 	if err != nil {
 		report.Fail("MGMT-KEY AUTH (parse witness)", err.Error())
 		return fmt.Errorf("parse witness: %w", err)
 	}
 
 	// Step 2: respond with decrypted witness + fresh challenge.
-	respCmd, hostChallenge, err := piv.MgmtKeyMutualAuthRespond(witness, mgmtKey, algo)
+	respCmd, hostChallenge, err := pivapdu.MgmtKeyMutualAuthRespond(witness, mgmtKey, algo)
 	if err != nil {
 		report.Fail("MGMT-KEY AUTH (build response)", err.Error())
 		return fmt.Errorf("build response: %w", err)
@@ -422,7 +423,7 @@ func runMgmtKeyMutualAuth(ctx context.Context, sess interface {
 	}
 
 	// Step 3: verify the card's response under our challenge.
-	if err := piv.VerifyMutualAuthResponse(resp.Data, hostChallenge, mgmtKey, algo); err != nil {
+	if err := pivapdu.VerifyMutualAuthResponse(resp.Data, hostChallenge, mgmtKey, algo); err != nil {
 		report.Fail("MGMT-KEY AUTH (verify card)", err.Error())
 		return fmt.Errorf("verify card response: %w", err)
 	}
