@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
+	"github.com/PeculiarVentures/scp/piv"
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/transport"
 )
@@ -841,6 +843,187 @@ func TestPIVProvision_RejectsBadSlotAndAlgo(t *testing.T) {
 		{"unknown slot", []string{"--reader", "f", "--pin", "1", "--slot", "ab"}},
 		{"unknown algorithm", []string{"--reader", "f", "--pin", "1", "--algorithm", "frob256"}},
 		{"missing pin", []string{"--reader", "f"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			env := &runEnv{out: &buf, errOut: &buf, connect: nil}
+			err := cmdPIVProvision(context.Background(), env, tc.args)
+			if err == nil {
+				t.Fatal("expected usage error")
+			}
+			var ue *usageError
+			if !errors.As(err, &ue) {
+				t.Errorf("expected *usageError; got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+// TestPIVProvision_WithMgmtKeyAuth runs the full provisioning flow
+// with --mgmt-key against a mock configured for crypto-correct PIV
+// management-key mutual auth. Round-trip verifies: host runs step 1,
+// mock generates witness encrypted under shared key; host decrypts,
+// runs step 2; mock verifies host's decrypted witness, encrypts the
+// host's challenge; host's VerifyMutualAuthResponse accepts.
+//
+// This is the test that would have caught the gap I shipped in #54
+// — a piv-provision with no mgmt-key flow at all — and now proves
+// the flow works end-to-end through the SM channel.
+func TestPIVProvision_WithMgmtKeyAuth(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	// Configure the mock for AES-192 mgmt-key auth (matches YubiKey
+	// 5.7+ factory default algorithm). Use a deterministic key so
+	// the test is reproducible.
+	mgmtKey := bytes.Repeat([]byte{0xA5}, 24)
+	mockCard.PIVMgmtKey = mgmtKey
+	mockCard.PIVMgmtKeyAlgo = piv.AlgoMgmtAES192
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+		"--algorithm", "eccp256",
+		"--mgmt-key", hex.EncodeToString(mgmtKey),
+		"--mgmt-key-algorithm", "aes192",
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err != nil {
+		t.Fatalf("cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"MGMT-KEY AUTH",
+		"AES-192",
+		"VERIFY PIN",
+		"GENERATE KEY",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, " FAIL") {
+		t.Errorf("output contains FAIL\n--- output ---\n%s", out)
+	}
+}
+
+// TestPIVProvision_RejectsWrongMgmtKey confirms the host's verify
+// step rejects when the configured key doesn't match the card's.
+// The mock encrypts with one key; the CLI is given a different key.
+// The host's VerifyMutualAuthResponse must fail closed and the
+// command must return an error.
+func TestPIVProvision_RejectsWrongMgmtKey(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	cardKey := bytes.Repeat([]byte{0xA5}, 16)
+	mockCard.PIVMgmtKey = cardKey
+	mockCard.PIVMgmtKeyAlgo = piv.AlgoMgmtAES128
+
+	wrongKey := bytes.Repeat([]byte{0xC3}, 16)
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+		"--mgmt-key", hex.EncodeToString(wrongKey),
+		"--mgmt-key-algorithm", "aes128",
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err == nil {
+		t.Fatalf("expected wrong-key auth to fail; output:\n%s", buf.String())
+	}
+	// Mock returns 6982 on host-witness mismatch — that's what we
+	// expect to surface, since our wrong key produces the wrong
+	// decrypted witness.
+	if !strings.Contains(buf.String(), "MGMT-KEY AUTH") {
+		t.Errorf("expected MGMT-KEY AUTH step in output; got:\n%s", buf.String())
+	}
+}
+
+// TestPIVProvision_NoMgmtKey_StillWorksAgainstUnenforcingMock confirms
+// that without --mgmt-key the command still runs and the mock (with
+// no PIVMgmtKey configured) skips the auth path. This covers the
+// "test the mock without going through real auth" use case.
+func TestPIVProvision_NoMgmtKey_StillWorksAgainstUnenforcingMock(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	// No PIVMgmtKey set; mock won't attempt the flow.
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err != nil {
+		t.Fatalf("cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "MGMT-KEY AUTH") || !strings.Contains(out, "SKIP") {
+		t.Errorf("expected MGMT-KEY AUTH SKIP entry; got:\n%s", out)
+	}
+}
+
+// TestPIVProvision_RejectsBadMgmtKeyArgs covers --mgmt-key parsing
+// at the CLI boundary: bad hex, length-mismatch with algorithm,
+// "default" with non-3DES algorithm.
+func TestPIVProvision_RejectsBadMgmtKeyArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"bad hex", []string{
+			"--reader", "f", "--pin", "1",
+			"--mgmt-key", "ZZ",
+			"--mgmt-key-algorithm", "aes128",
+		}},
+		{"length mismatch", []string{
+			"--reader", "f", "--pin", "1",
+			"--mgmt-key", strings.Repeat("AA", 24), // 24 bytes
+			"--mgmt-key-algorithm", "aes128", // wants 16
+		}},
+		{"default with non-3des", []string{
+			"--reader", "f", "--pin", "1",
+			"--mgmt-key", "default",
+			"--mgmt-key-algorithm", "aes192",
+		}},
+		{"unknown algorithm", []string{
+			"--reader", "f", "--pin", "1",
+			"--mgmt-key", strings.Repeat("AA", 16),
+			"--mgmt-key-algorithm", "frob",
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

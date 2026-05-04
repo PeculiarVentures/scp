@@ -78,6 +78,23 @@ type Card struct {
 	session     *cardSession
 	selectedAID []byte
 	pivSelected bool
+
+	// PIVMgmtKey, when non-nil, makes the mock implement crypto-correct
+	// PIV management-key mutual authentication on GENERAL AUTHENTICATE
+	// (INS 0x87, key ref 0x9B). Step 1 generates a witness, encrypts
+	// under PIVMgmtKey, returns it; step 2 verifies the host's
+	// decrypted witness matches what was generated, then encrypts the
+	// host's challenge and returns it. PIVMgmtKeyAlgo selects the
+	// cipher (one of the piv.AlgoMgmt* constants). When PIVMgmtKey is
+	// nil the mock returns 6985 to GENERAL AUTHENTICATE — a
+	// piv-provision smoke test that wants to exercise the auth flow
+	// must configure both fields.
+	PIVMgmtKey     []byte
+	PIVMgmtKeyAlgo byte
+
+	// Internal: witness generated in step 1, expected back from host
+	// (decrypted) in step 2.
+	pivMgmtAuthWitness []byte
 }
 
 type cardSession struct {
@@ -223,6 +240,25 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		// the host can decode "got a non-empty response." Not a real
 		// attestation; the mock can't sign a meaningful one.
 		return &apdu.Response{Data: []byte{0x30, 0x82, 0x01, 0x00}, SW1: 0x90, SW2: 0x00}, nil
+
+	case 0x87: // PIV GENERAL AUTHENTICATE (mgmt-key mutual auth at P2=0x9B)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		if cmd.P2 != 0x9B {
+			// Other key refs use INS 0x87 too (PIV authentication via
+			// the slot keypair) but this mock only implements the
+			// mgmt-key flow. Return "function not supported" for the
+			// rest so callers fail loudly.
+			return mkSW(0x6A81), nil
+		}
+		if len(c.PIVMgmtKey) == 0 {
+			// Mock not configured for mgmt-key auth — refuse rather
+			// than silently ACK something that would mislead a smoke
+			// test into believing auth happened.
+			return mkSW(0x6985), nil
+		}
+		return c.handlePIVMgmtAuth(cmd)
 
 	default:
 		return mkSW(0x6D00), nil // instruction not supported
