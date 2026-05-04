@@ -17,14 +17,14 @@ import (
 	"time"
 
 	"github.com/PeculiarVentures/scp/apdu"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
 // recordingTransport wraps an underlying transport and captures the
 // raw bytes of every command APDU sent through it. Used to verify
-// wire-format properties of session.Open() and Transmit().
+// wire-format properties of scp11.Open() and Transmit().
 type recordingTransport struct {
 	inner transport.Transport
 	sent  [][]byte
@@ -85,10 +85,10 @@ func extractOCEEphemeralPubkey(sent [][]byte) []byte {
 // expected OCE ephemeral public key on the wire — not just that the
 // session opens. Earlier this test only sanity-checked that the fixed
 // scalar derives Samsung's published public point in isolation, which
-// proved nothing about whether session.Open() routed the override
+// proved nothing about whether scp11.Open() routed the override
 // through to the AUTHENTICATE APDU.
 //
-// This version drives session.Open through a recording transport,
+// This version drives scp11.Open through a recording transport,
 // finds the AUTHENTICATE APDU, parses its 5F49 (EPK.OCE) TLV, and
 // asserts byte-exact equality with Samsung's published EPK_OCE_ECKA_P256
 // uncompressed point.
@@ -112,16 +112,16 @@ func TestSCP11_InsecureTestOnlyEphemeralKey_ProducesExpectedOCEPubkey(t *testing
 	}
 	rec := &recordingTransport{inner: card.Transport()}
 
-	sess, err := session.Open(context.Background(), rec, &session.Config{
-		Variant:                        session.SCP11b,
-		SelectAID:                      session.AIDSecurityDomain,
+	sess, err := scp11.Open(context.Background(), rec, &scp11.Config{
+		Variant:                        scp11.SCP11b,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
 		InsecureSkipCardAuthentication: true,
 		InsecureTestOnlyEphemeralKey:   fixedKey,
 	})
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 
@@ -152,9 +152,9 @@ func TestSCP11_EphemeralKey_NilProducesFreshHostKey(t *testing.T) {
 			t.Fatalf("New: %v", err)
 		}
 		rec := &recordingTransport{inner: card.Transport()}
-		sess, err := session.Open(context.Background(), rec, &session.Config{
-			Variant:                        session.SCP11b,
-			SelectAID:                      session.AIDSecurityDomain,
+		sess, err := scp11.Open(context.Background(), rec, &scp11.Config{
+			Variant:                        scp11.SCP11b,
+			SelectAID:                      scp11.AIDSecurityDomain,
 			KeyID:                          0x13,
 			KeyVersion:                     0x01,
 			InsecureSkipCardAuthentication: true,
@@ -191,9 +191,9 @@ func TestSCP11_InsecureTestOnlyEphemeralKey_RejectsNonP256(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = session.Open(context.Background(), card.Transport(), &session.Config{
-		Variant:                        session.SCP11b,
-		SelectAID:                      session.AIDSecurityDomain,
+	_, err = scp11.Open(context.Background(), card.Transport(), &scp11.Config{
+		Variant:                        scp11.SCP11b,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
 		InsecureSkipCardAuthentication: true,
@@ -267,13 +267,13 @@ func TestSCP11a_PSO_WireFormat(t *testing.T) {
 	// step (e.g. the mock doesn't synthesize a receipt) but we only
 	// care that PSO went out correctly before any failure — capture
 	// the recorded APDUs regardless.
-	sess, _ := session.Open(context.Background(), rec, &session.Config{
-		Variant:                        session.SCP11a,
-		SelectAID:                      session.AIDSecurityDomain,
+	sess, _ := scp11.Open(context.Background(), rec, &scp11.Config{
+		Variant:                        scp11.SCP11a,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		KeyID:                          0x11,
 		KeyVersion:                     0x01,
 		OCECertificates:                chain,
-		OCEKeyReference:                session.KeyRef{KID: 0x10, KVN: 0x03},
+		OCEKeyReference:                scp11.KeyRef{KID: 0x10, KVN: 0x03},
 		OCEPrivateKey:                  leafKey,
 		InsecureSkipCardAuthentication: true,
 	})
@@ -335,7 +335,7 @@ func pkixName(cn string) (n pkix.Name) {
 // state without holding the receipt key.
 //
 // This test injects a forged receipt into the SCP11b INTERNAL
-// AUTHENTICATE response and asserts session.Open rejects it.
+// AUTHENTICATE response and asserts scp11.Open rejects it.
 func TestSCP11b_ForgedReceipt_Rejected(t *testing.T) {
 	// Build a transport that wraps the mock and injects a fake
 	// receipt TLV (0x86 || 0x10 || 16 bytes of 0xAB) into the
@@ -350,9 +350,9 @@ func TestSCP11b_ForgedReceipt_Rejected(t *testing.T) {
 	card.LegacySCP11bNoReceipt = true
 	wrap := &receiptInjector{inner: card.Transport()}
 
-	_, err = session.Open(context.Background(), wrap, &session.Config{
-		Variant:                        session.SCP11b,
-		SelectAID:                      session.AIDSecurityDomain,
+	_, err = scp11.Open(context.Background(), wrap, &scp11.Config{
+		Variant:                        scp11.SCP11b,
+		SelectAID:                      scp11.AIDSecurityDomain,
 		KeyID:                          0x13,
 		KeyVersion:                     0x01,
 		InsecureSkipCardAuthentication: true,

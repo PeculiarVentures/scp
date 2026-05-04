@@ -279,7 +279,7 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 // transport-layer attacker an easy session-termination DoS by
 // injecting an unprotected error status.
 //
-// Callers in scp03.Session.Transmit and session.Session.Transmit
+// Callers in scp03.Session.Transmit and scp11.Session.Transmit
 // gate the Unwrap call on this predicate so error status words pass
 // through cleanly without false MAC failures.
 //

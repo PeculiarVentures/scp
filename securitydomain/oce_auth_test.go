@@ -9,7 +9,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 )
 
 // TestIsOCEAuthProtocol covers the gate that drives session
@@ -62,7 +62,7 @@ func TestSCP11b_OCERequiredOps_Rejected_HostSide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := session.DefaultSCP11bConfig()
+	cfg := scp11.DefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sd, err := OpenSCP11(context.Background(), card.Transport(), cfg)
@@ -119,7 +119,7 @@ func TestSCP11b_ReadOnlyOps_Allowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := session.DefaultSCP11bConfig()
+	cfg := scp11.DefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sd, err := OpenSCP11(context.Background(), card.Transport(), cfg)

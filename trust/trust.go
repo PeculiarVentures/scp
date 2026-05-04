@@ -11,7 +11,7 @@
 //
 // This package implements the validation step. It is designed to be
 // used both by the securitydomain management layer and by existing
-// session.Open callers who want explicit chain validation before
+// scp11.Open callers who want explicit chain validation before
 // trusting a card's identity.
 //
 // # Fail-closed behavior

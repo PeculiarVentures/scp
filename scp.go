@@ -55,7 +55,7 @@
 //
 //	// SCP11b with mock card (for testing):
 //	card, _ := mockcard.New()
-//	sess, _ := session.Open(ctx, card.Transport(), session.DefaultConfig())
+//	sess, _ := scp11.Open(ctx, card.Transport(), scp11.DefaultConfig())
 //	defer sess.Close()
 //
 //	// SCP03 with static keys:
@@ -72,7 +72,7 @@
 // The library is layered so each component can be used independently:
 //
 //	┌─────────────────────────────────┐
-//	│  scp03.Open() / session.Open()  │  Protocol-specific handshake
+//	│  scp03.Open() / scp11.Open()  │  Protocol-specific handshake
 //	├─────────────────────────────────┤
 //	│  scp.Session (common interface) │  Transmit, Close
 //	├─────────────────────────────────┤
@@ -101,7 +101,7 @@ import (
 //
 // The interface is deliberately narrow. Capabilities like the
 // session DEK or OCE-authentication state are exposed by the
-// concrete *scp03.Session and *session.Session types and accessed
+// concrete *scp03.Session and *scp11.Session types and accessed
 // by the securitydomain package through type assertions on
 // unexported capability interfaces. That keeps key material out
 // of the broad public abstraction: a caller holding a generic
@@ -130,7 +130,7 @@ type Session interface {
 	// here for the Security Domain PUT KEY path; that was also a
 	// footgun, because the DEK is enough to encrypt key material the
 	// card will accept. Both are now reachable only through the
-	// concrete *scp03.Session / *session.Session types — for tests
+	// concrete *scp03.Session / *scp11.Session types — for tests
 	// via InsecureExportSessionKeysForTestOnly(), and for the
 	// securitydomain package via unexported capability interfaces.
 }

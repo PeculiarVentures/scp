@@ -12,7 +12,7 @@ import (
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp03"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 )
 
 func main() {
@@ -36,9 +36,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("create SCP11 card: %v", err)
 	}
-	cfg := session.DefaultConfig()
+	cfg := scp11.DefaultConfig()
 	cfg.InsecureSkipCardAuthentication = true // mock card self-signed key
-	scp11Sess, err := session.Open(ctx, scp11Card.Transport(), cfg)
+	scp11Sess, err := scp11.Open(ctx, scp11Card.Transport(), cfg)
 	if err != nil {
 		log.Fatalf("SCP11 Open: %v", err)
 	}

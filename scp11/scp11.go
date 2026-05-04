@@ -1,4 +1,4 @@
-// Package session implements the SCP11 protocol state machine for
+// Package scp11 implements the SCP11 protocol state machine for
 // establishing a secure channel between an off-card entity (OCE) and
 // an applet on a smart card. The applet typically holds an SCP key
 // set — most commonly the GlobalPlatform Issuer Security Domain, but
@@ -24,7 +24,7 @@
 //
 // The session layer orchestrates the complete SCP11 handshake
 // the Session wraps a Transport and exposes a secure Transmit method.
-package session
+package scp11
 
 import (
 	"context"
@@ -554,7 +554,7 @@ func (s *Session) InsecureExportSessionKeysForTestOnly() *kdf.SessionKeys {
 //
 // Returns nil if the session is closed or did not derive a DEK.
 //
-// This is a concrete method on *session.Session, not part of the
+// This is a concrete method on *scp11.Session, not part of the
 // scp.Session interface. The securitydomain package consumes it
 // through an unexported capability interface, so a caller holding
 // a generic scp.Session value cannot reach the DEK. Direct callers

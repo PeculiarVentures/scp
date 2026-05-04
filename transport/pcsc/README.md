@@ -23,7 +23,7 @@ CGO is required.
 import (
     "context"
 
-    "github.com/PeculiarVentures/scp/session"
+    "github.com/PeculiarVentures/scp/scp11"
     "github.com/PeculiarVentures/scp/transport/pcsc"
 )
 
@@ -37,9 +37,9 @@ defer t.Close()
 // Or address one by name (use pcsc.ListReaders() to discover them).
 // t, err := pcsc.OpenReader("Yubico YubiKey OTP+FIDO+CCID 00 00")
 
-cfg := session.DefaultSCP11bConfig()
+cfg := scp11.DefaultSCP11bConfig()
 cfg.CardTrustAnchors = myYubicoSCP11Roots // ← required for production
-sess, err := session.Open(context.Background(), t, cfg)
+sess, err := scp11.Open(context.Background(), t, cfg)
 ```
 
 ## Sentinel errors

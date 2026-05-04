@@ -1,4 +1,4 @@
-package session_test
+package scp11_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -18,14 +18,14 @@ import (
 // ...) are returned by the card without secure-messaging protection
 // and must NOT be MAC-verified host-side — otherwise:
 //
-//   1. Legitimate card errors look like MAC failures, masking the
-//      real SW from the caller.
-//   2. The session is needlessly torn down and key material zeroed,
-//      forcing a full re-handshake to recover from an ordinary card
-//      error.
-//   3. Any transport-layer attacker can DoS the channel by injecting
-//      an unprotected error status, since the host treats that as
-//      tampering and closes.
+//  1. Legitimate card errors look like MAC failures, masking the
+//     real SW from the caller.
+//  2. The session is needlessly torn down and key material zeroed,
+//     forcing a full re-handshake to recover from an ordinary card
+//     error.
+//  3. Any transport-layer attacker can DoS the channel by injecting
+//     an unprotected error status, since the host treats that as
+//     tampering and closes.
 //
 // This test runs SCP11b end-to-end against mockcard and issues a
 // command (INS=0x99, unrecognized) that the mock returns 6D00 for.
@@ -46,11 +46,11 @@ func TestSCP11_ErrorStatusWord_NoMACVerification(t *testing.T) {
 	// the error case, and only the SW for the unprotected error.
 	rec := &errorPassThroughRecorder{inner: card.Transport()}
 
-	cfg := session.DefaultSCP11bConfig()
+	cfg := scp11.DefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
-	sess, err := session.Open(ctx, rec, cfg)
+	sess, err := scp11.Open(ctx, rec, cfg)
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 
 	// INS=0x99 is unrecognized by mockcard's processPlain switch and

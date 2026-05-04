@@ -1,4 +1,4 @@
-package session_test
+package scp11_test
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -29,15 +29,15 @@ import (
 //
 // Topology:
 //
-//   server: session.Open()        replayingRelay
-//                                  ├─ first Transmit:  pass through
-//                                  ├─ capture response
-//                                  └─ second Transmit: REPLAY captured response
-//                                                      instead of forwarding
+//	server: scp11.Open()        replayingRelay
+//	                               ├─ first Transmit:  pass through
+//	                               ├─ capture response
+//	                               └─ second Transmit: REPLAY captured response
+//	                                                   instead of forwarding
 //
 // Expected behavior:
 //
-//  1. session.Open succeeds (handshake APDUs go through cleanly).
+//  1. scp11.Open succeeds (handshake APDUs go through cleanly).
 //  2. First sess.Transmit succeeds (secure-messaging round trip).
 //  3. Second sess.Transmit fails with R-MAC verification error.
 //  4. The session is no longer usable; further Transmits also fail.
@@ -100,11 +100,11 @@ func TestSCP11_RelayReplayedResponse_Rejected(t *testing.T) {
 	// Open SCP11b — simpler than SCP11a here because the test is
 	// about the secure-messaging counter, not OCE auth, and SCP11b
 	// reaches a usable secure channel with less setup.
-	cfg := session.DefaultSCP11bConfig()
+	cfg := scp11.DefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
-	sess, err := session.Open(ctx, rt, cfg)
+	sess, err := scp11.Open(ctx, rt, cfg)
 	if err != nil {
-		t.Fatalf("session.Open: %v", err)
+		t.Fatalf("scp11.Open: %v", err)
 	}
 	defer sess.Close()
 
@@ -159,7 +159,7 @@ func TestSCP11_RelayReplayedResponse_Rejected(t *testing.T) {
 	}
 
 	// After a MAC failure, GP §4.8 requires the session to be torn
-	// down and key material zeroed. session.Transmit's error path
+	// down and key material zeroed. scp11.Transmit's error path
 	// calls s.Close(); a follow-up Transmit must fail at the
 	// "secure channel not established" gate, not silently re-open
 	// the channel or proceed with stale keys.

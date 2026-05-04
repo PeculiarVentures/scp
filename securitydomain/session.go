@@ -13,7 +13,7 @@ import (
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/scp03"
-	"github.com/PeculiarVentures/scp/session"
+	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
 )
@@ -40,7 +40,7 @@ const (
 //     Only read-only introspection operations are available.
 //
 // A Session is NOT safe for concurrent use. Like the underlying
-// *scp03.Session and *session.Session it wraps, the secure-channel
+// *scp03.Session and *scp11.Session it wraps, the secure-channel
 // state is single-threaded: the encryption counter, MAC chain, and
 // per-command APDU framing all assume one in-flight Transmit at a
 // time. Callers driving the Security Domain from multiple goroutines
@@ -82,7 +82,7 @@ type Session struct {
 // (or another package that explicitly type-asserts on the concrete
 // session type) can.
 //
-// Both *scp03.Session and *session.Session satisfy this interface.
+// Both *scp03.Session and *scp11.Session satisfy this interface.
 type dekProvider interface {
 	// SessionDEK returns a defensive copy of the Data Encryption Key
 	// derived during (or established at the start of) the secure
@@ -99,7 +99,7 @@ type dekProvider interface {
 // scp.Session.Protocol(), which was brittle (a future protocol or
 // variant rename would silently flip authorization decisions).
 //
-// Both *scp03.Session and *session.Session satisfy this interface.
+// Both *scp03.Session and *scp11.Session satisfy this interface.
 // SCP03 always reports true (EXTERNAL AUTHENTICATE proves OCE
 // possession of the MAC key); SCP11a/c report true; SCP11b reports
 // false (only the card authenticates).
@@ -113,7 +113,7 @@ type oceAuthState interface {
 // The check is strict: a session must implement oceAuthState (i.e.
 // expose an OCEAuthenticated() bool method on the concrete type) to
 // be considered for OCE-gated management operations. Concrete
-// *scp03.Session and *session.Session both satisfy this; any other
+// *scp03.Session and *scp11.Session both satisfy this; any other
 // scp.Session implementation that wants to drive Security Domain
 // management ops MUST implement the same method.
 //
@@ -230,17 +230,17 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 // PutSCP03Key, PutECPrivateKey, and PutECPublicKey all failed with
 // "SCP03 session required" against an SCP11-authenticated session —
 // even though the SCP11 session DOES derive a usable DEK.
-func OpenSCP11(ctx context.Context, t transport.Transport, cfg *session.Config) (*Session, error) {
-	var local session.Config
+func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*Session, error) {
+	var local scp11.Config
 	if cfg != nil {
 		local = *cfg
 	} else {
-		local = *session.DefaultConfig()
+		local = *scp11.DefaultConfig()
 	}
 	local.SelectAID = AIDSecurityDomain
 	local.ApplicationAID = nil
 
-	scpSess, err := session.Open(ctx, t, &local)
+	scpSess, err := scp11.Open(ctx, t, &local)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: open SCP11 session: %w", err)
 	}
