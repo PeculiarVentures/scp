@@ -124,16 +124,14 @@ func (s *Session) requireMgmtAuth(op string) error {
 	return nil
 }
 
-// requirePINVerified returns piv.ErrNotAuthenticated if the session
-// has not verified the PIN. Used as a precondition check on PIN-gated
-// operations.
-func (s *Session) requirePINVerified(op string) error {
-	if !s.pinVerified {
-		return fmt.Errorf("%s: %w (call VerifyPIN first)",
-			op, piv.ErrNotAuthenticated)
-	}
-	return nil
-}
+// PIN-verified state on the card is the card's own concern: once
+// VERIFY succeeds, the card carries the verified status until it is
+// reset, the applet is re-selected, or the verify timeout expires.
+// The session does not duplicate that gating because the host cannot
+// distinguish a still-verified card from one whose verified state
+// expired between VERIFY and the next operation. PIN-gated operations
+// pass through to the card and the card returns 6982 if VERIFY is
+// required, which surfaces as piv.IsAuthRequired on the caller side.
 
 // errInvalidArg is a sentinel for argument-validation errors that
 // should not be wrapped as CardError.
