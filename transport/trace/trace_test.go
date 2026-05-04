@@ -301,11 +301,28 @@ func TestRecorder_CaptureCRD(t *testing.T) {
 	if snap.CardInfo == nil {
 		t.Fatal("CardInfo is nil; CaptureCRD did not store")
 	}
-	if snap.CardInfo.SCPVersion != 0x03 {
-		t.Errorf("CardInfo.SCPVersion = 0x%02X, want 0x03", snap.CardInfo.SCPVersion)
+	// Verify the new SCPs slice is populated as expected. This is
+	// the path new callers should use.
+	if len(snap.CardInfo.SCPs) != 1 {
+		t.Errorf("len(SCPs) = %d, want 1", len(snap.CardInfo.SCPs))
+	} else {
+		if got := snap.CardInfo.SCPs[0].Version; got != 0x03 {
+			t.Errorf("SCPs[0].Version = 0x%02X, want 0x03", got)
+		}
+		if got := snap.CardInfo.SCPs[0].Parameter; got != 0x65 {
+			t.Errorf("SCPs[0].Parameter = 0x%02X, want 0x65", got)
+		}
 	}
-	if snap.CardInfo.SCPParameter != 0x65 {
-		t.Errorf("CardInfo.SCPParameter = 0x%02X, want 0x65", snap.CardInfo.SCPParameter)
+	// Back-compat shim: SCPVersion/SCPParameter must continue to
+	// reflect SCPs[0] for callers still on the old API. Lint
+	// flags the deprecated-field reads here, but exercising them
+	// is the entire point of these assertions — the deprecation
+	// is a signal to *new* callers, not a test failure.
+	if snap.CardInfo.SCPVersion != 0x03 { //nolint:staticcheck // SA1019 — back-compat assertion
+		t.Errorf("CardInfo.SCPVersion = 0x%02X, want 0x03", snap.CardInfo.SCPVersion) //nolint:staticcheck // SA1019
+	}
+	if snap.CardInfo.SCPParameter != 0x65 { //nolint:staticcheck // SA1019 — back-compat assertion
+		t.Errorf("CardInfo.SCPParameter = 0x%02X, want 0x65", snap.CardInfo.SCPParameter) //nolint:staticcheck // SA1019
 	}
 
 	// Probe must NOT have polluted the exchanges list.
