@@ -143,44 +143,75 @@ type sessionForMgmt interface {
 	Profile() profile.Profile
 }
 
-// scp11bChannelFlags is the cluster of flags every destructive
-// scpctl piv command exposes for the optional SCP11b channel mode.
-// Default is raw, which is the right default for local USB
-// administration (the dominant use case for these flows). The
-// SCP11b mode is the right choice for any deployment where the
-// host between the operator and the card is not in the operator's
-// trust boundary: APDU relays, browser-mediated sessions, or
-// remote provisioning. See docs/piv.md for the threat-model split.
+// scp11bChannelFlags is the cluster of flags every destructive or
+// credential-bearing scpctl piv command exposes. The mode for the
+// session is chosen by --scp11b (secure channel) versus
+// --raw-local-ok (explicit raw-mode acknowledgement). Exactly one
+// must be set; the absence of both is a usage error.
+//
+// Raw mode is the right choice for local-USB administration where
+// the host running scpctl is in the operator's trust boundary.
+// SCP11b is the right choice for APDU relays, browser-mediated
+// sessions, remote provisioning, or any host path the operator
+// does not control end to end. See docs/piv.md for the threat-
+// model split.
 type scp11bChannelFlags struct {
-	scp11b *bool
-	trust  *trustFlags
+	scp11b     *bool
+	rawLocalOK *bool
+	trust      *trustFlags
 }
 
 // registerSCP11bChannelFlags adds --scp11b plus the shared trust
-// flags (--trust-roots, --lab-skip-scp11-trust) to fs. Returns a
-// handle that openPIVSession reads.
+// flags (--trust-roots, --lab-skip-scp11-trust) plus --raw-local-ok
+// to fs. Returns a handle that openPIVSession reads.
+//
+// The --raw-local-ok flag is the explicit acknowledgement that
+// running raw (no secure channel) is acceptable for the operator's
+// trust boundary. Default behavior is fail-closed: a destructive or
+// credential-bearing scpctl piv command without either --scp11b or
+// --raw-local-ok rejects with a clear error explaining the choice.
+//
+// The asymmetry (require positive assertion of raw mode rather than
+// requiring --scp11b) is deliberate: SCP11b is the right answer for
+// any environment that is not the operator's own machine in front of
+// their own card, and an operator who hasn't thought about which
+// they're in should not get raw mode by accident. The smoke harness
+// in scp-smoke piv-provision (the predecessor of this surface) used
+// SCP11b unconditionally; this fail-closed-with-explicit-opt-out
+// keeps the migration honest without forcing trust-roots setup on
+// the local-USB case that was the entire reason raw mode exists in
+// the new surface.
 func registerSCP11bChannelFlags(fs *flag.FlagSet) *scp11bChannelFlags {
 	return &scp11bChannelFlags{
 		scp11b: fs.Bool("scp11b", false,
 			"Run this destructive operation over an SCP11b-on-PIV secure channel "+
-				"instead of raw APDUs. Off by default because local USB administration "+
-				"does not need the channel; turn on for any host path that is not in "+
-				"the operator's trust boundary (APDU relay, remote provisioning, "+
+				"instead of raw APDUs. Required for any host path that is not in the "+
+				"operator's trust boundary (APDU relay, remote provisioning, "+
 				"browser-mediated sessions). See docs/piv.md."),
+		rawLocalOK: fs.Bool("raw-local-ok", false,
+			"Explicitly assert that raw APDUs are acceptable for this invocation "+
+				"because the host is in the operator's trust boundary (typical "+
+				"local-USB administration). Required when --scp11b is not set. "+
+				"Mutually exclusive with --scp11b."),
 		trust: registerTrustFlags(fs),
 	}
 }
 
 // openPIVSession is the session-construction path every destructive
-// scpctl piv handler uses. With --scp11b absent, it just calls
-// session.New over the raw transport (the previous behavior). With
-// --scp11b present, it uses session.OpenSCP11bPIV with the trust
-// posture chosen by --trust-roots / --lab-skip-scp11-trust.
+// or credential-bearing scpctl piv handler uses. The channel mode is
+// chosen by the flag pair (--scp11b, --raw-local-ok); exactly one
+// must be set. The fail-closed default (neither set is a usage
+// error) is what closes the gap to the smoke harness this surface
+// supersedes: scp-smoke piv-provision and scp-smoke piv-reset both
+// ran SCP11b unconditionally, and an operator migrating to the
+// scpctl piv surface should never silently get a downgrade to raw
+// just because they did not type --scp11b.
 //
-// When --scp11b is present without a trust posture, the report
-// gets a SKIP entry (consistent with applyTrust for the smoke
-// commands) and the function returns (nil, false, nil); the caller
-// emits the report and returns without a transmit attempt.
+// When --scp11b is set without a trust posture (no --trust-roots
+// and no --lab-skip-scp11-trust), the report gets a SKIP entry
+// (consistent with applyTrust for the smoke commands) and the
+// function returns (nil, false, nil); the caller emits the report
+// and returns without a transmit attempt.
 //
 // Returns (sess, true, nil) on success; the caller is responsible
 // for sess.Close(). The bool is "proceed"; false plus nil err
@@ -191,8 +222,15 @@ func openPIVSession(
 	flags *scp11bChannelFlags,
 	report *Report,
 ) (*session.Session, bool, error) {
-	if !*flags.scp11b {
-		report.Pass("channel mode", "raw (no SCP11b; suitable for local USB)")
+	switch {
+	case *flags.scp11b && *flags.rawLocalOK:
+		return nil, false, &usageError{msg: "--scp11b and --raw-local-ok are mutually exclusive; pick one"}
+	case !*flags.scp11b && !*flags.rawLocalOK:
+		return nil, false, &usageError{msg: "this command requires either --scp11b (secure channel) or --raw-local-ok (explicit raw-mode acknowledgement for local-USB administration); see docs/piv.md for the threat-model split"}
+	}
+
+	if *flags.rawLocalOK {
+		report.Pass("channel mode", "raw (operator asserted local-USB trust)")
 		sess, err := session.New(ctx, t, session.Options{})
 		if err != nil {
 			return nil, false, err

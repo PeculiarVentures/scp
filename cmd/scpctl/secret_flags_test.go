@@ -192,6 +192,7 @@ func TestPIVPinVerify_StdinIntegration(t *testing.T) {
 	err = cmdPIVPinVerify(context.Background(), env, []string{
 		"--reader", "fake",
 		"--pin-stdin",
+		"--raw-local-ok",
 	})
 	// Mock card's default PIN is 123456 (Yubico factory default);
 	// the verify should succeed.

@@ -172,3 +172,112 @@ func TestPIVReset_RequiresBothGates(t *testing.T) {
 		t.Errorf("first gate should fire first regardless of flag ordering: %v", err)
 	}
 }
+
+// TestPIVMgmtAuth_RequiresChannelChoice verifies the fail-closed
+// channel-mode default. A scpctl piv command that touches the card
+// must specify either --scp11b or --raw-local-ok; absence of both
+// is rejected with a clear error before any APDU goes on the wire.
+//
+// This guards against a silent downgrade for operators migrating
+// from scp-smoke piv-provision (which used SCP11b unconditionally)
+// to the new scpctl piv surface. An operator who copies the smoke
+// command line without --scp11b should get a usage error, not a
+// raw-mode session.
+func TestPIVMgmtAuth_RequiresChannelChoice(t *testing.T) {
+	card, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	var buf bytes.Buffer
+	env := &runEnv{
+		out:    &buf,
+		errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return card.Transport(), nil
+		},
+	}
+
+	// Neither flag set: command should refuse before any transmit.
+	err = cmdPIVMgmtAuth(context.Background(), env, []string{
+		"--reader", "fake",
+	})
+	if err == nil {
+		t.Fatal("expected error when neither --scp11b nor --raw-local-ok is set")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "--scp11b") || !strings.Contains(msg, "--raw-local-ok") {
+		t.Errorf("error should name both flags: %v", err)
+	}
+}
+
+// TestPIVMgmtAuth_RejectsBothChannelFlags verifies the mutual-
+// exclusion check between --scp11b and --raw-local-ok. An operator
+// who passes both has not made a clear choice; the command refuses
+// rather than silently picking one.
+func TestPIVMgmtAuth_RejectsBothChannelFlags(t *testing.T) {
+	card, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	var buf bytes.Buffer
+	env := &runEnv{
+		out:    &buf,
+		errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return card.Transport(), nil
+		},
+	}
+
+	err = cmdPIVMgmtAuth(context.Background(), env, []string{
+		"--reader", "fake",
+		"--scp11b",
+		"--raw-local-ok",
+	})
+	if err == nil {
+		t.Fatal("expected error when both --scp11b and --raw-local-ok are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should mention mutual exclusion: %v", err)
+	}
+}
+
+// TestPIVMgmtAuth_RawLocalOK_OpensSession verifies the happy raw
+// path: --raw-local-ok alone is sufficient (no SCP11b, no trust
+// roots) and the channel-mode gate lets the command through. The
+// downstream mgmt-key auth may or may not succeed against the
+// mock depending on key/algorithm fixtures; this test only
+// asserts the channel-mode line is the raw-asserted form, which
+// proves the gate accepted --raw-local-ok and the session opened
+// in raw mode.
+func TestPIVMgmtAuth_RawLocalOK_OpensSession(t *testing.T) {
+	card, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	card.PIVMgmtKey = piv.DefaultMgmtKey
+	card.PIVMgmtKeyAlgo = piv.AlgoMgmtAES192
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out:    &buf,
+		errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return card.Transport(), nil
+		},
+	}
+
+	// The downstream mgmt auth may fail; we don't care for this
+	// test. We care that the channel-mode gate accepted the raw
+	// assertion and the report records it correctly.
+	_ = cmdPIVMgmtAuth(context.Background(), env, []string{
+		"--reader", "fake",
+		"--raw-local-ok",
+	})
+	out := buf.String()
+	if !strings.Contains(out, "raw (operator asserted local-USB trust)") {
+		t.Errorf("expected channel-mode line confirming raw assertion:\n%s", out)
+	}
+	if strings.Contains(out, "scp11b-on-piv") {
+		t.Errorf("--raw-local-ok should not pick scp11b path:\n%s", out)
+	}
+}

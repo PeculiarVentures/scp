@@ -371,12 +371,22 @@ Ed25519 under YubiKey 5.6) are refused host-side before any APDU
 goes on the wire, with piv.ErrUnsupportedByProfile.
 
 Channel mode (destructive and credential-bearing subcommands):
+  Exactly one of --scp11b or --raw-local-ok must be set. Absence
+  of both is a usage error: scpctl piv refuses to silently default
+  to raw, because operators migrating from 'scp-smoke piv-provision'
+  (which used SCP11b unconditionally) should not be downgraded by
+  forgetting to type a flag.
+
   --scp11b                  Run the operation over an SCP11b-on-PIV
-                            secure channel. Off by default; raw is
-                            correct for local USB administration.
-                            Turn on for any host path not in the
-                            operator's trust boundary (APDU relay,
-                            remote provisioning, multi-tenant CI).
+                            secure channel. Required for any host
+                            path not in the operator's trust
+                            boundary (APDU relay, remote
+                            provisioning, multi-tenant CI).
+  --raw-local-ok            Explicitly assert that raw APDUs are
+                            acceptable: the host running scpctl is
+                            in the operator's trust boundary, which
+                            is the typical local-USB administration
+                            case. Mutually exclusive with --scp11b.
   --trust-roots <pem>       SCP11 card-cert trust anchors.
                             Required with --scp11b for production.
   --lab-skip-scp11-trust    Skip card-cert validation entirely.
