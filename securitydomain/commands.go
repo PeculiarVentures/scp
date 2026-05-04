@@ -502,13 +502,44 @@ func parseCertificates(data []byte) ([][]byte, error) {
 	}
 
 	// Otherwise the response may be wrapped in BF21 with the certs
-	// concatenated inside.
+	// inside. Two shapes seen in the wild:
+	//
+	//  GP-spec shape: BF21 { 7F21 { certDER } [ 7F21 { certDER } ... ] }
+	//                 — used by GlobalPlatform-conformant mocks and
+	//                 some real cards. Each 7F21's Value is bare DER.
+	//
+	//  YubiKit shape: BF21 { certDER || certDER || ... }
+	//                 — concatenated DER directly inside BF21, no
+	//                 inner 7F21 wrappers. Seen on retail YubiKey
+	//                 5.7+ for the SCP11 SD chain.
+	//
+	// We try the GP-spec shape first (look for 7F21 children); if
+	// none, we fall back to splitDERCertificates which walks
+	// 0x30-prefixed concatenated DER.
 	nodes, err := tlv.Decode(data)
 	if err != nil {
 		// Not BER-TLV — treat as a single raw DER cert.
 		return [][]byte{data}, nil
 	}
 	if store := tlv.Find(nodes, tagCertStore); store != nil && len(store.Value) > 0 {
+		// Look for inner 7F21 cert wrappers.
+		var certs [][]byte
+		var walk func([]*tlv.Node)
+		walk = func(ns []*tlv.Node) {
+			for _, n := range ns {
+				if n.Tag == tlv.TagCertificate && len(n.Value) > 0 {
+					certs = append(certs, append([]byte(nil), n.Value...))
+				}
+				if len(n.Children) > 0 {
+					walk(n.Children)
+				}
+			}
+		}
+		walk(store.Children)
+		if len(certs) > 0 {
+			return certs, nil
+		}
+		// No 7F21 children — fall through to the yubikit shape.
 		return splitDERCertificates(store.Value)
 	}
 

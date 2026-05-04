@@ -6,7 +6,9 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
+	pivsession "github.com/PeculiarVentures/scp/piv/session"
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/securitydomain"
 )
 
 type pivResetData struct {
@@ -90,10 +92,22 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
-	cfg.SelectAID = scp11.AIDPIV
-	cfg.ApplicationAID = nil
-	proceed, err := trust.applyTrust(cfg, report)
+	// SCP11b-on-PIV layering: the SD owns the SCP11 cert/key
+	// material (BF21), not PIV. Selecting PIV first and asking it
+	// for BF21 returns SW=6D00. The fix from PR #74: discover the
+	// card's SD static public key over an unauthenticated SD
+	// session first, then open SCP11b against PIV with the
+	// pre-verified key supplied via PreverifiedCardStaticPublicKey
+	// so scp11.Open skips its SD round-trip.
+	//
+	// Inlined here (rather than going through piv/session.OpenSCP11bPIV)
+	// because the helpers below need raw *scp11.Session.Transmit:
+	// blockPIVPIN/blockPIVPUK inspect SW=6983 and 63Cx directly,
+	// statuses that piv/session.Session.transmit translates into
+	// errors. Inlining keeps the high-level wrapper for normal PIV
+	// flows and gives this lower-level command direct wire access.
+	pivOpts := pivsession.SCP11bPIVOptions{}
+	proceed, err := trust.applyTrustToPIV(&pivOpts, report)
 	if err != nil {
 		return err
 	}
@@ -101,6 +115,24 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 		_ = report.Emit(env.out, *jsonMode)
 		return nil
 	}
+
+	pubKey, err := securitydomain.FetchCardPublicKey(ctx, t, securitydomain.FetchCardPublicKeyOptions{
+		KeyReference:                   securitydomain.NewKeyReference(securitydomain.KeyIDSCP11b, 0x01),
+		CardTrustPolicy:                pivOpts.CardTrustPolicy,
+		InsecureSkipCardAuthentication: pivOpts.InsecureSkipCardAuthentication,
+	})
+	if err != nil {
+		report.Fail("resolve PK.SD.ECKA", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("resolve PK.SD.ECKA: %w", err)
+	}
+
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg.SelectAID = scp11.AIDPIV
+	cfg.ApplicationAID = nil
+	cfg.PreverifiedCardStaticPublicKey = pubKey
+	cfg.CardTrustPolicy = pivOpts.CardTrustPolicy
+	cfg.InsecureSkipCardAuthentication = pivOpts.InsecureSkipCardAuthentication
 
 	sess, err := scp11.Open(ctx, t, cfg)
 	if err != nil {
