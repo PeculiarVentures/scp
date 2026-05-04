@@ -113,6 +113,63 @@ func TestParse_SyntheticSCP03(t *testing.T) {
 	}
 }
 
+// TestParse_RetailYubiKey5_BothSCPs is the real-bytes regression test
+// for multi-SCP advertisement. The CRD shown here is what scpctl
+// probe captured against a retail YubiKey 5.7.4: the card advertises
+// both SCP03 (i=0x60) and SCP11 (i=0x0D86) in a single CRD.
+//
+// Before the SCPs slice existed, the parser overwrote SCPVersion on
+// each 0x64 child, leaving only the second indicator visible —
+// scpctl reported "SCP advertised: SCP11 i=0x0D86" and silently
+// dropped the SCP03 entry the same card was offering.
+//
+// This fixture pins the multi-SCP behavior to the actual bytes a
+// real card emits today, so a parser regression that drops an
+// entry can't pass review undetected.
+func TestParse_RetailYubiKey5_BothSCPs(t *testing.T) {
+	// Captured 2026-05-04 from rmhrisk's YubiKey 5.7.4 via:
+	//   scpctl probe --reader "Yubico YubiKey OTP+FIDO+CCID"
+	raw := mustHex(t, "663F733D"+
+		"06072A864886FC6B01"+ // GP RID
+		"600C060A2A864886FC6B02020301"+ // GP 2.3.1
+		"630906072A864886FC6B03"+ // card identification scheme
+		"640B06092A864886FC6B040360"+ // SCP03 i=0x60
+		"640C060A2A864886FC6B04119B06") // SCP11 i=0x0D86
+
+	info, err := cardrecognition.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if got, want := info.GPVersion, []int{2, 3, 1}; !intsEqual(got, want) {
+		t.Errorf("GPVersion = %v, want %v", got, want)
+	}
+
+	if len(info.SCPs) != 2 {
+		t.Fatalf("len(SCPs) = %d, want 2 (SCP03 + SCP11)", len(info.SCPs))
+	}
+	if info.SCPs[0].Version != 0x03 || info.SCPs[0].Parameter != 0x60 {
+		t.Errorf("SCPs[0] = SCPxx 0x%02X i=0x%04X, want SCP03 i=0x60",
+			info.SCPs[0].Version, info.SCPs[0].Parameter)
+	}
+	if info.SCPs[1].Version != 0x11 || info.SCPs[1].Parameter != 0x0D86 {
+		t.Errorf("SCPs[1] = SCPxx 0x%02X i=0x%04X, want SCP11 i=0x0D86",
+			info.SCPs[1].Version, info.SCPs[1].Parameter)
+	}
+
+	// Back-compat shim: SCPVersion and SCPParameter must reflect
+	// the *first* indicator, not whatever the parser happens to see
+	// last. Old callers continue to work; they just see SCP03.
+	if info.SCPVersion != 0x03 {
+		t.Errorf("SCPVersion = 0x%02X, want 0x03 (back-compat = SCPs[0].Version)",
+			info.SCPVersion)
+	}
+	if info.SCPParameter != 0x60 {
+		t.Errorf("SCPParameter = 0x%04X, want 0x60 (back-compat = SCPs[0].Parameter)",
+			info.SCPParameter)
+	}
+}
+
 // TestParse_SyntheticSCP11 verifies that an SCP11 CRD with a 2-byte
 // `i` parameter parses correctly. GP Card Spec v2.3 Amendment F (SCP11
 // v1.3 §6.2) widens the i-parameter from one byte to one-or-two bytes,
