@@ -1109,10 +1109,15 @@ func TestPIVProvision_RejectsBadMgmtKeyArgs(t *testing.T) {
 			"--mgmt-key", strings.Repeat("AA", 24), // 24 bytes
 			"--mgmt-key-algorithm", "aes128", // wants 16
 		}},
-		{"default with non-3des", []string{
+		{"default with aes128 (wrong length)", []string{
 			"--reader", "f", "--pin", "1",
 			"--mgmt-key", "default",
-			"--mgmt-key-algorithm", "aes192",
+			"--mgmt-key-algorithm", "aes128",
+		}},
+		{"default with aes256 (wrong length)", []string{
+			"--reader", "f", "--pin", "1",
+			"--mgmt-key", "default",
+			"--mgmt-key-algorithm", "aes256",
 		}},
 		{"unknown algorithm", []string{
 			"--reader", "f", "--pin", "1",
@@ -1909,5 +1914,85 @@ func TestSCP03SDRead_WrongKeysFails(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "open SCP03 SD") {
 		t.Errorf("expected open SCP03 SD step in output; got:\n%s", buf.String())
+	}
+}
+
+// TestPIVProvision_MgmtKeyDefault_AES192 confirms --mgmt-key default
+// works with --mgmt-key-algorithm aes192 — the YubiKey 5.7+ factory
+// state. Per Yubico docs, the same 24-byte well-known value
+// (0102030405...0708) is the default for both 3DES (pre-5.7) and
+// AES-192 (5.7+), so "default" must work for either.
+//
+// I had this wrong before; the original code rejected
+// `--mgmt-key default --mgmt-key-algorithm aes192` with an error
+// claiming the default only applied to 3DES. Confirmed against
+// Yubico's own developer docs, the default value is shared.
+func TestPIVProvision_MgmtKeyDefault_AES192(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	// Mock acts as a 5.7+ card: AES-192 mgmt key, default value.
+	mockCard.PIVMgmtKey = piv.DefaultMgmtKey
+	mockCard.PIVMgmtKeyAlgo = piv.AlgoMgmtAES192
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+		"--mgmt-key", "default",
+		"--mgmt-key-algorithm", "aes192",
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err != nil {
+		t.Fatalf("cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "MGMT-KEY AUTH                    PASS — AES-192") {
+		t.Errorf("expected mgmt-key auth PASS with AES-192; got:\n%s", out)
+	}
+}
+
+// TestPIVProvision_MgmtKeyDefault_3DES_StillWorks pins the original
+// pre-5.7 path so the AES-192 expansion doesn't accidentally break
+// it.
+func TestPIVProvision_MgmtKeyDefault_3DES_StillWorks(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	mockCard.PIVMgmtKey = piv.DefaultMgmtKey
+	mockCard.PIVMgmtKeyAlgo = piv.AlgoMgmt3DES
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+		"--mgmt-key", "default",
+		"--mgmt-key-algorithm", "3des",
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err != nil {
+		t.Fatalf("cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "MGMT-KEY AUTH                    PASS — 3DES") {
+		t.Errorf("expected mgmt-key auth PASS with 3DES; got:\n%s", out)
 	}
 }
