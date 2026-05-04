@@ -23,6 +23,7 @@
 //	scp-smoke probe
 //	scp-smoke scp03-sd-read
 //	scp-smoke scp11b-sd-read
+//	scp-smoke scp11a-sd-read
 //	scp-smoke scp11b-piv-verify
 //	scp-smoke test
 //
@@ -49,6 +50,7 @@ var commands = map[string]func(ctx context.Context, env *runEnv, args []string) 
 	"probe":             cmdProbe,
 	"scp03-sd-read":     cmdSCP03SDRead,
 	"scp11b-sd-read":    cmdSCP11bSDRead,
+	"scp11a-sd-read":    cmdSCP11aSDRead,
 	"scp11b-piv-verify": cmdSCP11bPIVVerify,
 	"test":              cmdTest,
 }
@@ -111,6 +113,9 @@ Subcommands:
   scp03-sd-read        Open an SCP03 SD session and verify a read works.
                        Defaults to YubiKey factory credentials.
   scp11b-sd-read       Open an SCP11b SD session and verify a read works.
+  scp11a-sd-read       Open an SCP11a (mutual-auth) SD session and verify
+                       a read works. Requires --oce-key and --oce-cert
+                       and a card with OCE provisioned.
   scp11b-piv-verify    Open an SCP11b session against the PIV applet
                        and verify the PIN.
   test                 Run probe + the three smoke tests; emit a
