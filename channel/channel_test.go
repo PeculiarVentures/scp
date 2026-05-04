@@ -580,7 +580,7 @@ func TestS16_RejectsPartialMACMatch(t *testing.T) {
 // encryption behavior pads with 0x80||0x00*15 and encrypts as one
 // AES block. Matches yubikit's ScpState.encrypt:
 //
-//   msg = data + b"\x80" + 0-padding to 16 bytes; encrypt.
+//	msg = data + b"\x80" + 0-padding to 16 bytes; encrypt.
 //
 // Earlier the code skipped encryption entirely for empty data, which
 // is what GP §6.2.4 literally says, but YubiKey rejects that. We now
