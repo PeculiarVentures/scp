@@ -480,40 +480,40 @@ func parseKeyInformation(data []byte) ([]KeyInfo, error) {
 // parseCertificates parses a GET DATA [Certificate Store] response.
 // The response is a TLV list of raw DER certificates (not 7F21-wrapped).
 //
+// Yubico yubikit emits this shape: GET DATA BF21 returns a top-level
+// concatenation of complete DER X.509 certificates. Each cert is a
+// SEQUENCE TLV (tag 0x30) and the full TLV bytes are the DER encoding
+// the X.509 parser expects. We split on TLV boundaries via
+// splitDERCertificates rather than handing back tlv.Node.Value (which
+// would strip the outer SEQUENCE header and break x509.ParseCertificate).
+//
 // Ref: Python get_certificate_bundle uses Tlv.parse_list on the response.
 func parseCertificates(data []byte) ([][]byte, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
 
-	// Try TLV parsing — each top-level TLV value is a DER certificate.
+	// Top-level may already be a list of DER certs (yubikit shape).
+	// splitDERCertificates walks 0x30-tagged TLVs without consuming
+	// the outer headers, returning bytes the X.509 parser can use
+	// directly.
+	if data[0] == 0x30 {
+		return splitDERCertificates(data)
+	}
+
+	// Otherwise the response may be wrapped in BF21 with the certs
+	// concatenated inside.
 	nodes, err := tlv.Decode(data)
 	if err != nil {
-		// Might be a single raw DER certificate.
+		// Not BER-TLV — treat as a single raw DER cert.
 		return [][]byte{data}, nil
 	}
-
-	// If we have nodes, try to extract certificate data.
-	// The response format varies — could be raw TLV list or BF21-wrapped.
-	store := tlv.Find(nodes, tagCertStore)
-	if store != nil {
-		// Inside BF21, certificates may be raw DER or further TLV-wrapped.
-		if len(store.Value) > 0 {
-			return splitDERCertificates(store.Value)
-		}
+	if store := tlv.Find(nodes, tagCertStore); store != nil && len(store.Value) > 0 {
+		return splitDERCertificates(store.Value)
 	}
 
-	// Try each top-level node's value as a certificate.
-	var certs [][]byte
-	for _, n := range nodes {
-		if len(n.Value) > 0 {
-			certs = append(certs, n.Value)
-		}
-	}
-	if len(certs) > 0 {
-		return certs, nil
-	}
-
+	// Last resort: hand the whole buffer back as one cert. Callers
+	// will surface the X.509 parse error if it isn't.
 	return [][]byte{data}, nil
 }
 
