@@ -1,12 +1,18 @@
-# scp-smoke
+# scpctl
 
-Hardware smoke-test harness for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. Validates SCP03 and SCP11b against real PC/SC-attached cards (primarily retail YubiKeys) and emits PASS/FAIL/SKIP results suitable for both human and machine consumption.
+Administrative CLI for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. Three command groups:
+
+- `smoke` runs the original hardware smoke harness, preserved verbatim. The two questions it answers, against a real card, are still: does the SCP library produce wire bytes that an actual card accepts (`scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`), and does the wire layer survive being wrapped around a higher-level applet protocol (`scp11b-piv-verify`).
+- `piv` is the user-facing PIV operation surface backed by `piv/session`. `info` is wired today; key/cert/PIN operations land in follow-up commits.
+- `sd` is the Security Domain operation surface. `info` is wired today; the SCP-secured read paths still live under `smoke` until they migrate.
+
+Plus two top-level utilities, `readers` and `probe`, for the things operators reach for outside any group.
 
 This binary is hardware-targeting: most subcommands need an actual reader and card. For library-level testing without hardware, use the `mockcard` package directly.
 
 ## What this is for
 
-The two questions this tool answers, against a real card:
+The two questions the smoke group answers, against a real card:
 
 1. **Does the SCP library produce wire bytes that an actual card accepts?** — `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`
 2. **Does the wire layer survive being wrapped around a higher-level applet protocol?** — `scp11b-piv-verify`
@@ -35,8 +41,8 @@ sudo apt install pcscd libpcsclite-dev   # Debian/Ubuntu
 sudo dnf install pcsc-lite pcsc-lite-devel   # Fedora/RHEL
 sudo systemctl enable --now pcscd
 
-cd cmd/scp-smoke
-go build -o scp-smoke .
+cd cmd/scpctl
+go build -o scpctl .
 ```
 
 ### macOS, Windows
@@ -46,19 +52,29 @@ PC/SC is built into the OS. No package install needed; just `go build`.
 ## Usage
 
 ```text
-scp-smoke <subcommand> [flags]
+scpctl <group> <subcommand> [flags]
+scpctl <utility> [flags]
 ```
 
-Run `scp-smoke help` or `scp-smoke <cmd> -h` for full flag lists.
+Run `scpctl help`, `scpctl smoke help`, or `scpctl <group> <cmd> -h` for full flag lists.
+
+The `readers` and `probe` utilities are also reachable directly:
+
+```bash
+scpctl readers
+scpctl probe --reader "YubiKey"
+```
+
+The same commands run under the smoke group with identical behavior; the rest of this document uses the smoke-group form because it matches the historical examples.
 
 ### List PC/SC readers
 
 ```bash
-scp-smoke readers
+scpctl smoke readers
 ```
 
 ```bash
-scp-smoke readers --json
+scpctl smoke readers --json
 ```
 
 ### Probe a card
@@ -66,13 +82,13 @@ scp-smoke readers --json
 Opens an unauthenticated Security Domain session, fetches Card Recognition Data via `GET DATA` tag `0x66`, parses, and prints the card's claimed capabilities.
 
 ```bash
-scp-smoke probe --reader "YubiKey"
+scpctl smoke probe --reader "YubiKey"
 ```
 
 Sample output:
 
 ```
-scp-smoke probe
+scpctl smoke probe
   reader: YubiKey
   select ISD                       PASS
   GET DATA tag 0x66                PASS — 76 bytes
@@ -88,7 +104,7 @@ CRD is **discovery input, not authorization**. A card that lies about its CRD is
 Opens an SCP03 session against the ISD using YubiKey factory credentials (KVN `0xFF`, key `404142434445464748494A4B4C4D4E4F` for ENC/MAC/DEK), then verifies that `GetKeyInformation` and `GetCardRecognitionData` succeed under secure messaging.
 
 ```bash
-scp-smoke scp03-sd-read --reader "YubiKey"
+scpctl smoke scp03-sd-read --reader "YubiKey"
 ```
 
 This is expected to fail on a YubiKey that has had its SCP03 keys rotated to a custom KVN — that's an informative failure, not a bug. Custom-key flag support (`--kvn`, `--enc`, `--mac`, `--dek`) is a follow-up; it isn't in this version because the threshold for "is the wire working at all?" doesn't need it.
@@ -96,7 +112,7 @@ This is expected to fail on a YubiKey that has had its SCP03 keys rotated to a c
 ### SCP11b Security Domain read
 
 ```bash
-scp-smoke scp11b-sd-read --reader "YubiKey" --lab-skip-scp11-trust
+scpctl smoke scp11b-sd-read --reader "YubiKey" --lab-skip-scp11-trust
 ```
 
 SCP11b authenticates the card to the host but **not** the host to the card. The smoke check verifies this by asserting `Session.OCEAuthenticated()` is `false`. After that it issues `GetKeyInformation` to exercise the wire layer.
@@ -108,7 +124,7 @@ SCP11b authenticates the card to the host but **not** the host to the card. The 
 Opens an SCP11b session targeting the PIV applet (NOT the ISD; SCP is applet-scoped on YubiKey) and verifies the PIN over the secure channel.
 
 ```bash
-scp-smoke scp11b-piv-verify --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
+scpctl smoke scp11b-piv-verify --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
 ```
 
 A successful `VERIFY PIN` proves three things at once: SCP11b can target a non-SD applet, the PIV APDU builders survive secure-messaging wrap, and the card accepts the PIN through the wrapped channel.
@@ -120,7 +136,7 @@ If the card returns a `63Cx` SW (PIN wrong, x retries), the failure surfaces wit
 SCP11a is mutual auth: the host validates the card AND the card validates the host's OCE certificate chain against an OCE root that was previously installed on the card. After a successful open, the session is OCE-authenticated and capable of driving SD writes (key rotation, certificate store, allowlist updates).
 
 ```bash
-scp-smoke scp11a-sd-read \
+scpctl smoke scp11a-sd-read \
   --reader "YubiKey" \
   --oce-key /path/to/oce.key.pem \
   --oce-cert /path/to/oce-chain.pem \
@@ -142,7 +158,7 @@ PEM key formats accepted: PKCS#8 (`PRIVATE KEY`, modern `openssl genpkey` defaul
 Installs an OCE public key (and optionally a certificate chain + CA Subject Key Identifier) onto a card via SCP03 with factory keys, so subsequent SCP11a sessions can complete mutual auth. This is the step that has to happen *before* `scp11a-sd-read` works against a fresh card.
 
 ```bash
-scp-smoke bootstrap-oce \
+scpctl smoke bootstrap-oce \
   --reader "YubiKey" \
   --oce-cert /path/to/oce-chain.pem \
   --store-chain \
@@ -161,7 +177,7 @@ The CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK). A card who
 Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other PIV state you want to undo without physically swapping the hardware. Erases ALL 24 PIV slot keypairs and certificates, returns PIN to `123456` and PUK to `12345678`, and resets the management key (to the well-known 3DES default on pre-5.7 firmware, or a randomly regenerated AES-192 key in protected metadata on 5.7+). Does NOT touch installed OCE roots or the Issuer Security Domain — those live outside the PIV applet.
 
 ```bash
-scp-smoke piv-reset \
+scpctl smoke piv-reset \
   --reader "YubiKey" \
   --lab-skip-scp11-trust \
   --confirm-write
@@ -185,7 +201,7 @@ The `--max-block-attempts` flag (default 16) caps the wrong-PIN/wrong-PUK loop. 
 Provisions a PIV slot through an SCP11b-secured channel: `VERIFY PIN` → `GENERATE KEY` → optional `PUT CERTIFICATE` → optional `ATTESTATION`. Same `--confirm-write` dry-run gating as `bootstrap-oce`.
 
 ```bash
-scp-smoke piv-provision \
+scpctl smoke piv-provision \
   --reader "YubiKey" \
   --pin 123456 \
   --slot 9a \
@@ -206,13 +222,13 @@ The check runs against the parsed public key for the relevant algorithm: RSA (mo
 
 ```bash
 # YubiKey with the historic pre-5.7 factory 3DES default
-scp-smoke piv-provision \
+scpctl smoke piv-provision \
   --reader "YubiKey" --pin 123456 --slot 9a \
   --mgmt-key default --mgmt-key-algorithm 3des \
   --lab-skip-scp11-trust --confirm-write
 
 # YubiKey 5.7+ with a rotated AES-192 management key
-scp-smoke piv-provision \
+scpctl smoke piv-provision \
   --reader "YubiKey" --pin 123456 --slot 9a \
   --mgmt-key A1B2C3...  --mgmt-key-algorithm aes192 \
   --lab-skip-scp11-trust --confirm-write
@@ -227,7 +243,7 @@ The mock implements crypto-correct mutual auth when `PIVMgmtKey` and `PIVMgmtKey
 Runs `probe` + the SCP smoke checks in sequence and prints a single PASS/FAIL/SKIP summary at the end.
 
 ```bash
-scp-smoke test \
+scpctl smoke test \
   --reader "YubiKey" \
   --pin 123456 \
   --oce-key /path/to/oce.key.pem \
@@ -236,6 +252,25 @@ scp-smoke test \
 ```
 
 Process exit code is 1 if any check failed; 0 otherwise (including SKIP results). The SCP11a check is skipped automatically if `--oce-key`/`--oce-cert` are not supplied.
+
+## `piv info` and `sd info`
+
+The `piv` and `sd` groups expose read-only `info` commands that probe a card without authentication or state change.
+
+### `scpctl piv info`
+
+Selects the PIV applet, runs the YubiKey-specific `GET VERSION` (returns `6D00` on standard PIV cards), and reports the detected profile and capability set:
+
+```bash
+scpctl piv info --reader "YubiKey"
+scpctl piv info --reader "YubiKey" --json
+```
+
+Output names the active profile (`yubikey-5.7.2`, `standard-piv`, or `probed:<inner>`) and lists which operations the profile claims support for. The probe is two APDUs and changes nothing on the card.
+
+### `scpctl sd info`
+
+Opens an unauthenticated SD session and prints Card Recognition Data. Equivalent to `scpctl probe`; shipped under `sd` so the group dispatch is exercised end to end.
 
 ## Design notes worth knowing
 
@@ -269,13 +304,13 @@ Neither flag set produces a `trust mode SKIP` and the command exits without open
 
 ```bash
 # Production: validate the card cert against a pinned Yubico SD root
-scp-smoke scp11b-piv-verify \
+scpctl smoke scp11b-piv-verify \
   --reader "YubiKey" \
   --pin 123456 \
   --trust-roots /etc/scp/yubikey-roots.pem
 
 # Lab: skip validation for wire-only smoke
-scp-smoke scp11b-piv-verify \
+scpctl smoke scp11b-piv-verify \
   --reader "YubiKey" \
   --pin 123456 \
   --lab-skip-scp11-trust
@@ -299,10 +334,10 @@ The four custom-key flags must all be supplied together — partial specificatio
 
 ```bash
 # Factory (implicit)
-scp-smoke scp03-sd-read --reader "YubiKey"
+scpctl smoke scp03-sd-read --reader "YubiKey"
 
 # Rotated to a custom AES-128 set
-scp-smoke bootstrap-oce \
+scpctl smoke bootstrap-oce \
   --reader "YubiKey" \
   --oce-cert /path/to/oce-chain.pem \
   --scp03-kvn 01 \
