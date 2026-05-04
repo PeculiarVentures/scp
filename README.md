@@ -433,13 +433,25 @@ These mocks are not reference implementations of GlobalPlatform card behavior â€
 
 ### Hardware verification
 
-For end-to-end verification against an actual card, the [`cmd/scp-smoke`](./cmd/scp-smoke) binary runs the smoke suite over a PC/SC reader: probe (unauthenticated CRD), SCP03 SD read with factory keys, SCP11b SD read, and SCP11b PIV `VERIFY PIN`. PASS/FAIL/SKIP per check, plus a `--json` flag for machine consumption.
+For end-to-end verification against an actual card, the [`cmd/scp-smoke`](./cmd/scp-smoke) binary runs a smoke suite over a PC/SC reader. PASS/FAIL/SKIP per check, plus a `--json` flag for machine consumption. The current command set covers the read paths, the trust-bootstrap path, and PIV provisioning over an SCP-secured channel:
+
+| Subcommand | What it does |
+|---|---|
+| `readers` | List PC/SC readers visible to the host. |
+| `probe` | Unauthenticated CRD probe â€” what the card claims to be before any session. |
+| `scp03-sd-read` | Open SCP03 SD with factory keys; read key info + CRD over SM. |
+| `scp11b-sd-read` | One-way auth (card-to-host); read-only over the SCP11b channel. |
+| `scp11a-sd-read` | Mutual auth using a host OCE keypair + cert chain. Asserts the SCP11a-specific invariant `OCEAuthenticated() == true`. Requires a card with the OCE root pre-provisioned (see `bootstrap-oce`). |
+| `scp11b-piv-verify` | Open SCP11b targeting the PIV applet; `VERIFY PIN` over the wrapped channel. |
+| `bootstrap-oce` | Day-1 provisioning: install OCE public key (and optionally cert chain + CA SKI) onto a card via SCP03 with factory keys. Destructive; gated by `--confirm-write` (dry-run otherwise). |
+| `piv-provision` | Generate a PIV slot keypair, optionally install a cert and fetch attestation, all over an SCP11b session. Destructive; same `--confirm-write` gate. |
+| `test` | Run probe + the SD/PIV reads in sequence with a single PASS/FAIL/SKIP summary. Provisioning commands are not in `test` (they're destructive and sequencing-sensitive). |
 
 ```
 scp-smoke test --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
 ```
 
-The harness lives in its own Go submodule because PC/SC needs CGO; see its README for build prerequisites and the safety-relevant notes about `--lab-skip-scp11-trust`.
+The harness lives in its own Go submodule because PC/SC needs CGo; see its README for build prerequisites, the worked examples for each subcommand, and the safety-relevant notes about `--lab-skip-scp11-trust` and the `--confirm-write` destructive gate.
 
 ## Specification compliance
 
