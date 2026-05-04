@@ -95,6 +95,12 @@ func TestSCP11aSDRead_Smoke(t *testing.T) {
 		"--oce-key", keyPath,
 		"--oce-cert", certPath,
 		"--lab-skip-scp11-trust",
+		// Mock advertises only KID=0x01,KVN=0xFF in its synthetic
+		// Key Information Template. Match the preflight against
+		// what the mock has so the smoke runs to completion.
+		// Real YubiKey hardware would use the default 0x11/0x01.
+		"--sd-kid", "1",
+		"--sd-kvn", "255",
 	}
 	if err := cmdSCP11aSDRead(context.Background(), env, args); err != nil {
 		t.Fatalf("cmdSCP11aSDRead: %v\n--- output ---\n%s", err, buf.String())
@@ -115,6 +121,70 @@ func TestSCP11aSDRead_Smoke(t *testing.T) {
 	}
 	if strings.Contains(out, " FAIL") {
 		t.Errorf("output contains FAIL\n--- output ---\n%s", out)
+	}
+}
+
+// TestSCP11aSDRead_PreflightSkipsWhenSDKeyMissing exercises the
+// preflight behavior added because of Ryan's hands-on report:
+// running scp11a-sd-read against a card that doesn't have the
+// requested SCP11a SD key (KID/KVN) used to fail with an opaque
+// card-status error from the SCP11 open. Now the smoke command
+// reads the Key Information Template via an unauthenticated SD
+// session, sees the missing reference, and emits a SKIP that names
+// it explicitly along with the keys actually installed.
+//
+// The mock advertises KID=0x01,KVN=0xFF; we ask for the YubiKey
+// default 0x11/0x01 (also the smoke command's default), which is
+// not installed. The smoke must end without a FAIL line and must
+// not attempt the SCP11 open.
+func TestSCP11aSDRead_PreflightSkipsWhenSDKeyMissing(t *testing.T) {
+	keyPath, certPath := writeOCEFixturePEMs(t)
+
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	mockCard.Variant = 1 // SCP11a
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out:    &buf,
+		errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	// Default --sd-kid (0x11) and --sd-kvn (0x01) — not on the mock.
+	args := []string{
+		"--reader", "fake",
+		"--oce-key", keyPath,
+		"--oce-cert", certPath,
+		"--lab-skip-scp11-trust",
+	}
+	if err := cmdSCP11aSDRead(context.Background(), env, args); err != nil {
+		t.Fatalf("cmdSCP11aSDRead: %v\n--- output ---\n%s", err, buf.String())
+	}
+
+	out := buf.String()
+	wantSubstrings := []string{
+		"SCP11a SD key preflight",
+		"SKIP",
+		"KID=0x11",
+		"KVN=0x01",
+		"not installed",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	// The smoke must NOT have proceeded to OpenSCP11.
+	if strings.Contains(out, "open SCP11a SD") {
+		t.Errorf("preflight skipped, but smoke still attempted OpenSCP11\n--- output ---\n%s", out)
+	}
+	if strings.Contains(out, " FAIL") {
+		t.Errorf("preflight emitted FAIL instead of SKIP\n--- output ---\n%s", out)
 	}
 }
 

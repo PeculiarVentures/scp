@@ -55,6 +55,10 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 		"OCE Key ID on the card (P2 of PERFORM SECURITY OPERATION). Default 0x10 (KeyIDOCE per GP §7.1.1).")
 	oceKVN := fs.Int("oce-kvn", 0x03,
 		"OCE Key Version Number on the card (P1 of PERFORM SECURITY OPERATION). Default 0x03 matches Yubico factory provisioning.")
+	sdKID := fs.Int("sd-kid", 0x11,
+		"Card-side SCP11a SD key reference, KID. This is the key the card uses on its end of the channel — distinct from the OCE key reference. Default 0x11 (GP Amendment F §7.1.1 SCP11a slot, used by YubiKey).")
+	sdKVN := fs.Int("sd-kvn", 0x01,
+		"Card-side SCP11a SD key reference, KVN. Default 0x01 matches Yubico factory provisioning. Pass 0x00 to mean 'any version' (GP-spec literal).")
 	trust := registerTrustFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -65,6 +69,9 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if *oceKID < 0 || *oceKID > 0xFF || *oceKVN < 0 || *oceKVN > 0xFF {
 		return &usageError{msg: "--oce-kid and --oce-kvn must be in 0x00..0xFF"}
+	}
+	if *sdKID < 0 || *sdKID > 0xFF || *sdKVN < 0 || *sdKVN > 0xFF {
+		return &usageError{msg: "--sd-kid and --sd-kvn must be in 0x00..0xFF"}
 	}
 
 	report := &Report{Subcommand: "scp11a-sd-read", Reader: *reader}
@@ -93,17 +100,39 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	cfg := &scp11.Config{
-		Variant:         scp11.SCP11a,
-		OCEPrivateKey:   oceKey,
-		OCECertificates: oceChain,
-		OCEKeyReference: scp11.KeyRef{KID: byte(*oceKID), KVN: byte(*oceKVN)},
-	}
+	cfg := scp11.YubiKeyDefaultSCP11aConfig()
+	cfg.OCEPrivateKey = oceKey
+	cfg.OCECertificates = oceChain
+	cfg.OCEKeyReference = scp11.KeyRef{KID: byte(*oceKID), KVN: byte(*oceKVN)}
+	// Override the card-side SCP11a key reference. The default from
+	// YubiKeyDefaultSCP11aConfig is KID=0x11 KVN=0x01, which matches
+	// Yubico factory provisioning when SCP11a has been installed; the
+	// flags exist so non-Yubico cards or cards with a custom KVN can
+	// still be exercised by this smoke test.
+	cfg.KeyID = byte(*sdKID)
+	cfg.KeyVersion = byte(*sdKVN)
 	proceed, err := trust.applyTrust(cfg, report)
 	if err != nil {
 		return err
 	}
 	if !proceed {
+		_ = report.Emit(env.out, *jsonMode)
+		return nil
+	}
+
+	// Preflight: read the card's Key Information Template via an
+	// unauthenticated SD session. If the requested SCP11a SD key
+	// (KID/KVN from --sd-kid/--sd-kvn) isn't installed, the SCP11a
+	// open below would fail with an opaque card status. Catching it
+	// here turns the failure into a clear SKIP that names the
+	// missing reference and points the operator at SCP11a SD-key
+	// provisioning.
+	//
+	// Best effort: cards that refuse unauthenticated KIT, or any
+	// other transient error, leave preflight as a SKIP-with-warning
+	// and the open is attempted as before. Preflight never fails
+	// the smoke run on its own.
+	if skipped := preflightSCP11aSDKey(ctx, t, byte(*sdKID), byte(*sdKVN), report); skipped {
 		_ = report.Emit(env.out, *jsonMode)
 		return nil
 	}
