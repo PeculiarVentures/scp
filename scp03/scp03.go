@@ -42,6 +42,7 @@ import (
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/cmac"
+	"github.com/PeculiarVentures/scp/internal/secmem"
 	"github.com/PeculiarVentures/scp/kdf"
 	"github.com/PeculiarVentures/scp/transport"
 )
@@ -461,10 +462,10 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 // Close terminates the session and zeros all key material.
 func (s *Session) Close() {
 	if s.sessionKeys != nil {
-		zeroBytes(s.sessionKeys.SENC)
-		zeroBytes(s.sessionKeys.SMAC)
-		zeroBytes(s.sessionKeys.SRMAC)
-		zeroBytes(s.sessionKeys.DEK)
+		secmem.Zero(s.sessionKeys.SENC)
+		secmem.Zero(s.sessionKeys.SMAC)
+		secmem.Zero(s.sessionKeys.SRMAC)
+		secmem.Zero(s.sessionKeys.DEK)
 		s.sessionKeys = nil
 	}
 	s.channel = nil
@@ -703,13 +704,6 @@ func constantTimeEqual(a, b []byte) bool {
 		v |= a[i] ^ b[i]
 	}
 	return v == 0
-}
-
-//go:noinline
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
 }
 
 // cloneBytes returns a deep copy of b. Used so the SessionKeys
