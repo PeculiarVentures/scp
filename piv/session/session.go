@@ -210,11 +210,21 @@ func (s *Session) Close() error { return nil }
 
 // transmit is the single internal APDU path. Every session method
 // goes through it. It exists so the wire-error -> *piv.CardError
-// mapping happens in one place rather than at every call site.
+// mapping happens in one place rather than at every call site, and
+// so PIV's universal "SW=61xx means GET RESPONSE" behavior is
+// applied transparently below the public API.
+//
+// Response chaining for SW=61xx is delegated to apdu.TransmitWithChaining
+// so the same logic is available to other call sites that go around
+// Session (currently cmd_piv_provision sending ATTEST directly over
+// an scp11.Session). Without that, attestation against retail
+// YubiKey 5.7+ — which routinely emits 61xx because cert chains
+// span multiple frames — fails on the first GET RESPONSE the host
+// declines to issue.
 func (s *Session) transmit(ctx context.Context, op string, cmd *apdu.Command) (*apdu.Response, error) {
-	resp, err := s.tx.Transmit(ctx, cmd)
+	resp, err := apdu.TransmitWithChaining(ctx, s.tx, cmd)
 	if err != nil {
-		return nil, fmt.Errorf("%s: transport: %w", op, err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if !resp.IsSuccess() {
 		// 63Cx carries the retry counter in the low nibble; expose it

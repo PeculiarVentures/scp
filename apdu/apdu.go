@@ -6,6 +6,7 @@
 package apdu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -221,6 +222,71 @@ func NewGetResponse(remaining byte) *Command {
 		Data: nil,
 		Le:   int(remaining),
 	}
+}
+
+// Transmitter is the minimum interface needed to drive a single
+// command/response exchange. Any session, channel, or raw transport
+// that exposes Transmit(ctx, *Command) -> *Response satisfies it.
+//
+// Lives here, in apdu, so transport-shaped helpers (response
+// chaining, retry-on-6CXX) can be written once and re-used by every
+// caller without forcing import cycles between higher-level session
+// packages.
+type Transmitter interface {
+	Transmit(ctx context.Context, cmd *Command) (*Response, error)
+}
+
+// MaxResponseChainSteps caps how many GET RESPONSE iterations
+// TransmitWithChaining will issue before giving up. The bound exists
+// to defend the host from a card (real or hostile) that returns
+// SW=61xx forever. Real PIV applets never need more than a handful
+// of steps even for the largest responses; 64 is comfortably above
+// any plausible payload.
+const MaxResponseChainSteps = 64
+
+// TransmitWithChaining issues cmd via tx and transparently follows
+// any GET RESPONSE chain the card emits with SW1 == 0x61. The
+// returned response carries the full concatenated body and the final
+// status word.
+//
+// This mirrors Yubico yubikit's ResponseChainingProcessor: SW=61xx
+// is a "more data available" signal, not a terminal error. Callers
+// that surface 61xx as failure see the symptom Ryan hit on retail
+// YubiKey 5.7.4 PIV ATTEST: "ATTEST: SW=6100 (more data available)"
+// where ykman's equivalent succeeded because its transport layer
+// chains automatically.
+//
+// On any wire error or after MaxResponseChainSteps iterations, the
+// helper returns an error rather than partial data presented as
+// success.
+func TransmitWithChaining(ctx context.Context, tx Transmitter, cmd *Command) (*Response, error) {
+	resp, err := tx.Transmit(ctx, cmd)
+	if err != nil {
+		return nil, err
+	}
+	if resp.SW1 != 0x61 {
+		// Common case: no chaining needed. Avoid the buffer copy.
+		return resp, nil
+	}
+	body := append([]byte(nil), resp.Data...)
+	for steps := 0; resp.SW1 == 0x61; steps++ {
+		if steps >= MaxResponseChainSteps {
+			return nil, fmt.Errorf(
+				"GET RESPONSE chain exceeded %d steps; aborting",
+				MaxResponseChainSteps)
+		}
+		// SW2 is the card's hint for Le on the next GET RESPONSE.
+		// 0x00 means "an unspecified amount, request the max" —
+		// passed through unchanged because Le=0 already encodes
+		// "ask for max" at the wire level.
+		resp, err = tx.Transmit(ctx, NewGetResponse(resp.SW2))
+		if err != nil {
+			return nil, fmt.Errorf("GET RESPONSE step %d: %w", steps+1, err)
+		}
+		body = append(body, resp.Data...)
+	}
+	resp.Data = body
+	return resp, nil
 }
 
 func swDescription(sw uint16) string {

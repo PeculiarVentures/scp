@@ -282,7 +282,12 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 
 	if *doAttest && data.KeyGenerated {
 		attestCmd := pivapdu.Attest(slot)
-		resp, err = sess.Transmit(ctx, attestCmd)
+		// scp11.Session.Transmit doesn't chain GET RESPONSE on
+		// SW=61xx, but PIV ATTEST against retail YubiKey 5.7+
+		// routinely returns 61xx because the cert chain spans
+		// multiple frames. apdu.TransmitWithChaining drives the
+		// full chain and returns the concatenated body.
+		resp, err = apdu.TransmitWithChaining(ctx, sess, attestCmd)
 		switch {
 		case err != nil:
 			report.Fail("ATTESTATION (transmit)", err.Error())
