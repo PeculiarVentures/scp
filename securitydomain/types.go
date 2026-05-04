@@ -16,7 +16,10 @@
 //
 // # Quick start
 //
-//	sd, err := securitydomain.Open(ctx, t, scp03.DefaultConfig())
+//	sd, err := securitydomain.OpenSCP03(ctx, t, &scp03.Config{
+//	    Keys:       scp03.DefaultKeys,
+//	    KeyVersion: 0xFF,
+//	})
 //	if err != nil { ... }
 //	defer sd.Close()
 //

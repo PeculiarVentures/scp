@@ -400,19 +400,33 @@ func storeCaIssuerData(ref KeyReference, ski []byte) []byte {
 //
 // Format: A6{83{KID,KVN}} + 70{93{serial1} + 93{serial2} + ...}
 //
+// Each serial is encoded as the unsigned big-endian byte
+// representation of the *big.Int (big.Int.Bytes()), matching what
+// x509.Certificate.SerialNumber yields. Nil entries are rejected;
+// the empty allowlist (len(serials) == 0) is permitted and produces
+// the equivalent of ClearAllowlist.
+//
 // Ref: Python store_allowlist, C# StoreAllowlist.
-func storeAllowlistData(ref KeyReference, serials []string) ([]byte, error) {
+func storeAllowlistData(ref KeyReference, serials []*big.Int) ([]byte, error) {
 	keyRefTLV := tlv.BuildConstructed(tagControlRef,
 		tlv.Build(tagKeyID, []byte{ref.ID, ref.Version}),
 	)
 
 	var serialData []byte
-	for _, s := range serials {
-		b, err := hex.DecodeString(s)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %q: %v", ErrInvalidSerial, s, err)
+	for i, n := range serials {
+		if n == nil {
+			return nil, fmt.Errorf("%w: serials[%d] is nil", ErrInvalidSerial, i)
 		}
-		serialTLV := tlv.Build(tagSerialNum, b)
+		// big.Int.Bytes() returns the unsigned big-endian
+		// representation of the absolute value. Negative serials
+		// are rejected — x509 serials are unsigned by spec
+		// (RFC 5280 §4.1.2.2 says "non-negative integer"), and a
+		// caller passing a negative value is almost certainly a
+		// bug.
+		if n.Sign() < 0 {
+			return nil, fmt.Errorf("%w: serials[%d] is negative", ErrInvalidSerial, i)
+		}
+		serialTLV := tlv.Build(tagSerialNum, n.Bytes())
 		serialData = append(serialData, serialTLV.Encode()...)
 	}
 
@@ -636,7 +650,7 @@ func unmarshalP256Point(data []byte) (*ecdsa.PublicKey, error) {
 	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }
 
-func parseAllowlist(data []byte) ([]string, error) {
+func parseAllowlist(data []byte) ([]*big.Int, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -648,10 +662,10 @@ func parseAllowlist(data []byte) ([]string, error) {
 	if container == nil {
 		container = &tlv.Node{Children: nodes}
 	}
-	var serials []string
+	var serials []*big.Int
 	for _, n := range container.Children {
 		if n.Tag == tagSerialNum {
-			serials = append(serials, hex.EncodeToString(n.Value))
+			serials = append(serials, new(big.Int).SetBytes(n.Value))
 		}
 	}
 	return serials, nil
@@ -712,30 +726,31 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 
 // --- Serial number conversion ---
 
-// SerialToHex converts an x509 certificate serial (*big.Int) into the
-// lowercase hex string format that StoreAllowlist expects. The
-// encoding is the big-endian byte representation of the serial,
-// hex-encoded with no leading "0x", no separators, and no padding
-// to a fixed width. An odd-length result is preserved as-is when
-// the high byte happens to be 0x0X — the corresponding decoder
-// (SerialFromHex / hex.DecodeString) tolerates that, and StoreAllowlist
-// preserves the byte length the certificate originally used.
+// SerialToHex converts an x509 certificate serial (*big.Int) into a
+// lowercase hex string. The encoding is the unsigned big-endian byte
+// representation of the absolute value, hex-encoded with no leading
+// "0x", no separators, and no padding to a fixed width.
 //
-// Round-trips with SerialFromHex and matches the format consumed by
-// StoreAllowlist(ctx, ref, []string{...}).
+// Provided as a convenience for callers that store or transport
+// serials as text (configuration files, command-line arguments, log
+// lines). StoreAllowlist takes []*big.Int directly, so neither this
+// helper nor SerialFromHex is required when feeding x509-derived
+// serials straight through.
+//
+// Round-trips with SerialFromHex.
 func SerialToHex(serial *big.Int) string {
 	return hex.EncodeToString(serial.Bytes())
 }
 
-// SerialFromHex parses a hex-encoded certificate serial back into a
+// SerialFromHex parses a hex-encoded certificate serial into a
 // *big.Int. The input format matches SerialToHex's output: lowercase
 // or uppercase hex, no "0x" prefix, no separators. Returns
 // ErrInvalidSerial wrapped with the offending input on a parse
 // failure.
 //
-// Provided so callers building allowlists can normalize serials they
-// pulled from x509.Certificate.SerialNumber and feed back through
-// the StoreAllowlist API.
+// Provided as a convenience for callers building allowlists from
+// serials originally captured as hex strings (configuration files,
+// audit logs). StoreAllowlist takes []*big.Int directly.
 func SerialFromHex(s string) (*big.Int, error) {
 	b, err := hex.DecodeString(s)
 	if err != nil {

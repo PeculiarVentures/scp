@@ -3,6 +3,7 @@ package securitydomain
 import (
 	"context"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -90,7 +91,7 @@ func TestSCP11b_OCERequiredOps_Rejected_HostSide(t *testing.T) {
 		{"Reset", func() error { return sd.Reset(ctx) }},
 		{"StoreCertificates", func() error { return sd.StoreCertificates(ctx, ref, nil) }},
 		{"StoreCaIssuer", func() error { return sd.StoreCaIssuer(ctx, ref, []byte{0x01, 0x02}) }},
-		{"StoreAllowlist", func() error { return sd.StoreAllowlist(ctx, ref, []string{"01"}) }},
+		{"StoreAllowlist", func() error { return sd.StoreAllowlist(ctx, ref, []*big.Int{big.NewInt(1)}) }},
 		{"ClearAllowlist", func() error { return sd.ClearAllowlist(ctx, ref) }},
 		{"StoreData", func() error { return sd.StoreData(ctx, []byte("test")) }},
 	}

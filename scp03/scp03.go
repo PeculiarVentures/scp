@@ -332,8 +332,8 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		// it preserves key_dek through derive() so it's available
 		// for Security Domain operations.
 		// Earlier versions stored nil here, forcing callers to keep
-		// a separate copy or go through securitydomain.Open just to
-		// get at the DEK. That was a silent footgun for direct
+		// a separate copy or go through securitydomain.OpenSCP03 just
+		// to get at the DEK. That was a silent footgun for direct
 		// scp03 users.
 		DEK:      cloneBytes(cfg.Keys.DEK),
 		Receipt:  nil,              // SCP03 doesn't use receipts

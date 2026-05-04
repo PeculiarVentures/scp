@@ -80,7 +80,10 @@ The `securitydomain` package provides typed APIs for administering the YubiKey S
 
 ```go
 // Open an authenticated management session
-sd, err := securitydomain.Open(ctx, transport, scp03.DefaultKeys, 0x00)
+sd, err := securitydomain.OpenSCP03(ctx, transport, &scp03.Config{
+    Keys:       scp03.DefaultKeys,
+    KeyVersion: 0xFF,
+})
 defer sd.Close()
 
 // Inspect installed keys
@@ -101,7 +104,13 @@ sd.StoreCertificates(ctx, scp11Ref, certChain)
 oceRef := securitydomain.NewKeyReference(securitydomain.KeyIDOCE, 0x03)
 sd.PutECPublicKey(ctx, oceRef, ocePublicKey, 0)
 sd.StoreCaIssuer(ctx, oceRef, subjectKeyIdentifier)
-sd.StoreAllowlist(ctx, oceRef, []string{"serial1hex", "serial2hex"})
+
+// Build the allowlist from x509 certificate serials directly
+var allowed []*big.Int
+for _, c := range trustedCerts {
+    allowed = append(allowed, c.SerialNumber)
+}
+sd.StoreAllowlist(ctx, oceRef, allowed)
 
 // Factory reset (restores default keys)
 sd.Reset(ctx)
