@@ -50,6 +50,7 @@ import (
 	"github.com/PeculiarVentures/scp/cmac"
 	"github.com/PeculiarVentures/scp/kdf"
 	"github.com/PeculiarVentures/scp/tlv"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // Card simulates a GP Security Domain with SCP11b support.
@@ -974,4 +975,18 @@ func stripPINPad(padded []byte) []byte {
 		}
 	}
 	return nil
+}
+
+// TrustBoundary reports TrustBoundaryUnknown. The mock is a test
+// fixture that has no notion of where the host running the
+// program sits relative to anything; it does not represent a
+// physical trust posture. Callers gating raw-mode operations on
+// transport.TrustBoundaryLocalPCSC will refuse this transport,
+// which is the right behavior: tests that need to exercise raw
+// destructive paths against the mock do so by wrapping the
+// transport in a test-only override that explicitly claims
+// TrustBoundaryLocalPCSC and acknowledges the override in its
+// type name.
+func (t *MockTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
 }

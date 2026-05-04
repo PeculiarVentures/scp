@@ -297,3 +297,7 @@ func (r *replayingRelayTransport) Close() error {
 }
 
 var _ transport.Transport = (*replayingRelayTransport)(nil)
+
+func (r *replayingRelayTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

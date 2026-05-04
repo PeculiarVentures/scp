@@ -249,6 +249,29 @@ func openPIVSession(
 	}
 
 	if *flags.rawLocalOK {
+		// --raw-local-ok asserts the host running scpctl is in the
+		// operator's trust boundary. The transport itself reports
+		// whether it can carry that assertion: PC/SC is local-by-
+		// definition, gRPC relay is not, and anything that doesn't
+		// declare its boundary (mocks, future custom transports
+		// that haven't opted in) defaults to TrustBoundaryUnknown
+		// and is refused. This is the difference between an
+		// operator assertion and a system-level guarantee: the flag
+		// alone is the assertion, the transport-reported boundary
+		// is what backs the assertion with infrastructure.
+		//
+		// Tests that need to exercise raw paths against a mock
+		// transport route through an explicit override wrapper
+		// (rawLocalAcknowledgedTransport in cmd_piv_ops_test.go);
+		// production code paths cannot reach this branch with a
+		// non-local transport because pcscConnect is the only
+		// transport factory wired into main.
+		boundary := t.TrustBoundary()
+		if boundary != transport.TrustBoundaryLocalPCSC {
+			return nil, false, &usageError{msg: fmt.Sprintf(
+				"--raw-local-ok refused: transport reports trust boundary %q, not %q. Raw mode requires a transport whose host-to-card path is in the operator's trust boundary (local PC/SC). Use --scp11b for relayed or remote transports.",
+				boundary, transport.TrustBoundaryLocalPCSC)}
+		}
 		report.TransportSecurity = TransportSecurityRawPCSC
 		report.Pass("channel mode", "raw (operator asserted local-USB trust)")
 		sess, err := session.New(ctx, t, session.Options{})

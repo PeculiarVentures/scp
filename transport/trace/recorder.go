@@ -282,5 +282,12 @@ func encodeResponse(resp *apdu.Response) []byte {
 	return out
 }
 
+// TrustBoundary forwards to the wrapped transport. The recorder
+// itself adds no trust posture; whatever security boundary the
+// inner transport reports is what callers see.
+func (r *Recorder) TrustBoundary() transport.TrustBoundary {
+	return r.inner.TrustBoundary()
+}
+
 // Compile-time assertion: Recorder is a Transport.
 var _ transport.Transport = (*Recorder)(nil)

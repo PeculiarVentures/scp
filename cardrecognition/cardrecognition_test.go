@@ -303,3 +303,7 @@ func intsEqual(a, b []int) bool {
 	}
 	return true
 }
+
+func (p *probeTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

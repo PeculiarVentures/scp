@@ -936,3 +936,7 @@ func TestKeyIDConstants_MatchGPAmendmentF(t *testing.T) {
 			KeyIDSCP11a, KeyIDSCP11b, KeyIDSCP11c)
 	}
 }
+
+func (r *recordingTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

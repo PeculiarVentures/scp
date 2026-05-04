@@ -293,3 +293,7 @@ func trim(b []byte, n int) []byte {
 	}
 	return b[:n]
 }
+
+func (r *relayTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

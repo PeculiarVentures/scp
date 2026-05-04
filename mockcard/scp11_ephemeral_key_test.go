@@ -389,3 +389,10 @@ func (r *receiptInjector) TransmitRaw(ctx context.Context, raw []byte) ([]byte, 
 }
 
 func (r *receiptInjector) Close() error { return r.inner.Close() }
+
+func (r *recordingTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
+func (r *receiptInjector) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

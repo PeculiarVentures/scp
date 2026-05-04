@@ -19,6 +19,7 @@ import (
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/kdf"
 	"github.com/PeculiarVentures/scp/tlv"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // --- reference P-256 Key Material ---
@@ -549,4 +550,8 @@ func TestECDHWithReferenceKeys_SCP11c(t *testing.T) {
 		t.Errorf("SCP11c receipt mismatch:\n  got:  %X\n  want: %X", receipt, expectedReceipt)
 	}
 	t.Logf("SCP11c receipt verified against reference vectors")
+}
+
+func (r *recordingTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
 }

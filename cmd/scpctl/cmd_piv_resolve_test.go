@@ -273,7 +273,11 @@ func TestPIVMgmtAuth_RawLocalOK_OpensSession(t *testing.T) {
 		out:    &buf,
 		errOut: &buf,
 		connect: func(_ context.Context, _ string) (transport.Transport, error) {
-			return card.Transport(), nil
+			// asLocal wraps the mock so the transport-level
+			// TrustBoundary() returns LocalPCSC; without this the
+			// production gate refuses --raw-local-ok against the
+			// mock (which is correct: mocks have no trust posture).
+			return asLocal(card.Transport()), nil
 		},
 	}
 

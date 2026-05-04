@@ -282,3 +282,7 @@ func formatCAPDUs(capdus [][]byte) string {
 	}
 	return out
 }
+
+func (s *scriptedTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

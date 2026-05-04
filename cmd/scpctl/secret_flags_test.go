@@ -185,7 +185,7 @@ func TestPIVPinVerify_StdinIntegration(t *testing.T) {
 		errOut: &buf,
 		stdin:  newSingleShotStdin(strings.NewReader("123456\n")),
 		connect: func(_ context.Context, _ string) (transport.Transport, error) {
-			return card.Transport(), nil
+			return asLocal(card.Transport()), nil
 		},
 	}
 

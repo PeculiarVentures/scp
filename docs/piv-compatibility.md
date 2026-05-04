@@ -34,10 +34,10 @@ What is **not** yet validated:
 
 To promote `StandardPIV` from `spec` to `verified`, drive a non-YubiKey PIV card through:
 
-1. `scpctl piv info` — confirms SELECT and probe fall through to Standard PIV.
-2. `scpctl smoke piv-provision` with `--profile standard-piv` — confirms generate, put cert, and binding check work end to end.
-3. PIN verify and PUK unblock paths.
-4. RESET RETRY COUNTER for both PIN and PUK.
+1. `scpctl piv info` — confirms SELECT and probe fall through to Standard PIV (the `profile` field in the report should read `standard-piv`).
+2. `scpctl piv key generate --slot 9a --confirm-write --raw-local-ok` followed by `scpctl piv cert put --slot 9a --cert <pem> --expected-pubkey <pem> --confirm-write --raw-local-ok` — confirms generate, put cert, and the cert-to-public-key binding check work end to end. The active profile is selected by the probe, not by a CLI flag.
+3. PIN verify and PUK unblock paths via `scpctl piv pin verify`, `scpctl piv pin change`, and `scpctl piv pin unblock`.
+4. RESET RETRY COUNTER for both PIN and PUK (exercised through `scpctl piv pin unblock` and the equivalent PUK flow).
 
 Log the run in commit history and update this file's matrix to `verified`.
 

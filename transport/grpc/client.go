@@ -305,3 +305,14 @@ func apduResponseFromProto(p *pb.ApduResponse) *apdu.Response {
 		SW2:  byte(p.Sw2),
 	}
 }
+
+// TrustBoundary reports that this transport relays APDUs across a
+// network boundary (gRPC). The relay sees every APDU on the wire
+// in cleartext unless the caller wraps it with a secure-channel
+// layer (SCP11b, etc.). Raw destructive PIV operations against a
+// gRPC-relayed card are exactly the case --raw-local-ok must
+// refuse: the host running scpctl is NOT in the same trust
+// boundary as the card.
+func (c *Client) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryRelay
+}

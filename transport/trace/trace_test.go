@@ -451,3 +451,10 @@ func (o *okTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
 }
 
 func (o *okTransport) Close() error { return nil }
+
+func (c *captureCRDTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
+func (o *okTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

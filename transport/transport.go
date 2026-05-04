@@ -32,6 +32,49 @@ const (
 	MaxCollectedResponseBytes = 1 << 20
 )
 
+// TrustBoundary describes whether the host running the program
+// is in the same trust boundary as the card. The value is consulted
+// by callers (notably the scpctl piv surface) before allowing raw
+// APDU operations: raw mode is only safe when the host between the
+// operator and the card is fully trusted, and the transport is the
+// component that knows whether that's true.
+//
+// Adding this to the Transport interface (rather than asking the
+// caller to figure it out) means a future relay or browser-mediated
+// transport cannot quietly become "raw-acceptable" by accident; it
+// has to declare its boundary explicitly, and the default value
+// (TrustBoundaryUnknown) fails closed against raw-mode gates.
+type TrustBoundary string
+
+const (
+	// TrustBoundaryLocalPCSC means the transport is direct local
+	// PC/SC against a card plugged into the host. The kernel, the
+	// PC/SC daemon, the binary, and the card are all in scope of
+	// the same operator. Raw APDUs are acceptable here because no
+	// untrusted party sits between the host and the card.
+	TrustBoundaryLocalPCSC TrustBoundary = "local-pcsc"
+
+	// TrustBoundaryRelay means the transport relays APDUs across
+	// a network or process boundary the operator does not control
+	// end to end (gRPC card relay, browser-mediated session, etc.).
+	// Raw APDUs are NOT acceptable here; SCP11b (or another
+	// authenticated key-agreement layer) is required to keep PIN/
+	// management-key/PIV traffic confidential and integrity-
+	// protected through the relay.
+	TrustBoundaryRelay TrustBoundary = "relay"
+
+	// TrustBoundaryUnknown is the default for transports that
+	// cannot or do not classify themselves (mocks, future custom
+	// transports that haven't opted in). Treated as not-local for
+	// raw-mode gating purposes: a transport whose boundary is
+	// unknown cannot be assumed to be safe for raw destructive
+	// operations. Tests that need to exercise raw paths against
+	// the mock use a wrapper that explicitly overrides the
+	// boundary; production code paths never reach
+	// TrustBoundaryUnknown.
+	TrustBoundaryUnknown TrustBoundary = "unknown"
+)
+
 // Transport is the low-level card communication interface. Implementations
 // send raw APDU bytes to the card and return raw response bytes.
 // The SCP11 session layer wraps this to add encryption and MAC.
@@ -48,6 +91,13 @@ type Transport interface {
 
 	// Close releases the underlying card connection.
 	Close() error
+
+	// TrustBoundary reports the host-to-card trust posture of
+	// this transport. Callers gating raw-mode operations consult
+	// this; see TrustBoundary's doc for the full rationale.
+	// Implementations should return a stable value for the
+	// lifetime of the transport.
+	TrustBoundary() TrustBoundary
 }
 
 // TransmitWithChaining sends a command that may exceed 255 bytes by

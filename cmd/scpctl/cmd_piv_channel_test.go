@@ -285,3 +285,51 @@ func TestConfirmResetPIV_RequiredOnReset(t *testing.T) {
 		t.Errorf("error should mention --confirm-reset-piv: %v", err)
 	}
 }
+
+// TestChannelMode_RawLocalOK_RefusedAgainstNonLocalTransport
+// verifies the production gate that --raw-local-ok requires the
+// transport to report TrustBoundaryLocalPCSC. The mock card returns
+// TrustBoundaryUnknown by design; without the asLocal wrapper, the
+// gate must refuse with an error naming the boundary mismatch.
+//
+// This is the safety-relevant test for the trust-boundary feature:
+// it pins the behavior that an operator cannot raw-mode their way
+// past the gate just by passing --raw-local-ok against a transport
+// whose underlying boundary disagrees. Future relay or browser-
+// mediated transports inherit this protection automatically because
+// the gate is structural, not flag-driven.
+func TestChannelMode_RawLocalOK_RefusedAgainstNonLocalTransport(t *testing.T) {
+	card, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	var buf bytes.Buffer
+	env := &runEnv{
+		out:    &buf,
+		errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			// Bare mock; TrustBoundary() returns Unknown.
+			return card.Transport(), nil
+		},
+	}
+
+	err = cmdPIVMgmtAuth(context.Background(), env, []string{
+		"--reader", "fake",
+		"--raw-local-ok",
+	})
+	if err != nil {
+		// The CLI handler swallows the gate error into the report
+		// rather than returning it; check the buffer below.
+		t.Logf("handler returned: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "--raw-local-ok refused") {
+		t.Errorf("expected gate-refusal text in output:\n%s", out)
+	}
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("expected error to name the actual boundary 'unknown':\n%s", out)
+	}
+	if !strings.Contains(out, "local-pcsc") {
+		t.Errorf("expected error to name required 'local-pcsc' boundary:\n%s", out)
+	}
+}

@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/transport"
 	"github.com/PeculiarVentures/scp/channel"
 )
 
@@ -396,4 +397,8 @@ func TestSCP03_NoSELECT_WhenSelectAIDNil(t *testing.T) {
 	}
 	defer sess.Close()
 	tt.expectConsumedAll()
+}
+
+func (tt *transcriptTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
 }

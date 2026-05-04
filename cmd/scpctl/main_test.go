@@ -292,3 +292,7 @@ func (p *probeFakeTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, e
 }
 
 func (p *probeFakeTransport) Close() error { return nil }
+
+func (p *probeFakeTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

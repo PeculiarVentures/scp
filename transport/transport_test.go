@@ -64,3 +64,5 @@ func TestTransmitCollectAll_ByteCap(t *testing.T) {
 		t.Errorf("expected byte-cap error, got: %v", err)
 	}
 }
+
+func (c *chunkingTransport) TrustBoundary() TrustBoundary { return TrustBoundaryUnknown }

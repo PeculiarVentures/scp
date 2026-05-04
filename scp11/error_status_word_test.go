@@ -103,3 +103,7 @@ func (r *errorPassThroughRecorder) Close() error { return r.inner.Close() }
 
 var _ transport.Transport = (*errorPassThroughRecorder)(nil)
 var _ = errors.New // keep imports stable if we add error checks later
+
+func (r *errorPassThroughRecorder) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
