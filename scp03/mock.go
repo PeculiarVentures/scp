@@ -10,7 +10,23 @@ import (
 	"github.com/PeculiarVentures/scp/kdf"
 )
 
-// MockCard simulates a GP card supporting SCP03 for end-to-end testing.
+// MockCard simulates a GlobalPlatform card supporting SCP03 for
+// end-to-end testing. It implements INITIALIZE UPDATE, EXTERNAL
+// AUTHENTICATE, secure messaging (C-MAC | C-DEC | R-MAC | R-ENC),
+// and a small set of post-handshake commands the test fixtures use.
+//
+// Lives in this package rather than in the central mockcard
+// package because SCP03's setup is pre-shared symmetric keys
+// (StaticKeys), while mockcard.Card configures around an asymmetric
+// SCP11 key and certificate. The two protocols have genuinely
+// different setup needs; rather than collapse them into one
+// either/or Card type, each protocol's mock lives next to its
+// implementation. See mockcard.Card for the SCP11 counterpart.
+//
+// MockCard is for tests, examples, and local development only. It is
+// not a reference implementation: it covers the subset of card
+// behavior the SCP03 host code exercises, not arbitrary GlobalPlatform
+// card behavior.
 type MockCard struct {
 	Keys StaticKeys
 
@@ -23,12 +39,19 @@ type mockSession struct {
 	ch   *channel.SecureChannel
 }
 
-// NewMockCard creates a mock card with the given static keys.
+// NewMockCard creates an SCP03 mock card configured with the given
+// static keys (typically scp03.DefaultKeys for factory-fresh card
+// emulation, or a freshly generated set for testing key rotation).
+//
+// The returned MockCard is usable as a Transport via its Transport()
+// method, which produces something satisfying transport.Transport.
 func NewMockCard(keys StaticKeys) *MockCard {
 	return &MockCard{Keys: keys}
 }
 
-// Transport returns a transport backed by this mock card.
+// Transport returns a transport.Transport backed by this mock card.
+// Multiple calls return independent MockTransport instances; the
+// underlying card state is shared.
 func (c *MockCard) Transport() *MockTransport {
 	return &MockTransport{card: c}
 }

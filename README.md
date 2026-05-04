@@ -310,6 +310,17 @@ Conformance is checked against external references rather than only against this
 
 These are byte-exact known-answer tests using a recording transport, so they catch regressions a mock card couldn't.
 
+### Mock card fixtures
+
+For tests and local development, the library ships with two in-memory mock cards. SCP03 and SCP11 have genuinely different setup needs (pre-shared symmetric keys vs. asymmetric key + certificate), so each protocol's mock lives next to its implementation rather than being conflated into a single either/or `Card` type:
+
+- `mockcard.Card` (in [`mockcard/`](./mockcard)) — SCP11 mock (a, b, c). `mockcard.New()` returns a card with a fresh P-256 key and self-signed cert. `Variant` and `LegacySCP11bNoReceipt` fields tweak behavior for testing variants and pre-Amendment-F-v1.4 cards. Used by the relay tests, replay-rejection regression tests, and the `cmd/example` end-to-end demo.
+- `scp03.MockCard` (in [`scp03/`](./scp03)) — SCP03 mock. `scp03.NewMockCard(keys)` configures with any `StaticKeys` (typically `scp03.DefaultKeys` for factory-fresh card emulation, or a generated set for key-rotation tests). Used by the SCP03 protocol tests.
+
+Both expose a `Transport()` method returning something satisfying `transport.Transport`, so test code at session or Security Domain level can be parameterized over either when the test logic doesn't care which protocol is underneath.
+
+These mocks are not reference implementations of GlobalPlatform card behavior — they cover the subset the host code exercises. For protocol conformance, rely on the byte-exact transcript tests above.
+
 ## Specification Compliance
 
 | Spec | Coverage |
