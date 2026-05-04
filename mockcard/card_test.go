@@ -31,7 +31,7 @@ func TestEndToEnd_SCP11b_Handshake(t *testing.T) {
 	//   3. INTERNAL AUTHENTICATE (ECDH key agreement)
 	//   4. Session key derivation + receipt verification
 	//   5. SELECT PIV application (encrypted + MACed)
-	cfg := scp11.DefaultConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true // mock card self-signed key
 	sess, err := scp11.Open(ctx, transport, cfg)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestEndToEnd_SCP11b_PIVGenerateKey(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	cfg := scp11.DefaultConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.ApplicationAID = scp11.AIDPIV
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := scp11.Open(ctx, card.Transport(), cfg)

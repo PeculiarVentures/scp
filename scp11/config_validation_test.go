@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/mockcard"
 )
 
@@ -45,7 +46,7 @@ func TestOpen_SCP11a_ZeroOCEKeyReference_Rejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := DefaultSCP11aConfig()
+	cfg := YubiKeyDefaultSCP11aConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	_, err = Open(context.Background(), card.Transport(), cfg)
 	if err == nil {
@@ -56,7 +57,7 @@ func TestOpen_SCP11a_ZeroOCEKeyReference_Rejected(t *testing.T) {
 // TestDefaultSCP11Configs_HaveCorrectKIDs confirms each variant
 // constructor sets the right GP Amendment F §7.1.1 KID. This is the
 // safety net for the documented pitfall where Variant-only mutation
-// of DefaultConfig produced an SCP11a config with the SCP11b KID.
+// of YubiKeyDefaultSCP11bConfig produced an SCP11a config with the SCP11b KID.
 func TestDefaultSCP11Configs_HaveCorrectKIDs(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -64,9 +65,9 @@ func TestDefaultSCP11Configs_HaveCorrectKIDs(t *testing.T) {
 		wantV  Variant
 		wantID byte
 	}{
-		{"SCP11a", DefaultSCP11aConfig(), SCP11a, 0x11},
-		{"SCP11b", DefaultSCP11bConfig(), SCP11b, 0x13},
-		{"SCP11c", DefaultSCP11cConfig(), SCP11c, 0x15},
+		{"SCP11a", YubiKeyDefaultSCP11aConfig(), SCP11a, 0x11},
+		{"SCP11b", YubiKeyDefaultSCP11bConfig(), SCP11b, 0x13},
+		{"SCP11c", YubiKeyDefaultSCP11cConfig(), SCP11c, 0x15},
 	}
 	for _, c := range cases {
 		if c.cfg.Variant != c.wantV {
@@ -74,6 +75,47 @@ func TestDefaultSCP11Configs_HaveCorrectKIDs(t *testing.T) {
 		}
 		if c.cfg.KeyID != c.wantID {
 			t.Errorf("%s: KeyID = 0x%02X, want 0x%02X", c.name, c.cfg.KeyID, c.wantID)
+		}
+	}
+}
+
+// TestStrictGPConfigs_HaveCorrectShape verifies the StrictGP variant
+// helpers set the GP-spec values (KID per §7.1.1, KVN 0 = "any
+// version"), full security level, and the GP-literal empty-data
+// policy — which is the actual semantic difference from the
+// YubiKey-default helpers.
+func TestStrictGPConfigs_HaveCorrectShape(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    *Config
+		wantV  Variant
+		wantID byte
+	}{
+		{"SCP11a", StrictGPSCP11aConfig(), SCP11a, 0x11},
+		{"SCP11b", StrictGPSCP11bConfig(), SCP11b, 0x13},
+		{"SCP11c", StrictGPSCP11cConfig(), SCP11c, 0x15},
+	}
+	for _, c := range cases {
+		if c.cfg.Variant != c.wantV {
+			t.Errorf("%s: Variant = %v, want %v", c.name, c.cfg.Variant, c.wantV)
+		}
+		if c.cfg.KeyID != c.wantID {
+			t.Errorf("%s: KeyID = 0x%02X, want 0x%02X", c.name, c.cfg.KeyID, c.wantID)
+		}
+		if c.cfg.KeyVersion != 0x00 {
+			t.Errorf("%s: KeyVersion = 0x%02X, want 0x00 (GP \"any version\")",
+				c.name, c.cfg.KeyVersion)
+		}
+		if c.cfg.SecurityLevel == 0 {
+			t.Errorf("%s: SecurityLevel = 0; helpers should set full level", c.name)
+		}
+		// The defining semantic difference from YubiKeyDefault*: empty
+		// data is NOT padded-and-encrypted under the strict-GP reading.
+		// If this assertion fails, the helper has silently lost its
+		// reason to exist.
+		if c.cfg.EmptyDataEncryption != channel.EmptyDataGPLiteral {
+			t.Errorf("%s: EmptyDataEncryption = %v, want EmptyDataGPLiteral",
+				c.name, c.cfg.EmptyDataEncryption)
 		}
 	}
 }

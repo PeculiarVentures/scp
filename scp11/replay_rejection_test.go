@@ -100,7 +100,7 @@ func TestSCP11_RelayReplayedResponse_Rejected(t *testing.T) {
 	// Open SCP11b — simpler than SCP11a here because the test is
 	// about the secure-messaging counter, not OCE auth, and SCP11b
 	// reaches a usable secure channel with less setup.
-	cfg := scp11.DefaultSCP11bConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := scp11.Open(ctx, rt, cfg)
 	if err != nil {

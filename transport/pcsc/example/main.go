@@ -60,7 +60,7 @@ func main() {
 	// production code MUST configure CardTrustPolicy or
 	// CardTrustAnchors. See "Certificate Trust Validation" in the
 	// main README.
-	cfg := scp11.DefaultSCP11bConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sess, err := scp11.Open(ctx, tr, cfg)

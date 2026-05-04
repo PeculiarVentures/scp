@@ -52,7 +52,7 @@ func TestOpenSCP11_PopulatesSessionDEK(t *testing.T) {
 		t.Fatalf("parse cert: %v", err)
 	}
 
-	cfg := scp11.DefaultSCP11aConfig()
+	cfg := scp11.YubiKeyDefaultSCP11aConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	cfg.OCEPrivateKey = oceKey
 	cfg.OCECertificates = []*x509.Certificate{oceCert}

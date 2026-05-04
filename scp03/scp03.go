@@ -109,6 +109,24 @@ func FactoryYubiKeyConfig() *Config {
 	}
 }
 
+// StrictGPConfig returns an SCP03 Config with spec-literal defaults
+// for the given key set: KeyVersion 0 ("any version" per GP), full
+// security level by default, and EmptyDataEncryption set explicitly
+// to channel.EmptyDataGPLiteral. Use this against cards that
+// strictly implement GP Amendment D §6.2.4 rather than the YubiKey
+// pad-and-encrypt interpretation.
+//
+// The caller supplies keys explicitly; there is no factory-key
+// shortcut here because the GP spec test keys are themselves the
+// scp03.DefaultKeys, and using them is already an opt-in.
+func StrictGPConfig(keys StaticKeys) *Config {
+	return &Config{
+		Keys:                keys,
+		KeyVersion:          0x00,
+		EmptyDataEncryption: channel.EmptyDataGPLiteral,
+	}
+}
+
 // Config holds the parameters for establishing an SCP03 session.
 type Config struct {
 	// Keys is the pre-shared static key set.
