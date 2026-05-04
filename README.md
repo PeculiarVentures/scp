@@ -146,6 +146,7 @@ sess.Close()
 | `aid` | Curated AID prefix database for SELECT-command annotation (GP, PIV, FIDO, OpenPGP, EMV, eID, health) |
 | `transport` | Transport interface, GET RESPONSE chaining, response collection caps |
 | `transport/pcsc` | PC/SC transport for USB CCID and NFC readers (CGO; separate `go.mod`) |
+| `transport/grpc` | CardRelay gRPC transport — server wraps a real card, client implements `transport.Transport`. Separate `go.mod` so gRPC is opt-in. |
 | `transport/trace` | Record/replay decorator for `transport.Transport`; SELECT exchanges auto-annotated with AID name; CRD captured into trace metadata |
 | `piv` | YubiKey-flavored PIV command builders (APDU only — no PIV session layer; see package doc) |
 | `mockcard` | In-memory SCP11 Security Domain for testing |
@@ -401,6 +402,7 @@ type Transport interface {
 Built-in transports:
 
 - `transport/pcsc` — PC/SC for USB CCID and NFC readers via `ebfe/scard`. Lives in a separate `go.mod` so the CGO dependency on libpcsclite is opt-in.
+- `transport/grpc` — CardRelay network transport. Server wraps any local `transport.Transport` and exposes it over gRPC; client implements `transport.Transport`. Separate `go.mod` so the gRPC dependency tree is opt-in. See [transport/grpc/README.md](transport/grpc/README.md) for the threat model — CardRelay is transport infrastructure, not an authorization boundary.
 - `mockcard` — in-memory SCP11 Security Domain for testing. See [Testing](#testing).
 - `scp03.MockCard` — in-memory SCP03 card for testing. See [Testing](#testing).
 
