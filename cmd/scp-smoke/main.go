@@ -26,6 +26,7 @@
 //	scp-smoke scp11a-sd-read
 //	scp-smoke scp11b-piv-verify
 //	scp-smoke bootstrap-oce
+//	scp-smoke piv-provision
 //	scp-smoke test
 //
 // Use `scp-smoke <subcommand> -h` for per-command flags.
@@ -54,6 +55,7 @@ var commands = map[string]func(ctx context.Context, env *runEnv, args []string) 
 	"scp11a-sd-read":    cmdSCP11aSDRead,
 	"scp11b-piv-verify": cmdSCP11bPIVVerify,
 	"bootstrap-oce":     cmdBootstrapOCE,
+	"piv-provision":     cmdPIVProvision,
 	"test":              cmdTest,
 }
 
@@ -123,6 +125,10 @@ Subcommands:
   bootstrap-oce        Install an OCE public key (and optionally cert
                        chain + CA SKI) onto a card via SCP03. Day-1
                        provisioning step that enables scp11a-sd-read.
+                       Destructive; gated by --confirm-write.
+  piv-provision        Generate a PIV slot keypair and optionally install
+                       a certificate / fetch attestation, all over an
+                       SCP11b session targeting the PIV applet.
                        Destructive; gated by --confirm-write.
   test                 Run probe + the three smoke tests; emit a
                        PASS/FAIL/SKIP summary.
