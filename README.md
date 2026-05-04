@@ -142,10 +142,15 @@ sess.Close()
 | `cmac` | AES-CMAC per NIST SP 800-38B |
 | `tlv` | BER-TLV encoding / decoding for GP data structures |
 | `apdu` | ISO 7816-4 command / response APDU types |
+| `cardrecognition` | Parser for GlobalPlatform Card Recognition Data (`GET DATA` tag `0x66`); decodes claimed GP version, SCP version + parameter, and identification OIDs |
+| `aid` | Curated AID prefix database for SELECT-command annotation (GP, PIV, FIDO, OpenPGP, EMV, eID, health) |
 | `transport` | Transport interface, GET RESPONSE chaining, response collection caps |
 | `transport/pcsc` | PC/SC transport for USB CCID and NFC readers (CGO; separate `go.mod`) |
+| `transport/trace` | Record/replay decorator for `transport.Transport`; SELECT exchanges auto-annotated with AID name; CRD captured into trace metadata |
 | `piv` | YubiKey-flavored PIV command builders (APDU only — no PIV session layer; see package doc) |
 | `mockcard` | In-memory SCP11 Security Domain for testing |
+
+A separate hardware-validation binary lives in [`cmd/scp-smoke`](./cmd/scp-smoke). It exercises SCP03, SCP11b, and SCP11b-over-PIV against a real PC/SC card and prints PASS/FAIL/SKIP results. See its README for details.
 
 ## Security Domain Management
 
@@ -221,6 +226,49 @@ policy := &trust.Policy{
 When `CustomValidator` is set, it owns the trust decision: roots, EKU, SKI, and serial-allowlist policy fields are not consulted (so don't set them and expect them to compose). What the protocol layer *does* enforce regardless is the curve invariant (P-256) and ECDH-convertibility — a custom validator returning a non-P-256 public key, or a key the standard library can't convert to `*ecdh.PublicKey`, is rejected at the SCP11 layer before any ECDH happens.
 
 This is the path to take when integrating with vendor-specific certificate stores. Generic GP-proprietary parsers can be contributed as additional implementations of `Policy.CustomValidator`.
+
+### Trusting a YubiKey card
+
+For SCP11b against a YubiKey, the production path is to validate the card's certificate chain against a pinned Yubico Secure Domain root. The chain a YubiKey 5.7+ presents on `GET DATA` tag `BF21` is rooted at a Yubico-issued CA; pinning it explicitly prevents a swap of the card from going unnoticed.
+
+```go
+import (
+    "crypto/x509"
+    "os"
+
+    "github.com/PeculiarVentures/scp/scp11"
+    "github.com/PeculiarVentures/scp/trust"
+)
+
+// Load the pinned Yubico SD root from disk. Replace the path with
+// wherever you actually ship the PEM in your deployment.
+rootPEM, err := os.ReadFile("yubico-sd-root.pem")
+if err != nil {
+    return err
+}
+roots := x509.NewCertPool()
+if !roots.AppendCertsFromPEM(rootPEM) {
+    return errors.New("trust: failed to parse Yubico SD root PEM")
+}
+
+cfg := scp11.YubiKeyDefaultSCP11bConfig()
+cfg.CardTrustPolicy = &trust.Policy{
+    Roots: roots,
+    // Yubico SD certificates are P-256 ECDSA; the SCP11 layer
+    // enforces this anyway, but stating it explicitly documents intent.
+    // ExpectedEKUs / AllowedSerials / ExpectedSKI can pin further.
+}
+
+sess, err := scp11.Open(ctx, t, cfg)
+```
+
+A few points worth knowing for this profile specifically:
+
+- **`InsecureSkipCardAuthentication` is the lab escape hatch, not a production option.** Setting it disables the Yubico-root check entirely; the SCP11b channel still establishes (the card still authenticates to the host with its private key) but you lose the binding between the channel and a particular Yubico-issued identity. Only set it when the goal is to separate "is the wire protocol working?" from "is trust bootstrap configured correctly?". The [`scp-smoke`](./cmd/scp-smoke) harness exposes this via `--lab-skip-scp11-trust` for exactly that purpose.
+
+- **SCP11b is read-only against the Security Domain.** It authenticates the card to the host but not the host to the card, so `securitydomain.OpenSCP11` over SCP11b will refuse OCE-gated writes (key rotation, reset, etc.) regardless of how the trust policy is configured. SCP11a or SCP11c, with an OCE private key and matching trust material on the card, is the path for write authorization.
+
+- **CRD is advisory.** The [`cardrecognition`](./cardrecognition) package will tell you what the card claims about itself before any authentication; this is useful for diagnostics but is not a substitute for cert-chain validation. A card that lies about its CRD is the card's bug, not a CLI bug, and the CRD is not a trust signal.
 
 ## SCP03 Usage
 
@@ -381,7 +429,17 @@ For tests and local development, the library ships with two in-memory mock cards
 
 Both expose a `Transport()` method returning something satisfying `transport.Transport`, so test code at session or Security Domain level can be parameterized over either when the test logic doesn't care which protocol is underneath.
 
-These mocks are not reference implementations of GlobalPlatform card behavior — they cover the subset the host code exercises. For protocol conformance, rely on the byte-exact transcript tests above.
+These mocks are not reference implementations of GlobalPlatform card behavior — they cover the subset the host code exercises. Specifically, both mocks now answer `GET DATA` tag `0x66` (CRD) and `0x00E0` (key information) over secure messaging so host code that issues those reads can be exercised without a real card. For protocol conformance, rely on the byte-exact transcript tests above.
+
+### Hardware verification
+
+For end-to-end verification against an actual card, the [`cmd/scp-smoke`](./cmd/scp-smoke) binary runs the smoke suite over a PC/SC reader: probe (unauthenticated CRD), SCP03 SD read with factory keys, SCP11b SD read, and SCP11b PIV `VERIFY PIN`. PASS/FAIL/SKIP per check, plus a `--json` flag for machine consumption.
+
+```
+scp-smoke test --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
+```
+
+The harness lives in its own Go submodule because PC/SC needs CGO; see its README for build prerequisites and the safety-relevant notes about `--lab-skip-scp11-trust`.
 
 ## Specification compliance
 
