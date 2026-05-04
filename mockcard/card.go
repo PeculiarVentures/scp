@@ -112,6 +112,21 @@ type Card struct {
 	// just for shape), but the public part round-trips through
 	// the GENERATE KEY response.
 	PIVPresetKey *ecdsa.PrivateKey
+
+	// PIV PIN/PUK state for piv-reset smoke testing. Counters start
+	// at 3 (YubiKey default) and decrement on wrong PIN / wrong PUK;
+	// at 0 the credential is blocked and VERIFY / RESET RETRY
+	// COUNTER return 6983. PIV reset (INS 0xFB) succeeds only when
+	// both counters are 0; success resets both to 3 and the stored
+	// PIN/PUK to factory defaults, plus clears any provisioned
+	// state (pivLastGenKey, pivMgmtAuthWitness, etc).
+	//
+	// Initialized by New() to factory state: PIN "123456" with 3
+	// retries, PUK "12345678" with 3 retries.
+	pivPIN        []byte
+	pivPUK        []byte
+	pivPINCounter int
+	pivPUKCounter int
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -153,7 +168,14 @@ func New() (*Card, error) {
 		return nil, err
 	}
 
-	return &Card{staticKey: key, certDER: der}, nil
+	return &Card{
+		staticKey:     key,
+		certDER:       der,
+		pivPIN:        []byte("123456"),
+		pivPUK:        []byte("12345678"),
+		pivPINCounter: 3,
+		pivPUKCounter: 3,
+	}, nil
 }
 
 // Transport returns a Transport backed by this card.
@@ -208,7 +230,7 @@ func (c *Card) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {
 	switch cmd.INS {
 	case 0xA4: // SELECT
-		return c.doSelect(cmd)
+		return c.doSelect(cmd, underSM)
 
 	case 0xCA: // GET DATA
 		return c.doGetData(cmd)
@@ -274,16 +296,85 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		if !c.pivSelected {
 			return mkSW(0x6985), nil
 		}
-		// Mock does not validate PIN — accepts any value. Real cards
-		// gate writes (PUT DATA, GENERATE KEY) on PIN, but the mock's
-		// purpose is to verify the host's APDU sequencing, not to
-		// model PIV authorization state.
+		// Counter-aware. PIN data is right-padded with 0xFF to 8
+		// bytes per NIST SP 800-73-4 §3.2.1; strip trailing 0xFF
+		// before comparing to the stored PIN value. Empty data is
+		// a "query retries" call — return SW=63CX where X is the
+		// retry counter (matches YubiKey behavior).
+		if c.pivPINCounter == 0 {
+			return mkSW(0x6983), nil
+		}
+		if len(cmd.Data) == 0 {
+			return mkSW(0x6300 | uint16(c.pivPINCounter)), nil
+		}
+		if bytesEqualPadded(cmd.Data, c.pivPIN) {
+			c.pivPINCounter = 3 // successful VERIFY restores counter
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		}
+		c.pivPINCounter--
+		if c.pivPINCounter == 0 {
+			return mkSW(0x6983), nil
+		}
+		return mkSW(0x6300 | uint16(c.pivPINCounter)), nil
+
+	case 0x2C: // PIV RESET RETRY COUNTER (PUK + new PIN)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		if cmd.P2 != 0x80 {
+			// Only the PIN reference (0x80) is supported here.
+			return mkSW(0x6A86), nil
+		}
+		if c.pivPUKCounter == 0 {
+			return mkSW(0x6983), nil
+		}
+		// Data is PUK (8 bytes 0xFF-padded) || newPIN (8 bytes 0xFF-padded).
+		if len(cmd.Data) != 16 {
+			return mkSW(0x6A80), nil
+		}
+		puk := cmd.Data[:8]
+		newPIN := cmd.Data[8:]
+		if !bytesEqualPadded(puk, c.pivPUK) {
+			c.pivPUKCounter--
+			if c.pivPUKCounter == 0 {
+				return mkSW(0x6983), nil
+			}
+			return mkSW(0x6300 | uint16(c.pivPUKCounter)), nil
+		}
+		// Right PUK: replace PIN with the supplied new PIN
+		// (stripped of 0xFF padding) and reset PIN counter.
+		c.pivPIN = stripPINPad(newPIN)
+		c.pivPINCounter = 3
+		c.pivPUKCounter = 3
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 
 	case 0xDB: // PIV PUT DATA (cert install on a slot)
 		if !c.pivSelected {
 			return mkSW(0x6985), nil
 		}
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+
+	case 0xFB: // YubiKey PIV RESET (Yubico extension)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		// Only succeeds when BOTH PIN and PUK are blocked. This
+		// is the YubiKey's own foot-gun guard — you can't wipe a
+		// slot just by sending the APDU; you have to first block
+		// both credentials, which is something a casual operator
+		// won't do by accident.
+		if c.pivPINCounter > 0 || c.pivPUKCounter > 0 {
+			return mkSW(0x6985), nil
+		}
+		// Reset everything PIV-related to factory state.
+		c.pivPIN = []byte("123456")
+		c.pivPUK = []byte("12345678")
+		c.pivPINCounter = 3
+		c.pivPUKCounter = 3
+		c.pivLastGenKey = nil
+		c.pivMgmtAuthWitness = nil
+		// Note: we do NOT clear PIVMgmtKey/PIVMgmtKeyAlgo or
+		// PIVPresetKey; those are test fixtures, not card state.
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 
 	case 0xF9: // YubiKey ATTESTATION (Yubico extension)
@@ -319,7 +410,17 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 	}
 }
 
-func (c *Card) doSelect(cmd *apdu.Command) (*apdu.Response, error) {
+func (c *Card) doSelect(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {
+	// A plaintext SELECT signals a fresh handshake is about to
+	// start (the host's pre-handshake reset), so any prior session
+	// state is stale and must be cleared. A SELECT-under-SM is a
+	// different beast — it's the ApplicationAID flow where the
+	// host opens SCP on the SD and then switches applets while
+	// keeping the session alive — so leave the session intact in
+	// that path.
+	if !underSM {
+		c.session = nil
+	}
 	if bytesEq(cmd.Data, aidSD) {
 		c.selectedAID = aidSD
 		c.pivSelected = false
@@ -705,4 +806,35 @@ func parseRaw(raw []byte) *apdu.Command {
 		}
 	}
 	return cmd
+}
+
+// bytesEqualPadded compares a 0xFF-right-padded PIN/PUK candidate
+// against the stored unpadded value. Real PIV VERIFY data is always
+// 8 bytes 0xFF-padded; the stored "correct" value is the unpadded
+// form so the test fixture is readable.
+func bytesEqualPadded(padded, unpadded []byte) bool {
+	if len(padded) < len(unpadded) {
+		return false
+	}
+	for i, b := range unpadded {
+		if padded[i] != b {
+			return false
+		}
+	}
+	for _, b := range padded[len(unpadded):] {
+		if b != 0xFF {
+			return false
+		}
+	}
+	return true
+}
+
+// stripPINPad removes trailing 0xFF bytes from a 0xFF-padded PIN.
+func stripPINPad(padded []byte) []byte {
+	for i := len(padded); i > 0; i-- {
+		if padded[i-1] != 0xFF {
+			return append([]byte{}, padded[:i]...)
+		}
+	}
+	return nil
 }

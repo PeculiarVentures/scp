@@ -156,6 +156,28 @@ The CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK). A card who
 
 `--store-chain` calls `STORE CERTIFICATES` so the card has the full OCE chain locally, useful when its trust model validates against the chain rather than just the root. `--ca-ski` registers a CA Subject Key Identifier via `STORE CA-IDENTIFIER`. Either or both can be omitted; the OCE public-key install is the only required step.
 
+### piv-reset — restore the PIV applet to factory state
+
+Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other PIV state you want to undo without physically swapping the hardware. Erases ALL 24 PIV slot keypairs and certificates, returns PIN to `123456` and PUK to `12345678`, and resets the management key (to the well-known 3DES default on pre-5.7 firmware, or a randomly regenerated AES-192 key in protected metadata on 5.7+). Does NOT touch installed OCE roots or the Issuer Security Domain — those live outside the PIV applet.
+
+```bash
+scp-smoke piv-reset \
+  --reader "YubiKey" \
+  --lab-skip-scp11-trust \
+  --confirm-write
+```
+
+The flow:
+
+1. Open SCP11b session targeting the PIV applet.
+2. Block the PIN by sending VERIFY PIN with deliberately wrong PINs (`00000000`) until the card returns `6983`. Typically 3 attempts.
+3. Block the PUK by sending RESET RETRY COUNTER with deliberately wrong PUKs until the card returns `6983`. Typically 3 attempts.
+4. Send the YubiKey-specific PIV reset APDU (`INS=0xFB`).
+
+The card's own foot-gun guard is the precondition that BOTH PIN and PUK retry counters must be exhausted before `INS=0xFB` is accepted. A casual operator can't accidentally wipe a slot by sending one APDU; they have to first deliberately block both credentials, which this command does only when `--confirm-write` is supplied. Without `--confirm-write`, `piv-reset` runs in dry-run mode and prints what would happen.
+
+After a successful reset, you can immediately re-run `piv-provision` against the now-clean card.
+
 ### piv-provision — generate a slot keypair (and optionally install a cert)
 
 Provisions a PIV slot through an SCP11b-secured channel: `VERIFY PIN` → `GENERATE KEY` → optional `PUT CERTIFICATE` → optional `ATTESTATION`. Same `--confirm-write` dry-run gating as `bootstrap-oce`.
@@ -234,7 +256,6 @@ The library implementations and behaviors validated by this tool are documented 
 
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (with mgmt-key mutual auth), `test`.
-- Next: custom SCP03 key flags for `bootstrap-oce` against rotated cards (`--kvn` / `--enc` / `--mac` / `--dek`), and a `piv-mgmt-key-set` command that runs SetManagementKey with mutual auth as a precondition.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (with mgmt-key mutual auth + cert-binding check), `piv-reset`, `test`.
+- Next: custom SCP03 key flags for `bootstrap-oce` against rotated cards (`--kvn` / `--enc` / `--mac` / `--dek`), production trust roots wiring (`--trust-roots <pem-bundle>`) so SCP11 commands don't need `--lab-skip-scp11-trust`, GET METADATA support for auto-detecting management-key algorithm.
 - Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
-- Deferred: `restore-yubikey-factory` (destructive; needs explicit-destructive-confirmation flag, OCE-auth requirement, SCP11b refusal, YubiKey-only).

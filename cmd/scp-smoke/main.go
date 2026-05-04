@@ -27,6 +27,7 @@
 //	scp-smoke scp11b-piv-verify
 //	scp-smoke bootstrap-oce
 //	scp-smoke piv-provision
+//	scp-smoke piv-reset
 //	scp-smoke test
 //
 // Use `scp-smoke <subcommand> -h` for per-command flags.
@@ -56,6 +57,7 @@ var commands = map[string]func(ctx context.Context, env *runEnv, args []string) 
 	"scp11b-piv-verify": cmdSCP11bPIVVerify,
 	"bootstrap-oce":     cmdBootstrapOCE,
 	"piv-provision":     cmdPIVProvision,
+	"piv-reset":         cmdPIVReset,
 	"test":              cmdTest,
 }
 
@@ -130,6 +132,12 @@ Subcommands:
                        a certificate / fetch attestation, all over an
                        SCP11b session targeting the PIV applet.
                        Destructive; gated by --confirm-write.
+  piv-reset            Reset the YubiKey PIV applet to factory state by
+                       deliberately blocking PIN and PUK, then sending
+                       INS=0xFB. Erases ALL slot keys and certs. Use
+                       this to recover from a wrong-cert provisioning
+                       and try again. Destructive; gated by
+                       --confirm-write.
   test                 Run probe + the three smoke tests; emit a
                        PASS/FAIL/SKIP summary.
 
