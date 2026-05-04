@@ -28,9 +28,33 @@ type Check struct {
 
 // Report is the aggregate output of a subcommand.
 type Report struct {
-	Subcommand string  `json:"subcommand"`
-	Reader     string  `json:"reader,omitempty"`
-	Checks     []Check `json:"checks"`
+	Subcommand string `json:"subcommand"`
+	Reader     string `json:"reader,omitempty"`
+
+	// TransportSecurity is a top-level structured field naming
+	// the wire-layer security posture of the operation. Set by
+	// handlers that interact with the card through openPIVSession
+	// or any other transport-establishing helper. The value is
+	// one of:
+	//
+	//   "raw-pcsc"     direct APDUs over PC/SC; the host running
+	//                  scpctl is in the operator's trust boundary.
+	//   "scp11b-piv"   APDUs travel inside an SCP11b-on-PIV
+	//                  authenticated key-agreement channel.
+	//   ""             unset; either the command did not touch
+	//                  the card (help/version/info-only paths) or
+	//                  the report was emitted before the channel
+	//                  mode was decided.
+	//
+	// This is a top-level field rather than a check-line detail
+	// because external consumers (audit logs, automation that
+	// branches on transport) need it to be machine-extractable
+	// without parsing the human-readable check stream. The same
+	// posture also appears as a 'channel mode' check so a human
+	// reading the text output sees it inline.
+	TransportSecurity string `json:"transport_security,omitempty"`
+
+	Checks []Check `json:"checks"`
 	// Data carries subcommand-specific structured fields like parsed
 	// CRD or key info. JSON mode emits it; text mode pretty-prints.
 	Data any `json:"data,omitempty"`
@@ -61,6 +85,29 @@ func (r *Report) HasFailure() bool {
 	}
 	return false
 }
+
+// Transport-security constants for Report.TransportSecurity. Using
+// constants rather than string literals at call sites makes the
+// available values discoverable and prevents typo drift across
+// handlers.
+const (
+	// TransportSecurityRawPCSC means APDUs travel directly over
+	// PC/SC with no wire-layer encryption or authentication. The
+	// operator must have asserted that the host running scpctl is
+	// in their trust boundary (--raw-local-ok). Suitable for
+	// local-USB administration.
+	TransportSecurityRawPCSC = "raw-pcsc"
+
+	// TransportSecurityScp11bPIV means APDUs travel inside an
+	// SCP11b-on-PIV authenticated key-agreement channel. The
+	// channel cert was either validated against trust roots
+	// (--trust-roots) or skipped for lab use
+	// (--lab-skip-scp11-trust); both states are still reported as
+	// scp11b-piv at this layer because the structural posture is
+	// the same. The trust-validation distinction surfaces in the
+	// 'apply trust' check line and in the lab-skip-mode SKIP entry.
+	TransportSecurityScp11bPIV = "scp11b-piv"
+)
 
 // Emit writes the report to w. When jsonMode is true, output is a
 // single indented JSON object; otherwise it's human-readable text.

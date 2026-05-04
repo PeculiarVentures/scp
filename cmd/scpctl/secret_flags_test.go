@@ -203,3 +203,148 @@ func TestPIVPinVerify_StdinIntegration(t *testing.T) {
 		t.Errorf("expected 'verified' in output:\n%s", buf.String())
 	}
 }
+
+// TestSecretFlags_SecretsDoNotLeakIntoJSON exercises the credential
+// paths through the CLI handlers and verifies that the secret
+// values themselves never appear in the JSON output. This is the
+// regression guard against accidentally adding a fmt.Sprintf("%s",
+// pin) somewhere that ends up in a Report Detail or Data field.
+//
+// The test uses a deliberately recognizable PIN (a 12-digit value
+// no real factory ships with) so a substring match on the output
+// reliably catches a leak. Argument-form, stdin-form, and file-form
+// inputs are all exercised because each flows through a different
+// code path.
+func TestSecretFlags_SecretsDoNotLeakIntoJSON(t *testing.T) {
+	const sentinel = "999000111222"
+
+	cases := []struct {
+		name string
+		args []string
+		// Setup the runEnv: stdin source if stdin form is in args,
+		// any file pre-creation, etc.
+		setup func(t *testing.T) *runEnv
+	}{
+		{
+			name: "argv_form",
+			args: []string{
+				"--reader", "fake",
+				"--pin", sentinel,
+				"--raw-local-ok",
+				"--json",
+			},
+			setup: func(t *testing.T) *runEnv {
+				return makeLeakTestEnv(t, "")
+			},
+		},
+		{
+			name: "stdin_form",
+			args: []string{
+				"--reader", "fake",
+				"--pin-stdin",
+				"--raw-local-ok",
+				"--json",
+			},
+			setup: func(t *testing.T) *runEnv {
+				return makeLeakTestEnv(t, sentinel+"\n")
+			},
+		},
+		{
+			name: "file_form",
+			args: func() []string {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "pin")
+				if err := os.WriteFile(path, []byte(sentinel+"\n"), 0o600); err != nil {
+					t.Fatalf("write pin file: %v", err)
+				}
+				return []string{
+					"--reader", "fake",
+					"--pin-file", path,
+					"--raw-local-ok",
+					"--json",
+				}
+			}(),
+			setup: func(t *testing.T) *runEnv {
+				return makeLeakTestEnv(t, "")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := tc.setup(t)
+			// The verify will fail (sentinel is not the mock's PIN);
+			// we intentionally want the failure path because failure
+			// reports are the most likely place for a secret to leak.
+			err := cmdPIVPinVerify(context.Background(), env, tc.args)
+
+			// Every byte we emit, in stdout, stderr, AND any returned
+			// error message, must NOT contain the sentinel value.
+			outBuf := env.out.(*bytes.Buffer).String()
+			errBuf := env.errOut.(*bytes.Buffer).String()
+			errMsg := ""
+			if err != nil {
+				errMsg = err.Error()
+			}
+			combined := outBuf + "\n" + errBuf + "\n" + errMsg
+			if strings.Contains(combined, sentinel) {
+				t.Errorf("secret leaked into output:\n--- combined ---\n%s\n--- end ---", combined)
+			}
+		})
+	}
+}
+
+// makeLeakTestEnv builds a runEnv pointed at a fresh mockcard with
+// the given stdin content. The buffers are concrete *bytes.Buffer
+// so the leak test can read them back; the io.Writer interface
+// would hide that.
+func makeLeakTestEnv(t *testing.T, stdinContent string) *runEnv {
+	t.Helper()
+	card, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	env := &runEnv{
+		out:    out,
+		errOut: errOut,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return card.Transport(), nil
+		},
+	}
+	if stdinContent != "" {
+		env.stdin = newSingleShotStdin(strings.NewReader(stdinContent))
+	}
+	return env
+}
+
+// TestSecretFlags_MgmtKeySecretsDoNotLeak is the same shape of
+// test but for the management-key flag. Mgmt keys are typically
+// hex-encoded (24, 32, or 48 bytes); the sentinel here is a hex
+// string that's the right length for AES-192 (24 bytes = 48 hex
+// chars). We verify that this material does not appear in any
+// output stream when the mgmt-auth call fails.
+func TestSecretFlags_MgmtKeySecretsDoNotLeak(t *testing.T) {
+	const sentinelHex = "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"
+
+	env := makeLeakTestEnv(t, "")
+	// mgmt auth with the wrong key will fail; the failure path is
+	// where a leak is most likely to surface.
+	_ = cmdPIVMgmtAuth(context.Background(), env, []string{
+		"--reader", "fake",
+		"--mgmt-key", sentinelHex,
+		"--mgmt-alg", "aes192",
+		"--raw-local-ok",
+		"--json",
+	})
+
+	combined := env.out.(*bytes.Buffer).String() + "\n" + env.errOut.(*bytes.Buffer).String()
+	if strings.Contains(combined, sentinelHex) {
+		t.Errorf("mgmt-key value leaked into output:\n%s", combined)
+	}
+	// Also check lowercase form because some renderers downcase hex.
+	if strings.Contains(strings.ToLower(combined), strings.ToLower(sentinelHex)) {
+		t.Errorf("mgmt-key value (case-insensitive) leaked into output:\n%s", combined)
+	}
+}

@@ -249,6 +249,7 @@ func openPIVSession(
 	}
 
 	if *flags.rawLocalOK {
+		report.TransportSecurity = TransportSecurityRawPCSC
 		report.Pass("channel mode", "raw (operator asserted local-USB trust)")
 		sess, err := session.New(ctx, t, session.Options{})
 		if err != nil {
@@ -271,6 +272,7 @@ func openPIVSession(
 	if err != nil {
 		return nil, false, fmt.Errorf("scp11b open: %w", err)
 	}
+	report.TransportSecurity = TransportSecurityScp11bPIV
 	report.Pass("channel mode", "scp11b-on-piv")
 	return sess, true, nil
 }
