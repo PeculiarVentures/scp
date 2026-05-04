@@ -74,7 +74,9 @@ func preflightSCP11aSDKey(ctx context.Context, t transport.Transport, sdKID, sdK
 	}
 	report.Skip("SCP11a SD key preflight",
 		fmt.Sprintf("requested SD key KID=0x%02X KVN=0x%02X not installed; "+
-			"card has: %v. Provision the SCP11a SD key set before running this smoke.",
+			"card has: %v. Install it with: "+
+			"`scpctl smoke bootstrap-scp11a-sd --reader \"...\" --out /tmp/sd-pub.pem --confirm-write` "+
+			"(uses Yubico on-card keygen by default; pass --mode=import to PUT KEY a host-supplied keypair).",
 			sdKID, sdKVN, listed))
 	return true
 }
