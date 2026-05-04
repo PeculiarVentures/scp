@@ -77,23 +77,41 @@ func StatusWord(err error) (sw uint16, ok bool) {
 }
 
 // RetriesRemaining returns the retry count encoded in a 63Cx status
+// RetriesRemaining returns the number of retries left in the status
 // word if err is a *CardError carrying such a SW. ok is false for
 // any other error or status word.
+//
+// Two SW forms are recognized:
+//
+//   - 0x63Cx: NIST SP 800-73-4 / ISO 7816-4 canonical form ("verify
+//     failed, x attempts left"). YubiKey and most current cards.
+//
+//   - 0x63xx (where SW1 == 0x63 and the high nibble of SW2 is 0):
+//     older PIV cards and some implementations omit the Cx high
+//     nibble. The retry count is still in the low nibble.
+//
+// Both forms appear in the field. The predicate accepts both rather
+// than forcing callers to branch.
 func RetriesRemaining(err error) (retries int, ok bool) {
 	sw, found := StatusWord(err)
 	if !found {
 		return 0, false
 	}
-	if sw&0xFFF0 != 0x63C0 {
-		return 0, false
+	// Canonical 63Cx form.
+	if sw&0xFFF0 == 0x63C0 {
+		return int(sw & 0x000F), true
 	}
-	return int(sw & 0x000F), true
+	// Bare 63xx form: SW1=0x63, SW2 high nibble zero, low nibble is
+	// the retry count.
+	if sw&0xFFF0 == 0x6300 {
+		return int(sw & 0x000F), true
+	}
+	return 0, false
 }
 
 // IsWrongPIN reports whether err indicates a wrong PIN or PUK with
-// retries remaining (SW 63Cx where x > 0). Retry count of zero is
-// treated as blocked, not wrong, and routes to IsPINBlocked /
-// IsPUKBlocked.
+// retries remaining. Retry count of zero is treated as blocked, not
+// wrong, and routes to IsPINBlocked / IsPUKBlocked.
 func IsWrongPIN(err error) bool {
 	retries, ok := RetriesRemaining(err)
 	if !ok {
@@ -103,17 +121,16 @@ func IsWrongPIN(err error) bool {
 }
 
 // IsPINBlocked reports whether err indicates the PIN is blocked.
-// Maps SW 6983 (authentication method blocked) and SW 63C0 (wrong
-// PIN with zero retries remaining).
+// Maps SW 6983 (authentication method blocked), SW 63C0 (canonical
+// "verify failed, 0 attempts" form), and SW 6300 (bare form, zero
+// retries).
 func IsPINBlocked(err error) bool {
 	sw, ok := StatusWord(err)
 	if !ok {
 		return false
 	}
-	if sw == 0x6983 {
-		return true
-	}
-	if sw == 0x63C0 {
+	switch sw {
+	case 0x6983, 0x63C0, 0x6300:
 		return true
 	}
 	return false

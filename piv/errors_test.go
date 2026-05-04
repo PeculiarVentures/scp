@@ -56,6 +56,13 @@ func TestRetriesRemaining(t *testing.T) {
 		{0x63C1, 1, true},
 		{0x63C5, 5, true},
 		{0x63CF, 15, true},
+		// Bare 63xx form: SW2 high nibble zero. Returned by some
+		// PIV cards (and by the in-tree mockcard) instead of the
+		// canonical 63Cx form. The predicate accepts both because
+		// real cards use both.
+		{0x6300, 0, true},
+		{0x6302, 2, true},
+		{0x630F, 15, true},
 		{0x6982, 0, false},
 		{0x9000, 0, false},
 	}
@@ -94,6 +101,9 @@ func TestIsPINBlocked(t *testing.T) {
 		{0x6983, true},
 		{0x63C0, true},
 		{0x63C1, false},
+		// Bare form, zero retries.
+		{0x6300, true},
+		{0x6301, false},
 		{0x6982, false},
 		{0x9000, false},
 	}
