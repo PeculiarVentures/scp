@@ -47,6 +47,27 @@ import (
 // version is set at build time via -ldflags. Unset in `go run` builds.
 var version = "dev"
 
+// pivCommands maps the piv-group subcommand names to handlers.
+// These commands operate on the PIV applet via the piv/session
+// library, not via the SCP-wrapped paths in 'scpctl smoke
+// piv-provision' which establish a full SCP11b channel first.
+//
+// The split is intentional: 'piv' is for raw-transport operator
+// flows (probe a card, read its applet info), 'smoke' covers the
+// existing SCP-secured provisioning paths until they migrate over.
+var pivCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
+	"info": cmdPIVInfo,
+}
+
+// sdCommands maps the sd-group subcommand names. Today only 'info'
+// is wired; the remaining flows (scp03-read, scp11b-read,
+// scp11a-read, bootstrap-oce) still live under 'scpctl smoke' and
+// will move when their dependencies on the smoke-specific report
+// shape are decoupled.
+var sdCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
+	"info": cmdSDInfo,
+}
+
 // smokeCommands maps the smoke-group subcommand names to handlers.
 // These are the original scp-smoke commands; the names are preserved
 // verbatim (including hyphens like scp03-sd-read) so existing
@@ -103,16 +124,11 @@ func main() {
 		runGroup(ctx, env, "smoke", smokeCommands, os.Args[2:], smokeUsage)
 		return
 	case "piv":
-		// Reserved for piv/session-backed user surface. Until
-		// commands land here, point users at smoke piv-provision /
-		// piv-reset which exercise the same flows directly.
-		fmt.Fprintln(os.Stderr,
-			`scpctl: 'piv' subgroup is not yet wired; use 'scpctl smoke piv-provision' / 'piv-reset' for now`)
-		os.Exit(2)
+		runGroup(ctx, env, "piv", pivCommands, os.Args[2:], pivUsage)
+		return
 	case "sd":
-		fmt.Fprintln(os.Stderr,
-			`scpctl: 'sd' subgroup is not yet wired; use 'scpctl smoke scp03-sd-read' / 'scp11b-sd-read' / 'scp11a-sd-read' / 'bootstrap-oce' for now`)
-		os.Exit(2)
+		runGroup(ctx, env, "sd", sdCommands, os.Args[2:], sdUsage)
+		return
 	}
 
 	// Top-level utility subcommands.
@@ -182,10 +198,10 @@ Groups:
               (originally the 'scp-smoke' binary; preserved verbatim).
 
   piv         User-facing PIV operations over piv/session.
-              (forthcoming; commands not yet wired.)
+              ('piv info' is wired; full surface forthcoming.)
 
   sd          Security Domain operations.
-              (forthcoming; commands not yet wired.)
+              ('sd info' is wired; full surface forthcoming.)
 
 Top-level utilities:
   readers     List PC/SC readers visible to the OS.
@@ -276,4 +292,49 @@ func newSubcommandFlagSet(name string, env *runEnv) *flag.FlagSet {
 	fs := flag.NewFlagSet("scpctl smoke "+name, flag.ContinueOnError)
 	fs.SetOutput(env.errOut)
 	return fs
+}
+
+func pivUsage(w io.Writer) {
+	fmt.Fprint(w, `scpctl piv - user-facing PIV operations
+
+Usage:
+  scpctl piv <subcommand> [flags]
+
+Subcommands:
+  info     Probe the PIV applet (SELECT AID PIV + GET VERSION) and
+           report the detected profile and capability set. Read-only,
+           no authentication, no state change. Use this before
+           deciding whether to run scpctl smoke piv-provision.
+
+Forthcoming subcommands (still reachable under 'scpctl smoke' for now):
+  pin verify | pin change | puk change | pin unblock
+  mgmt auth | mgmt change-key
+  key generate | key import | key attest
+  cert put | cert get | cert delete
+  object get | object put
+  reset
+
+Use "scpctl piv <subcommand> -h" for per-command flags.
+`)
+}
+
+func sdUsage(w io.Writer) {
+	fmt.Fprint(w, `scpctl sd - Security Domain operations
+
+Usage:
+  scpctl sd <subcommand> [flags]
+
+Subcommands:
+  info     Open an unauthenticated SD session and report Card
+           Recognition Data. Equivalent to 'scpctl probe' /
+           'scpctl smoke probe'. Read-only.
+
+Forthcoming subcommands (still reachable under 'scpctl smoke' for now):
+  scp03-read     SCP03 SD session read.
+  scp11b-read    SCP11b SD session read.
+  scp11a-read    SCP11a (mutual auth) SD session read.
+  bootstrap-oce  Install OCE public key onto a card via SCP03.
+
+Use "scpctl sd <subcommand> -h" for per-command flags.
+`)
 }
