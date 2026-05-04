@@ -42,10 +42,16 @@ All paths below are at SHA `b9876fc36a5b18fb90ce03d0894f39edb08a905b`.
 | [`src/test/java/com/samsung/openscp/testdata/InputTestData.java`][s2] | `scp03/transcript_vectors_test.go` | Static keys, host challenges, card challenges |
 | [`src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes128S8ModeEmulation.java`][s3] | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES128_S8_FullTranscript`) | Byte-exact APDU pairs for AES-128 / S8 mode |
 | [`src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes128S16ModeEmulation.java`][s4] | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES128_S16_FullTranscript`) | Byte-exact APDU pairs for AES-128 / S16 mode |
-| `src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes192S8ModeEmulation.java` | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES192_S8_FullTranscript`) | AES-192 / S8 |
-| `src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes256S8ModeEmulation.java` | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES256_S8_FullTranscript`) | AES-256 / S8 |
-| [`src/test/java/com/samsung/openscp/Scp11Tests.java`][s5] | `session/samsung_scp11a_transcript_test.go` | SCP11a driver |
+| [`src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes192S8ModeEmulation.java`][s7] | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES192_S8_FullTranscript`) | AES-192 / S8 |
+| [`src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes192S16ModeEmulation.java`][s8] | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES192_S16_FullTranscript`) | AES-192 / S16 |
+| [`src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes256S8ModeEmulation.java`][s9] | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES256_S8_FullTranscript`) | AES-256 / S8 |
+| [`src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes256S16ModeEmulation.java`][s10] | `scp03/transcript_vectors_test.go` (`TestSCP03_SamsungOpenSCP_AES256_S16_FullTranscript`) | AES-256 / S16 |
+| [`src/test/java/com/samsung/openscp/Scp11Tests.java`][s5] | `session/samsung_scp11a_transcript_test.go`, `session/samsung_scp11c_transcript_test.go`, `session/samsung_gp_proprietary_transcript_test.go` | SCP11a, SCP11c, and GP-proprietary SCP11a driver |
 | [`src/test/java/com/samsung/openscp/testdata/SmartCardScp11aP256Aes128S8ModeEmulation.java`][s6] | `session/samsung_scp11a_transcript_test.go` (`TestSCP11a_SamsungTranscript_ByteExact`) | Byte-exact SCP11a P-256 / AES-128 / S8 |
+| [`src/test/java/com/samsung/openscp/testdata/SmartCardScp11cP256Aes128S8ModeEmulation.java`][s11] | `session/samsung_scp11c_transcript_test.go` (`TestSCP11c_SamsungTranscript_ByteExact`) | Byte-exact SCP11c P-256 / AES-128 / S8 |
+| [`src/test/java/com/samsung/openscp/testdata/SmartCardScp11aGpP256Aes128S8ModeEmulation.java`][s12] | `session/samsung_gp_proprietary_transcript_test.go` (`TestSCP11a_SamsungTranscript_GPProprietary_CustomValidator`) | Byte-exact SCP11a P-256 / AES-128 / S8 with GP-proprietary cert store; exercises `trust.Policy.CustomValidator` |
+| [`src/test/java/com/samsung/openscp/testdata/Scp11Nist256TestData.java`][s13] | shared GET DATA CAPDU and PSO RAPDU constants for the SCP11a / SCP11c / GP-proprietary tests | |
+| [`src/test/java/com/samsung/openscp/testdata/Scp11TestData.java`][s14] | shared OCE static SK / cert / ESK across all SCP11 transcript tests | |
 
 [s1]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/Scp03Tests.java
 [s2]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/InputTestData.java
@@ -53,6 +59,37 @@ All paths below are at SHA `b9876fc36a5b18fb90ce03d0894f39edb08a905b`.
 [s4]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes128S16ModeEmulation.java
 [s5]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/Scp11Tests.java
 [s6]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp11aP256Aes128S8ModeEmulation.java
+[s7]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes192S8ModeEmulation.java
+[s8]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes192S16ModeEmulation.java
+[s9]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes256S8ModeEmulation.java
+[s10]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes256S16ModeEmulation.java
+[s11]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp11cP256Aes128S8ModeEmulation.java
+[s12]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/SmartCardScp11aGpP256Aes128S8ModeEmulation.java
+[s13]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/Scp11Nist256TestData.java
+[s14]: https://github.com/Samsung/OpenSCP-Java/blob/b9876fc36a5b18fb90ce03d0894f39edb08a905b/src/test/java/com/samsung/openscp/testdata/Scp11TestData.java
+
+### Out-of-scope upstream files
+
+Samsung publishes additional SCP11 emulation files for variants this
+library does not yet support. They are intentionally not imported and
+are tracked as expansion targets (see the project README):
+
+| Upstream file | Why not imported |
+|---|---|
+| `SmartCardScp11aBP256Aes128S8ModeEmulation.java` | Brainpool P-256 — out-of-curve for the verified profile (SCP11 is hardwired to NIST P-256). |
+| `SmartCardScp11aP256Aes128S16ModeEmulation.java` | SCP11 with S16 16-byte MACs — the SCP11 session path is hardwired to S8. |
+| `SmartCardScp11aP256Aes192S8ModeEmulation.java` | SCP11 with AES-192 session keys — out of scope (verified profile is AES-128). |
+| `SmartCardScp11aP256Aes256S8ModeEmulation.java` | SCP11 with AES-256 session keys — out of scope (same). |
+| `SmartCardScp11aP384Aes128S8ModeEmulation.java` | P-384 curve — out of scope (same). |
+
+These vectors will be imported when the corresponding expansion-target
+work lands.
+
+Note that Samsung does **not** publish SCP11b transcripts. SCP11b is
+a card-to-host variant without OCE certificate upload, and Samsung's
+Scp11Tests.java covers SCP11a and SCP11c only. Independent SCP11b
+transcript material would have to come from a different upstream.
+
 
 ### Porting notes
 
