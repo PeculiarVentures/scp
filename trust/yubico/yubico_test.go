@@ -1,6 +1,7 @@
 package yubico_test
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
 	"strings"
@@ -111,36 +112,168 @@ func TestRoots_NonEmptyPool(t *testing.T) {
 	}
 }
 
-// TestRoots_PoolMatchesCerts confirms the pool contains exactly the
-// certs Certs() returned — no surprises, no silent additions or
-// drops in the Roots()/Certs() relationship.
-func TestRoots_PoolMatchesCerts(t *testing.T) {
-	certs, err := yubico.Certs()
-	if err != nil {
-		t.Fatalf("Certs(): %v", err)
+// TestIntermediatesPEM_NonEmptyAndPrintable confirms the
+// intermediates bundle was actually embedded.
+func TestIntermediatesPEM_NonEmptyAndPrintable(t *testing.T) {
+	raw := yubico.IntermediatesPEM()
+	if len(raw) == 0 {
+		t.Fatal("IntermediatesPEM() returned empty buffer; embed directive failed?")
 	}
-	pool, err := yubico.Roots()
+	if !strings.Contains(string(raw), "-----BEGIN CERTIFICATE-----") {
+		t.Errorf("intermediates bundle does not contain a CERTIFICATE block")
+	}
+}
+
+// TestIntermediatesPEM_ReturnsCopy verifies callers can't mutate
+// the embedded intermediates bundle through the public API.
+func TestIntermediatesPEM_ReturnsCopy(t *testing.T) {
+	a := yubico.IntermediatesPEM()
+	if len(a) > 0 {
+		a[0] = 0xFF
+	}
+	b := yubico.IntermediatesPEM()
+	if len(b) > 0 && b[0] == 0xFF {
+		t.Errorf("IntermediatesPEM() returns a shared buffer; mutating one call affected another")
+	}
+}
+
+// TestIntermediateCerts_AllParse confirms every CERTIFICATE block in
+// the intermediates bundle parses as valid X.509. As of 2026-05-04
+// the bundle contains 10 intermediates.
+func TestIntermediateCerts_AllParse(t *testing.T) {
+	certs, err := yubico.IntermediateCerts()
+	if err != nil {
+		t.Fatalf("IntermediateCerts(): %v", err)
+	}
+	if len(certs) < 10 {
+		t.Errorf("got %d intermediates; want at least 10", len(certs))
+	}
+}
+
+// TestIntermediateCerts_IncludesSDAttestationB1 is the headline
+// regression assertion. The Yubico SD Attestation B 1 issuer signs
+// the SCP11 SD attestation chain on retail YubiKey 5.7.4+. Its
+// SubjectKeyIdentifier is CE:5B:7E:AB:BC:68:28:DD:16:13:3A:5B:00:8C
+// :3A:3F:18:5F:8A:E2 — confirmed against rmhrisk's hardware via
+// `ykman sd info` on 2026-05-04. Without this cert in the trust
+// pool, scpctl --yubico-roots fails on every retail YubiKey 5.7.4+
+// with "x509: certificate signed by unknown authority".
+func TestIntermediateCerts_IncludesSDAttestationB1(t *testing.T) {
+	certs, err := yubico.IntermediateCerts()
+	if err != nil {
+		t.Fatalf("IntermediateCerts(): %v", err)
+	}
+	expectedSKI := []byte{
+		0xCE, 0x5B, 0x7E, 0xAB, 0xBC, 0x68, 0x28, 0xDD, 0x16, 0x13,
+		0x3A, 0x5B, 0x00, 0x8C, 0x3A, 0x3F, 0x18, 0x5F, 0x8A, 0xE2,
+	}
+	for _, c := range certs {
+		if c.Subject.CommonName == "Yubico SD Attestation B 1" {
+			if !bytes.Equal(c.SubjectKeyId, expectedSKI) {
+				t.Errorf("SD Attestation B 1 SKI = %X, want %X",
+					c.SubjectKeyId, expectedSKI)
+			}
+			return
+		}
+	}
+	var got []string
+	for _, c := range certs {
+		got = append(got, c.Subject.CommonName)
+	}
+	t.Errorf("'Yubico SD Attestation B 1' not found in intermediates bundle. Present: %v", got)
+}
+
+// TestPool_IncludesBothRootsAndIntermediates confirms Pool() — the
+// helper SCP11 callers actually want — has every cert from both
+// embedded bundles loaded. The combined count is the simplest
+// "did both files get added" probe.
+func TestPool_IncludesBothRootsAndIntermediates(t *testing.T) {
+	pool, err := yubico.Pool()
+	if err != nil {
+		t.Fatalf("Pool(): %v", err)
+	}
+	if pool == nil {
+		t.Fatal("Pool() returned nil")
+	}
+	roots, _ := yubico.RootCerts()
+	inters, _ := yubico.IntermediateCerts()
+	wantSubjectCount := len(roots) + len(inters)
+
+	subjects := pool.Subjects() //nolint:staticcheck // SA1019 — Subjects is fine for tests
+	if len(subjects) != wantSubjectCount {
+		t.Errorf("pool has %d subjects; want %d (roots %d + intermediates %d)",
+			len(subjects), wantSubjectCount, len(roots), len(inters))
+	}
+}
+
+// TestPool_AllPublishedCertsValidate confirms every cert in the
+// embedded bundles chains to a published root. The verifier is
+// configured with Roots = published roots, Intermediates = published
+// intermediates — the standard x509.Verify shape. If any intermediate
+// fails to chain, either the bundles have drifted relative to each
+// other (Yubico published a new sub-CA under a not-yet-released
+// root) or one of the embedded files is stale. Either way the test
+// failure is the right signal: refresh both files together.
+func TestPool_AllPublishedCertsValidate(t *testing.T) {
+	roots, err := yubico.Roots()
 	if err != nil {
 		t.Fatalf("Roots(): %v", err)
 	}
+	intermediates, err := yubico.Intermediates()
+	if err != nil {
+		t.Fatalf("Intermediates(): %v", err)
+	}
 
-	// Verify each cert validates against the pool with itself as a
-	// trivial chain (root certs are self-signed; opts.Roots = pool
-	// makes them recognized roots and Verify accepts them as
-	// terminating chains of length 1).
-	for _, c := range certs {
+	allCerts := append([]*x509.Certificate{}, mustRootCerts(t)...)
+	inters, err := yubico.IntermediateCerts()
+	if err != nil {
+		t.Fatalf("IntermediateCerts(): %v", err)
+	}
+	allCerts = append(allCerts, inters...)
+
+	for _, c := range allCerts {
 		opts := x509.VerifyOptions{
-			Roots:     pool,
-			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-			// Some bundle entries are very long-lived (NotAfter
-			// in 2050+); CurrentTime defaults to time.Now() which
-			// is fine. A near-term-expired cert in the bundle
-			// would fail here, which is the correct signal that
-			// the bundle needs refreshing.
+			Roots:         roots,
+			Intermediates: intermediates,
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 		}
 		if _, err := c.Verify(opts); err != nil {
-			t.Errorf("cert %q failed self-verification against pool: %v",
+			t.Errorf("cert %q failed to chain to a published root: %v",
 				c.Subject.CommonName, err)
 		}
 	}
+}
+
+// TestPool_VerifyOptionsShape demonstrates the supported usage:
+// Pool() goes into Roots and validation succeeds even with no
+// Intermediates field set, because every intermediate in the pool
+// is treated as an additional trust anchor.
+func TestPool_AsRootsOnly(t *testing.T) {
+	pool, err := yubico.Pool()
+	if err != nil {
+		t.Fatalf("Pool(): %v", err)
+	}
+	inters, err := yubico.IntermediateCerts()
+	if err != nil {
+		t.Fatalf("IntermediateCerts(): %v", err)
+	}
+	for _, c := range inters {
+		opts := x509.VerifyOptions{
+			Roots:     pool,
+			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		}
+		if _, err := c.Verify(opts); err != nil {
+			t.Errorf("intermediate %q does not validate against Pool() (Roots-only): %v",
+				c.Subject.CommonName, err)
+		}
+	}
+}
+
+func mustRootCerts(t *testing.T) []*x509.Certificate {
+	t.Helper()
+	c, err := yubico.RootCerts()
+	if err != nil {
+		t.Fatalf("RootCerts(): %v", err)
+	}
+	return c
 }
