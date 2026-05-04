@@ -10,6 +10,7 @@ permissions:
   contents: read
 
 jobs:
+  # Parent module: pure Go, no system dependencies.
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -46,4 +47,91 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          args: --timeout=5m
+
+  # CGo submodules. transport/pcsc wraps github.com/ebfe/scard which
+  # links against pcsclite/winscard, so the submodule (and anything
+  # depending on it) needs libpcsclite-dev installed before `go test`.
+  #
+  # All three submodules share one job: parallelism here costs more
+  # in apt-install overhead than it saves in test time. If any
+  # individual submodule grows large enough to be worth its own
+  # job, split it then.
+  submodules:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Install pcsclite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcsclite-dev
+
+      - name: transport/pcsc — verify, vet, test
+        working-directory: transport/pcsc
+        run: |
+          go mod verify
+          go vet ./...
+          go test -v -race -count=1 ./...
+
+      - name: transport/pcsc/example — verify, vet, build
+        working-directory: transport/pcsc/example
+        run: |
+          go mod verify
+          go vet ./...
+          go build -o /tmp/scp-pcsc-demo .
+
+      - name: cmd/scp-smoke — verify, vet, test, build
+        working-directory: cmd/scp-smoke
+        run: |
+          go mod verify
+          go vet ./...
+          go test -v -race -count=1 ./...
+          go build -o /tmp/scp-smoke .
+
+  # Lint for the CGo submodules. Shares the apt install with the
+  # test job above but kept separate so a lint failure doesn't
+  # mask a test failure or vice versa.
+  submodules-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install pcsclite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcsclite-dev
+
+      - name: golangci-lint transport/pcsc
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: transport/pcsc
+          args: --timeout=5m
+
+      - name: golangci-lint transport/pcsc/example
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: transport/pcsc/example
+          args: --timeout=5m
+
+      - name: golangci-lint cmd/scp-smoke
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: cmd/scp-smoke
           args: --timeout=5m
