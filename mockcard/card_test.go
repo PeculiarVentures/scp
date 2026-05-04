@@ -354,3 +354,48 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 
 	t.Log("SCP11a (with receipt) session + encrypted echo verified")
 }
+
+// TestCard_GetData_CRD confirms the SCP11 mock returns Card
+// Recognition Data on GET DATA tag 0x0066. Like the SCP03 mock, this
+// is permitted before authentication so the host can probe the card
+// before deciding which protocol to negotiate.
+func TestCard_GetData_CRD(t *testing.T) {
+	card, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp, err := card.Transport().Transmit(context.Background(), &apdu.Command{
+		CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0x66, Le: 0,
+	})
+	if err != nil {
+		t.Fatalf("GET DATA 0x0066: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("SW=%04X", resp.StatusWord())
+	}
+	if len(resp.Data) == 0 || resp.Data[0] != 0x66 {
+		t.Errorf("CRD response should begin with 0x66; got first byte %02X", resp.Data[0])
+	}
+}
+
+// TestCard_GetData_KeyInfo confirms the SCP11 mock answers GET DATA
+// tag 0x00E0 with a key information template that the host parser
+// can decode.
+func TestCard_GetData_KeyInfo(t *testing.T) {
+	card, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp, err := card.Transport().Transmit(context.Background(), &apdu.Command{
+		CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0xE0, Le: 0,
+	})
+	if err != nil {
+		t.Fatalf("GET DATA 0x00E0: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("SW=%04X", resp.StatusWord())
+	}
+	if len(resp.Data) < 4 || resp.Data[0] != 0xE0 {
+		t.Errorf("key info response should begin with 0xE0; got %X", resp.Data)
+	}
+}

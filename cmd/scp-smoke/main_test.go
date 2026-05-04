@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -290,3 +291,45 @@ func (p *probeFakeTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, e
 	return nil, errors.New("not implemented")
 }
 func (p *probeFakeTransport) Close() error { return nil }
+
+// TestSCP03SDRead_Smoke runs the cmd_scp03_sd_read flow end-to-end
+// against the now-extended SCP03 mock card. The mock handles GET
+// DATA tags 0xE0 (key info) and 0x66 (CRD) over secure messaging
+// after the SCP03 handshake completes (PR that extends the mock
+// added these), so the smoke command can be unit-tested without
+// hardware.
+//
+// Verifies four checks pass: open, authenticated, GetKeyInformation,
+// GetCardRecognitionData over SCP03.
+func TestSCP03SDRead_Smoke(t *testing.T) {
+	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
+	var buf bytes.Buffer
+	env := &runEnv{
+		out:    &buf,
+		errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	if err := cmdSCP03SDRead(context.Background(), env, []string{"--reader", "fake"}); err != nil {
+		t.Fatalf("cmdSCP03SDRead: %v\n--- output ---\n%s", err, buf.String())
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"open SCP03 SD",
+		"PASS",
+		"authenticated",
+		"GetKeyInformation",
+		"GetCardRecognitionData over SCP03",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	// Make sure no FAIL line slipped through.
+	if strings.Contains(out, " FAIL") {
+		t.Errorf("output contains FAIL\n--- output ---\n%s", out)
+	}
+}

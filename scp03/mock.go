@@ -76,6 +76,13 @@ func (c *MockCard) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0x50: // INITIALIZE UPDATE
 		return c.doInitializeUpdate(cmd)
+	case 0xCA: // GET DATA — allow tag 0x66 (CRD) unauthenticated;
+		// real cards typically permit CRD probe before any session.
+		// Other tags require secure messaging.
+		if cmd.P1 == 0x00 && cmd.P2 == 0x66 {
+			return c.doGetData(cmd.P1, cmd.P2)
+		}
+		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil // security status not satisfied
 	default:
 		return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
 	}
@@ -258,7 +265,7 @@ func (c *MockCard) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	}
 
 	// Process plain command
-	plainResp, err := c.processPlain(cmd.INS, plainData)
+	plainResp, err := c.processPlain(cmd.INS, cmd.P1, cmd.P2, plainData)
 	if err != nil {
 		return nil, err
 	}
@@ -266,15 +273,73 @@ func (c *MockCard) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	return sess.ch.WrapResponse(plainResp)
 }
 
-func (c *MockCard) processPlain(ins byte, data []byte) (*apdu.Response, error) {
+func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, error) {
 	switch ins {
 	case 0xA4: // SELECT
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0xFD: // Echo (test)
 		return &apdu.Response{Data: data, SW1: 0x90, SW2: 0x00}, nil
+	case 0xCA: // GET DATA
+		return c.doGetData(p1, p2)
 	default:
 		return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
 	}
+}
+
+// doGetData answers the small set of GET DATA tags the host code in
+// this repo issues during smoke and integration tests:
+//
+//   - 0x0066 — Card Recognition Data (a synthetic GP 2.3.1 / SCP03
+//     i=0x65 blob, same shape as the cardrecognition package's
+//     test fixtures).
+//   - 0x00E0 — Key Information Template (one C0 entry: KID=0x01,
+//     KVN=0xFF, component {0x88: 0x10} — AES-128 marker).
+//
+// Other tags return 6A88 (reference data not found), matching real
+// card behavior. The mock does not attempt to be exhaustive — it
+// covers the GP §H.2 + §11.3.3.1 reads the host's Session methods
+// (GetCardRecognitionData, GetKeyInformation) actually issue.
+func (c *MockCard) doGetData(p1, p2 byte) (*apdu.Response, error) {
+	tag := uint16(p1)<<8 | uint16(p2)
+	switch tag {
+	case 0x0066:
+		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
+	case 0x00E0:
+		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
+	default:
+		return &apdu.Response{SW1: 0x6A, SW2: 0x88}, nil // reference data not found
+	}
+}
+
+// syntheticCRD is the Card Recognition Data blob the mock returns
+// for GET DATA tag 0x0066. Hand-assembled per GP Card Spec §H.2:
+// outer 66 LL, inner 73 LL OID list, GP RID marker + GP version
+// (1.2.840.114283.2.2.3.1 = 2.3.1) + SCP info OID
+// (1.2.840.114283.4.3.65 = SCP03 i=0x65). Same shape as the test
+// fixture used by the cardrecognition package and #41 trace tests.
+var syntheticCRD = []byte{
+	0x66, 0x26,
+	0x73, 0x24,
+	0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x01,
+	0x60, 0x0C, 0x06, 0x0A, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x02, 0x02, 0x03, 0x01,
+	0x64, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x03, 0x65,
+}
+
+// syntheticKeyInfo is a minimal Key Information Template the mock
+// returns for GET DATA tag 0x00E0. It advertises one keyset:
+//
+//	E0 06              -- Key Information container, 6 bytes
+//	  C0 04            -- one Key Information Template, 4 bytes
+//	    01             -- KID = 0x01 (SCP03)
+//	    FF             -- KVN = 0xFF (YubiKey factory)
+//	    88 10          -- component pair (algorithm 0x88 = AES, length-id 0x10)
+//
+// Decoded by securitydomain.parseKeyInformation as:
+//
+//	KeyInfo{Reference: {ID: 0x01, Version: 0xFF}, Components: {0x88: 0x10}}
+var syntheticKeyInfo = []byte{
+	0xE0, 0x06,
+	0xC0, 0x04, 0x01, 0xFF, 0x88, 0x10,
 }
 
 // MockTransport implements transport.Transport for the SCP03 mock card.

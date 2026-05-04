@@ -169,12 +169,49 @@ func (c *Card) doSelect(cmd *apdu.Command) (*apdu.Response, error) {
 }
 
 func (c *Card) doGetData(cmd *apdu.Command) (*apdu.Response, error) {
-	if cmd.P1 != 0xBF || cmd.P2 != 0x21 {
-		return mkSW(0x6A88), nil
+	tag := uint16(cmd.P1)<<8 | uint16(cmd.P2)
+	switch tag {
+	case 0x0066:
+		// Card Recognition Data — same synthetic blob the SCP03 mock
+		// returns. Both mocks return identical CRD so a test that
+		// drives either through the host CRD parser sees identical
+		// shape and downstream tests don't have to special-case which
+		// mock they used.
+		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
+	case 0x00E0:
+		// Key Information Template. The mock advertises one entry
+		// (KID=0x01, KVN=0xFF, AES-128) so host-side
+		// GetKeyInformation produces a non-empty result.
+		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
+	case 0xBF21:
+		// Certificate store — the original behavior of this method.
+		certNode := tlv.Build(tlv.TagCertificate, c.certDER)
+		storeNode := tlv.BuildConstructed(tlv.TagCertStore, certNode)
+		return &apdu.Response{Data: storeNode.Encode(), SW1: 0x90, SW2: 0x00}, nil
+	default:
+		return mkSW(0x6A88), nil // reference data not found
 	}
-	certNode := tlv.Build(tlv.TagCertificate, c.certDER)
-	storeNode := tlv.BuildConstructed(tlv.TagCertStore, certNode)
-	return &apdu.Response{Data: storeNode.Encode(), SW1: 0x90, SW2: 0x00}, nil
+}
+
+// syntheticCRD is hand-assembled GP 2.3.1 / SCP03 i=0x65 Card
+// Recognition Data, returned by GET DATA tag 0x0066. Same shape as
+// the test fixture used elsewhere in the repo. See GP Card Spec
+// §H.2 for the structure.
+var syntheticCRD = []byte{
+	0x66, 0x26,
+	0x73, 0x24,
+	0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x01,
+	0x60, 0x0C, 0x06, 0x0A, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x02, 0x02, 0x03, 0x01,
+	0x64, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x03, 0x65,
+}
+
+// syntheticKeyInfo is a minimal Key Information Template returned
+// by GET DATA tag 0x00E0. One C0 entry: KID=0x01, KVN=0xFF, AES-128
+// marker. Decodes through securitydomain.parseKeyInformation to a
+// single KeyInfo entry.
+var syntheticKeyInfo = []byte{
+	0xE0, 0x06,
+	0xC0, 0x04, 0x01, 0xFF, 0x88, 0x10,
 }
 
 func (c *Card) doPerformSecurityOp(cmd *apdu.Command) (*apdu.Response, error) {
