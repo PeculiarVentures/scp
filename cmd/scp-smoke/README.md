@@ -254,8 +254,35 @@ The library implementations and behaviors validated by this tool are documented 
 - GP Card Specification v2.3.1 §H.2/H.3 — Card Recognition Data structure
 - GP Card Specification v2.3.1 Amendment F — SCP11
 
+## Trust configuration for SCP11 commands
+
+Every SCP11 subcommand (`scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision`, `piv-reset`) accepts the same two mutually-exclusive trust flags:
+
+| Flag | Purpose |
+|---|---|
+| `--trust-roots <pem-path>` | **Production.** Loads CERTIFICATE blocks from the named PEM bundle and configures `cfg.CardTrustAnchors` so the card's certificate is verified during the SCP11 handshake. |
+| `--lab-skip-scp11-trust` | **Lab only.** Skips card cert validation entirely. Against a real card this is opportunistic encryption, not authenticated key agreement. |
+
+Neither flag set produces a `trust mode SKIP` and the command exits without opening the session. Both flags set is a usage error.
+
+```bash
+# Production: validate the card cert against a pinned Yubico SD root
+scp-smoke scp11b-piv-verify \
+  --reader "YubiKey" \
+  --pin 123456 \
+  --trust-roots /etc/scp/yubikey-roots.pem
+
+# Lab: skip validation for wire-only smoke
+scp-smoke scp11b-piv-verify \
+  --reader "YubiKey" \
+  --pin 123456 \
+  --lab-skip-scp11-trust
+```
+
+The PEM bundle may contain multiple CERTIFICATE blocks; non-CERTIFICATE blocks (e.g. a stray private key) are rejected so a misnamed file doesn't silently produce an empty trust pool.
+
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (with mgmt-key mutual auth + cert-binding check), `piv-reset`, `test`.
-- Next: custom SCP03 key flags for `bootstrap-oce` against rotated cards (`--kvn` / `--enc` / `--mac` / `--dek`), production trust roots wiring (`--trust-roots <pem-bundle>`) so SCP11 commands don't need `--lab-skip-scp11-trust`, GET METADATA support for auto-detecting management-key algorithm.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (mgmt-key auth + cert-binding), `piv-reset`, `test`. SCP11 commands accept `--trust-roots <pem>` for production trust validation or `--lab-skip-scp11-trust` for wire-only smoke.
+- Next: custom SCP03 key flags for `bootstrap-oce` against rotated cards (`--kvn` / `--enc` / `--mac` / `--dek`); GET METADATA support for auto-detecting management-key algorithm against a card whose state isn't known up front.
 - Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.

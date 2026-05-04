@@ -39,8 +39,7 @@ func cmdSCP11bSDRead(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("scp11b-sd-read", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	labSkipTrust := fs.Bool("lab-skip-scp11-trust", false,
-		"Skip SCP11 card certificate validation. Lab use only.")
+	trust := registerTrustFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
@@ -56,14 +55,11 @@ func cmdSCP11bSDRead(ctx context.Context, env *runEnv, args []string) error {
 	report.Data = data
 
 	cfg := scp11.YubiKeyDefaultSCP11bConfig()
-	if *labSkipTrust {
-		cfg.InsecureSkipCardAuthentication = true
-		report.Pass("trust mode", "lab-skip (card cert NOT validated)")
-	} else {
-		// Production trust requires a trust policy. Until the CLI
-		// learns to load a pinned Yubico SD root, the only honest
-		// outcome is SKIP.
-		report.Skip("trust mode", "no trust roots configured; use --lab-skip-scp11-trust for wire-protocol smoke")
+	proceed, err := trust.applyTrust(cfg, report)
+	if err != nil {
+		return err
+	}
+	if !proceed {
 		_ = report.Emit(env.out, *jsonMode)
 		return nil
 	}
