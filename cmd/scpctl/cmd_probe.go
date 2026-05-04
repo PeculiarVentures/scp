@@ -21,6 +21,13 @@ type probeData struct {
 	CardConfigDetailsOID  string `json:"card_config_details_oid,omitempty"`
 	CardChipDetailsOID    string `json:"card_chip_details_oid,omitempty"`
 	RawHex                string `json:"raw_hex,omitempty"`
+
+	// KeyInfo is populated by 'sd info' (and other callers that set
+	// probeOptions.fetchKeyInfo). Each entry is a human-readable
+	// summary like 'KID=0x01 KVN=0xFF (3 components)'. Omitted from
+	// JSON output when nil so the probe's CRD-only schema stays
+	// stable for consumers that only ever see cmdProbe.
+	KeyInfo []string `json:"key_info,omitempty"`
 }
 
 // cmdProbe opens an unauthenticated Security Domain session, fetches
@@ -37,7 +44,39 @@ type probeData struct {
 //   - GP Card Spec v2.3.1 §H.2/H.3 (Card Recognition Data structure)
 //   - Yubico Python yubikit.securitydomain (CRD retrieval pattern)
 func cmdProbe(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("probe", env)
+	return runProbe(ctx, env, args, probeOptions{
+		flagSetName: "probe",
+		reportLabel: "probe",
+		fetchKeyInfo: false,
+	})
+}
+
+// probeOptions configures a runProbe invocation. Both cmdProbe and
+// cmdSDInfo use the same underlying flow (open ISD unauthenticated,
+// fetch and parse CRD); they differ in the report label, the help
+// header on flag-set usage errors, and whether the Key Information
+// Template is fetched.
+type probeOptions struct {
+	// flagSetName is what newSubcommandFlagSet displays in flag
+	// usage errors. 'probe' for the legacy top-level subcommand,
+	// 'sd info' for the new group-form.
+	flagSetName string
+
+	// reportLabel is what shows up in Report.Subcommand. The same
+	// labels distinguish the two commands in JSON output and in
+	// the human-readable header line.
+	reportLabel string
+
+	// fetchKeyInfo controls whether the Key Information Template
+	// is fetched and reported. cmdProbe does not (CRD is the
+	// historical scope). cmdSDInfo does, because reporting card
+	// identity at the SD-info level should include which key
+	// references the card has installed.
+	fetchKeyInfo bool
+}
+
+func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions) error {
+	fs := newSubcommandFlagSet(opts.flagSetName, env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
@@ -50,7 +89,7 @@ func cmdProbe(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	report := &Report{Subcommand: "probe", Reader: *reader}
+	report := &Report{Subcommand: opts.reportLabel, Reader: *reader}
 
 	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
 	if err != nil {
@@ -99,7 +138,6 @@ func cmdProbe(ctx context.Context, env *runEnv, args []string) error {
 	if len(info.CardChipDetailsOID) > 0 {
 		data.CardChipDetailsOID = info.CardChipDetailsOID.String()
 	}
-	report.Data = data
 
 	// Capability checks — strictly informational. The probe does not
 	// authenticate or authorize anything; it just tells the user what
@@ -122,11 +160,43 @@ func cmdProbe(ctx context.Context, env *runEnv, args []string) error {
 		report.Skip("SCP advertised", fmt.Sprintf("unknown SCP version 0x%02X", info.SCPVersion))
 	}
 
+	// Key Information Template. Optional because many cards do not
+	// implement GET DATA tag 0x00E0; fetch failures are reported as
+	// SKIP rather than FAIL because absence of KIT is not a probe
+	// failure. The KIT is the natural extension of 'sd info' beyond
+	// raw CRD parsing because it tells the operator which keys the
+	// card has installed (key references and component types) which
+	// is the next thing they want to know after 'is this card
+	// reachable'.
+	if opts.fetchKeyInfo {
+		keys, err := sd.GetKeyInformation(ctx)
+		switch {
+		case err != nil:
+			report.Skip("GET DATA tag 0x00E0 (KIT)", err.Error())
+		case len(keys) == 0:
+			report.Skip("GET DATA tag 0x00E0 (KIT)", "card returned no key entries")
+		default:
+			summaries := make([]string, 0, len(keys))
+			for _, k := range keys {
+				// Each KeyInfo entry: 'KID=0x01 KVN=0xFF (3 components)'.
+				summaries = append(summaries,
+					fmt.Sprintf("KID=0x%02X KVN=0x%02X (%d components)",
+						k.Reference.ID, k.Reference.Version, len(k.Components)))
+			}
+			report.Pass("GET DATA tag 0x00E0 (KIT)",
+				fmt.Sprintf("%d key entries: %s",
+					len(keys), strings.Join(summaries, "; ")))
+			data.KeyInfo = summaries
+		}
+	}
+
+	report.Data = data
+
 	if err := report.Emit(env.out, *jsonMode); err != nil {
 		return err
 	}
 	if report.HasFailure() {
-		return fmt.Errorf("probe reported failures")
+		return fmt.Errorf("%s reported failures", opts.reportLabel)
 	}
 	return nil
 }

@@ -4,31 +4,30 @@ import (
 	"context"
 )
 
-// cmdSDInfo is the Security Domain peer of `cmdPIVInfo`. Both
-// commands answer the same kind of question ("what does this card
-// advertise on this applet?") and both are non-destructive,
-// unauthenticated, and intended as the first thing an operator runs.
+// cmdSDInfo opens an unauthenticated Security Domain session and
+// reports the card's identity. Two read-only GET DATA calls:
 //
-// Today this is a thin wrapper around cmdProbe (which already opens
-// the ISD, fetches Card Recognition Data, and parses it). The
-// wrapper exists so:
+//   - tag 0x66 (Card Recognition Data): GP version, SCP advertisement,
+//     card identification / config / chip OIDs.
+//   - tag 0x00E0 (Key Information Template): list of installed key
+//     references with KID, KVN, and component count.
 //
-//  1. The 'sd info' command is reachable through the documented
-//     scpctl group/subcommand structure, alongside 'piv info'.
+// CRD is mandatory; KIT is best-effort because not every card
+// implements GET DATA tag 0x00E0. KIT absence is reported as SKIP
+// rather than FAIL.
 //
-//  2. When the SD command set grows (sd scp03-read, sd scp11b-read,
-//     etc., wired to the securitydomain package directly rather
-//     than via the smoke harness), this file already owns the
-//     'sd' subcommand registry and grows in place.
+// The peer command 'piv info' answers the same shape of question for
+// the PIV applet. Both commands are non-destructive, unauthenticated,
+// and the right thing to run before deciding what to authenticate as.
 //
-// Behavior is identical to 'scpctl smoke probe' / 'scpctl probe';
-// only the report subcommand label differs.
+// 'sd info' shares its core implementation with the legacy 'scpctl
+// probe' (and 'scpctl smoke probe') subcommand, with the additional
+// KIT fetch turned on. The legacy command stays for backward
+// compatibility with existing scripts that called 'scp-smoke probe'.
 func cmdSDInfo(ctx context.Context, env *runEnv, args []string) error {
-	// cmdProbe writes "subcommand": "probe" in its report. We want
-	// "sd info" instead. The simplest correct approach is to call
-	// cmdProbe and accept the label difference until we expand the
-	// SD command set; alternatively we'd reimplement the probe
-	// flow here. Aliasing to cmdProbe keeps the code path single
-	// and the behavioral contract identical.
-	return cmdProbe(ctx, env, args)
+	return runProbe(ctx, env, args, probeOptions{
+		flagSetName:  "sd info",
+		reportLabel:  "sd info",
+		fetchKeyInfo: true,
+	})
 }
