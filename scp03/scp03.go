@@ -7,6 +7,27 @@
 // keys via NIST SP 800-108 KDF in counter mode, with host and card
 // challenges providing freshness.
 //
+// # Key sizes and assurance
+//
+// scp03.Open supports AES-128, AES-192, and AES-256 at the channel-
+// establishment layer. All three sizes are byte-exact-verified against
+// Samsung OpenSCP-Java protocol vectors at the handshake, KDF, and
+// secure-messaging layers. AES-128 is also verified against YubiKey
+// hardware end-to-end; AES-192 / AES-256 are protocol-layer-verified
+// pending hardware validation against a card that supports them.
+//
+// Note that this is the channel-establishment guarantee. The
+// securitydomain.PutSCP03Key provisioning flow (the management-side
+// PUT KEY for installing new SCP03 key sets) currently covers the
+// AES-128 management profile; AES-192 / AES-256 PUT KEY shapes are
+// expansion targets and need a card and reference vectors to validate
+// against.
+//
+// S8 (8-byte MAC truncation) and S16 (16-byte MAC) are both supported.
+// All six combinations (AES-128 / 192 / 256 × S8 / S16) are protocol-
+// layer-verified; S8 is also hardware-verified against YubiKey.
+// Hardware validation of S16 is an expansion target.
+//
 // # Protocol Flow
 //
 //	Host                              Card

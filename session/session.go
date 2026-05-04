@@ -178,20 +178,22 @@ type Config struct {
 	// info per GP SCP11 §3.1.2. If set, it is appended to the shared
 	// info as a length-value pair: len(HostID) || HostID.
 	//
-	// NOTE: SUPPORT IS INCOMPLETE. The KDF appends HostID to SharedInfo,
-	// but the AUTHENTICATE command does NOT set the SCP11 parameter
-	// bit indicating identifiers are included, and does NOT include
-	// tag 0x84 Host ID in the control reference template. Setting
-	// this field would derive a different key schedule than the card,
-	// so Open fails closed when this field is non-empty. A complete
-	// implementation needs the parameter bit, the 0x84 TLV, and (for
-	// SCP11a/b) SIN/SDIN inclusion in SharedInfo per GP §3.1.2.
+	// Expansion target: the KDF shared-info path appends HostID
+	// correctly, but the wire-side encoding is not yet wired — the
+	// AUTHENTICATE command does not set the SCP11 parameter bit
+	// indicating identifiers are included, and does not include the
+	// tag-0x84 Host ID in the control reference template. Setting
+	// this field today would derive a different key schedule than
+	// the card, so Open fails closed when it is non-empty. Completing
+	// the implementation covers the AUTHENTICATE parameter bit, tag
+	// 0x84, and matching KDF shared-info behavior end-to-end.
 	HostID []byte
 
 	// CardGroupID is the optional card group identifier for SCP11c.
 	// Included in the KDF shared info after HostID if set.
 	//
-	// NOTE: SUPPORT IS INCOMPLETE — same caveat as HostID above.
+	// Expansion target: same caveat as HostID — the KDF inclusion is
+	// wired but the AUTHENTICATE parameter bit and tag 0x84 are not.
 	// Open rejects sessions with this field set.
 	CardGroupID []byte
 

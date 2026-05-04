@@ -1,7 +1,19 @@
-// Package securitydomain implements the GlobalPlatform Security Domain
-// management layer for YubiKey devices. It provides typed APIs for
-// provisioning, rotating, inspecting, and retiring SCP03 and SCP11
-// key material, certificate chains, allowlists, and CA issuer references.
+// Package securitydomain implements a GlobalPlatform Security Domain
+// management layer. It provides typed APIs for provisioning, rotating,
+// inspecting, and retiring SCP03 and SCP11 key material, certificate
+// chains, allowlists, and CA issuer references.
+//
+// This is the first typed Security Domain management profile in the
+// library. Its API surface and behavior are currently verified against
+// YubiKey, which is the GP card the library has byte-exact transcript
+// coverage for. The package structure (typed config types, capability
+// interfaces for OCE-auth and DEK provision, custom-session opt-in,
+// the OpenSCP03 / OpenSCP11 / OpenWithSession family) is intentionally
+// designed so additional GP Security Domain management profiles
+// (Java Card, NXP, IDEMIA, Samsung) can be added over time without
+// subclass-style proliferation: a new profile is a new typed config
+// and Session constructor, sharing the underlying APDU / TLV building
+// blocks.
 //
 // This package sits above the secure channel layer:
 //

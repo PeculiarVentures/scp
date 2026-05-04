@@ -3,17 +3,53 @@
 //
 // Two protocols are supported:
 //
-//   - SCP03 (Amendment D) — Symmetric key protocol using pre-shared AES keys.
-//     Simpler to deploy but requires secure key distribution.
+//   - SCP03 (Amendment D) — Symmetric key protocol using pre-shared AES
+//     keys. Simpler to deploy but requires secure key distribution.
 //
 //   - SCP11 (Amendment F) — Asymmetric protocol using ECDH key agreement
 //     and X.509 certificates. Three variants: SCP11a (mutual auth),
 //     SCP11b (card-to-host), SCP11c (mutual auth with offline scripting).
 //
-// Both protocols share the same secure messaging layer (AES-CBC encryption,
-// AES-CMAC authentication) and produce a Session with an identical API.
-// The consumer calls Open with protocol-specific config, then uses
-// Session.Transmit for all subsequent commands — the wrapping is transparent.
+// Both protocols share the same secure messaging layer (AES-CBC
+// encryption, AES-CMAC authentication) and produce a Session with an
+// identical API. The consumer calls Open with protocol-specific config,
+// then uses Session.Transmit for all subsequent commands — the wrapping
+// is transparent.
+//
+// # Assurance categories
+//
+// The library is standards-oriented and structured around three
+// categories so consumers can match their integration to validated
+// material rather than to a single vendor:
+//
+//   - Verified profiles: behavior validated against hardware AND an
+//     independent reference implementation. YubiKey is the currently
+//     verified profile, covering SCP03 AES-128 end-to-end, SCP11
+//     P-256 / AES-128 / S8 / full security level end-to-end, the
+//     YubiKey-compatible empty-data behavior, and the YubiKey
+//     Security Domain management API surface.
+//
+//   - Implemented GlobalPlatform capabilities: standards-compatible
+//     behavior implemented against the GP / ISO specs and exercisable
+//     today against any conformant card. Includes SCP03 AES-128 /
+//     192 / 256, SCP03 S8 + S16, configurable empty-data behavior,
+//     X.509 SCP11 card trust validation, custom validation for
+//     GP-proprietary SCP11 certificate stores via
+//     trust.Policy.CustomValidator, short and extended APDUs, GET
+//     RESPONSE chaining, BER-TLV parsing, and transport-independent
+//     APDU construction.
+//
+//   - Expansion targets: in-scope work waiting on additional cards or
+//     reference material. Includes additional non-YubiKey GP cards as
+//     verified profiles, Java Card security domains, additional vendor
+//     certificate-store formats, SCP03 AES-192 / 256 management
+//     profiles, SCP03 S16 hardware validation, SCP11 HostID /
+//     CardGroupID wire behavior (AUTHENTICATE parameter bit, tag
+//     0x84, KDF shared-info), broader logical-channel behavior
+//     end-to-end against real cards, and additional Security Domain
+//     management profiles.
+//
+// See the project README for the detailed assurance breakdown.
 //
 // # Quick Start
 //
@@ -40,7 +76,9 @@
 //	├─────────────────────────────────┤
 //	│  scp.Session (common interface) │  Transmit, Close
 //	├─────────────────────────────────┤
-//	│  channel (secure messaging)     │  Encrypt, MAC, verify
+//	│  channel (secure messaging)     │  Encrypt, MAC, verify;
+//	│                                 │  ISO 7816-4 CLA / logical
+//	│                                 │  channel encoding
 //	├─────────────────────────────────┤
 //	│  kdf / cmac / tlv / apdu        │  Shared primitives
 //	├─────────────────────────────────┤
