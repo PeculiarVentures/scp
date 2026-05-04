@@ -99,6 +99,21 @@ jobs:
           go vet ./...
           go build -o /tmp/scp-pcsc-demo .
 
+      - name: transport/grpc — verify, vet, test
+        working-directory: transport/grpc
+        run: |
+          go mod verify
+          go vet ./...
+          go test -v -race -count=1 ./...
+
+      - name: transport/grpc/example — verify, vet, build
+        working-directory: transport/grpc/example
+        run: |
+          go mod verify
+          go vet ./...
+          go build -o /tmp/cardrelay-server ./server
+          go build -o /tmp/cardrelay-client ./client
+
       - name: cmd/scp-smoke — verify, vet, test, build
         working-directory: cmd/scp-smoke
         run: |
@@ -137,6 +152,20 @@ jobs:
         with:
           version: latest
           working-directory: transport/pcsc/example
+          args: --timeout=5m
+
+      - name: golangci-lint transport/grpc
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: transport/grpc
+          args: --timeout=5m
+
+      - name: golangci-lint transport/grpc/example
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: transport/grpc/example
           args: --timeout=5m
 
       - name: golangci-lint cmd/scp-smoke

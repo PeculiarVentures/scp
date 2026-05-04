@@ -1,0 +1,148 @@
+// CardRelay is a network protocol for proxying ISO 7816 APDUs between
+// a client (host with a logical card session) and a server (host with
+// physical access to the smart card via PC/SC).
+//
+// Wire model: a single bidirectional stream represents one card
+// session. The client sends APDU requests, the server forwards them
+// to its locally-attached card, and returns responses. When either
+// side closes the stream the server releases the underlying card
+// connection — so session lifecycle is implicit in stream lifecycle,
+// no session_id management.
+//
+// What this protocol does NOT do:
+//
+//   - Authenticate the caller. Anyone who can reach the gRPC port
+//     and pass mTLS can drive APDUs at the card. A real deployment
+//     pairs CardRelay with a separate authorization layer (per-
+//     operation capability tokens, attested workload identity,
+//     etc). Without that layer, exposing a PIN-verified PIV applet
+//     over CardRelay is equivalent to handing the caller a signing
+//     oracle.
+//
+//   - Encrypt the APDUs end-to-end. CardRelay relies on transport
+//     security (TLS / mTLS) between client and server, but the
+//     server sees plaintext APDUs. If the client and server cannot
+//     trust each other to that degree, CardRelay is the wrong tool;
+//     use SCP11 directly between client and card, with CardRelay
+//     forwarding the already-wrapped APDUs (which is supported —
+//     see the raw bytes mode below).
+//
+//   - Multiplex card sessions. One stream = one session = one
+//     reader. To use N readers concurrently, open N streams.
+syntax = "proto3";
+
+package cardrelay.v1;
+
+option go_package = "github.com/PeculiarVentures/scp/transport/grpc/proto/cardrelayv1;cardrelayv1";
+
+service CardRelay {
+  // Session opens a bidirectional stream that maps to a single
+  // card-session lifetime on the server. The first message MAY be
+  // a HelloRequest carrying optional reader-selection criteria;
+  // subsequent messages are APDU transmits. Closing the client
+  // half of the stream signals the server to release the card.
+  rpc Session(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// ClientMessage is the union of everything a client sends on the
+// stream. Exactly one field is set per message.
+message ClientMessage {
+  oneof body {
+    HelloRequest hello = 1;
+    TransmitRequest transmit = 2;
+  }
+}
+
+// ServerMessage is the union of everything a server sends on the
+// stream. Exactly one field is set per message.
+message ServerMessage {
+  oneof body {
+    HelloResponse hello = 1;
+    TransmitResponse transmit = 2;
+    ErrorResponse error = 3;
+  }
+}
+
+// HelloRequest is the optional first message that lets the client
+// pick which reader to bind to on the server side. If omitted, the
+// server uses its default reader.
+message HelloRequest {
+  // Substring match on reader name. Empty = first available reader.
+  string reader = 1;
+
+  // Protocol version the client expects to speak. Mismatches let the
+  // server reject the stream cleanly with ErrorResponse.
+  uint32 protocol_version = 2;
+}
+
+// HelloResponse confirms the session is bound to a specific reader
+// on the server side.
+message HelloResponse {
+  // The actual reader name the server bound to. May differ from the
+  // client's hint (substring match).
+  string reader = 1;
+
+  uint32 protocol_version = 2;
+}
+
+// TransmitRequest carries one APDU. The client picks ONE of `apdu`
+// or `raw`; the server picks the matching method on its underlying
+// transport (Transmit vs TransmitRaw). raw is the right choice for
+// already-wrapped SCP APDUs where the client is doing the secure-
+// channel work and the server is just a pipe.
+message TransmitRequest {
+  oneof body {
+    Apdu apdu = 1;
+    bytes raw = 2;
+  }
+}
+
+message TransmitResponse {
+  oneof body {
+    ApduResponse apdu = 1;
+    bytes raw = 2;
+  }
+}
+
+// ErrorResponse signals a server-side problem with the most recent
+// request — the stream may continue if the client wants to retry.
+// For terminal errors the server closes the stream after sending
+// this.
+message ErrorResponse {
+  string message = 1;
+
+  enum Kind {
+    UNKNOWN = 0;
+    NO_READER = 1;        // Hello reader hint matched no reader.
+    READER_GONE = 2;      // Card removed mid-session.
+    PROTOCOL_VERSION = 3; // Hello protocol_version unsupported.
+    TRANSPORT = 4;        // Underlying card transport failed.
+    INVALID_REQUEST = 5;  // Malformed message.
+  }
+  Kind kind = 2;
+}
+
+// Apdu is the parsed form of an ISO 7816-4 command APDU.
+message Apdu {
+  uint32 cla = 1;
+  uint32 ins = 2;
+  uint32 p1 = 3;
+  uint32 p2 = 4;
+  bytes data = 5;
+  // Le encoded the same way apdu.Command.Le is in the Go API:
+  //   -1: no Le (case 1 / case 3)
+  //    0: Le=256 (case 2 / case 4 short)
+  //   1..256: explicit Le (256 indicates Le=00 short or Le=0000 ext)
+  // The Go side converts this to the wire byte during encoding.
+  int32 le = 6;
+  // ExtendedLength forces extended-length encoding even when the
+  // payload would fit in short form. Mirrors apdu.Command.
+  bool extended_length = 7;
+}
+
+// ApduResponse is the parsed form of a response APDU.
+message ApduResponse {
+  bytes data = 1;
+  uint32 sw1 = 2;
+  uint32 sw2 = 3;
+}
