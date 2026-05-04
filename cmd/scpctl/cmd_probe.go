@@ -126,15 +126,19 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	if len(info.GPVersion) > 0 {
 		data.GPVersion = joinInts(info.GPVersion, ".")
 	}
-	if info.SCPVersion != 0 {
-		data.SCPVersion = fmt.Sprintf("0x%02X", info.SCPVersion)
+	if len(info.SCPs) > 0 {
+		// JSON back-compat: scp_version and scp_parameter mirror
+		// SCPs[0] for any consumer still parsing the old single-
+		// SCP shape. The SCPs slice carries the full set.
+		first := info.SCPs[0]
+		data.SCPVersion = fmt.Sprintf("0x%02X", first.Version)
 		// SCP11 v1.3 i-parameters can be 2 bytes; render the wider
 		// form when needed so SCP02/03 stay 0xNN and SCP11 reports
 		// 0xNNNN truthfully instead of being truncated to the low byte.
-		if info.SCPParameter > 0xFF {
-			data.SCPParameter = fmt.Sprintf("0x%04X", info.SCPParameter)
+		if first.Parameter > 0xFF {
+			data.SCPParameter = fmt.Sprintf("0x%04X", first.Parameter)
 		} else {
-			data.SCPParameter = fmt.Sprintf("0x%02X", info.SCPParameter)
+			data.SCPParameter = fmt.Sprintf("0x%02X", first.Parameter)
 		}
 	}
 	for _, s := range info.SCPs {
