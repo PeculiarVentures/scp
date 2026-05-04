@@ -240,20 +240,28 @@ func TestMgmtKey_RejectsMalformedTLV(t *testing.T) {
 
 // TestMgmtKey_DefaultKeyMatchesYubicoConstant pins the well-known
 // pre-5.7 default to the documented value. If anyone changes
-// piv.DefaultMgmt3DESKey by accident, this catches it. The value is
-// public — there's nothing sensitive about it.
+// piv.DefaultMgmtKey by accident, this catches it. The value is
+// public; there is nothing sensitive about it.
 func TestMgmtKey_DefaultKeyMatchesYubicoConstant(t *testing.T) {
 	want := []byte{
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 	}
-	if !bytes.Equal(piv.DefaultMgmt3DESKey, want) {
-		t.Errorf("piv.DefaultMgmt3DESKey changed: got %X want %X", piv.DefaultMgmt3DESKey, want)
+	if !bytes.Equal(piv.DefaultMgmtKey, want) {
+		t.Errorf("piv.DefaultMgmtKey changed: got %X want %X", piv.DefaultMgmtKey, want)
 	}
 	// Smoke-check the cipher works with this key length.
-	if _, err := des.NewTripleDESCipher(piv.DefaultMgmt3DESKey); err != nil {
-		t.Errorf("piv.DefaultMgmt3DESKey not a valid 3DES key: %v", err)
+	if _, err := des.NewTripleDESCipher(piv.DefaultMgmtKey); err != nil {
+		t.Errorf("piv.DefaultMgmtKey not a valid 3DES key: %v", err)
+	}
+	// The deprecated DefaultMgmt3DESKey alias must still point at the
+	// same bytes; this is the contract back-compat consumers rely on.
+	// staticcheck flags the use of a deprecated symbol but the whole
+	// purpose of this assertion is to verify the deprecated alias is
+	// not silently broken.
+	if !bytes.Equal(piv.DefaultMgmt3DESKey, piv.DefaultMgmtKey) { //nolint:staticcheck // intentional alias check
+		t.Error("piv.DefaultMgmt3DESKey no longer equals piv.DefaultMgmtKey; the alias contract is broken")
 	}
 }
 
