@@ -1,20 +1,38 @@
-// Package channel implements SCP11 secure messaging: encrypting and
-// MACing command APDUs, and verifying/decrypting response APDUs.
+// Package channel implements GlobalPlatform secure messaging shared
+// by SCP03 and SCP11: encrypting and MACing command APDUs, verifying
+// and decrypting response APDUs, and the CLA-bit and logical-channel
+// helpers both protocols depend on.
 //
-// Once an SCP11 session is established (keys derived), every command
-// sent to the card goes through this layer:
+// Once a session is established (handshake complete, keys derived),
+// every command sent to the card goes through this layer:
 //
 //  1. Pad and encrypt the data field with S-ENC (AES-CBC, IV derived
-//     from an encryption counter).
-//  2. Compute C-MAC over the modified header + encrypted payload,
-//     chaining from the previous MAC.
-//  3. Append the MAC (first 8 bytes) to the command data.
-//  4. Set CLA bit 2 (0x04) to indicate secure messaging.
+//     from an encryption counter) when C-DEC is in the negotiated
+//     security level.
+//  2. Compute C-MAC over the modified header + encoded Lc + encrypted
+//     payload, chaining from the previous MAC. The Lc encoding is
+//     extended-length (0x00 || hi || lo) when the wrapped data
+//     exceeds 255 bytes; this matters for cert installs and other
+//     large STORE DATA / PUT DATA payloads.
+//  3. Append the MAC (8 or 16 bytes depending on MAC mode) to the
+//     command data.
+//  4. Set the secure-messaging CLA bit. The bit position varies by
+//     CLA class — 0x04 for first-interindustry and proprietary,
+//     0x20 for further-interindustry — so SecureMessagingCLA is the
+//     spec-correct way to set it rather than hardcoding either bit.
 //
 // Responses are unwrapped in reverse: verify R-MAC, then decrypt.
 //
-// This implementation follows GP Card Spec v2.3 §10.8 and matches
-// the SCP11 state machine defined in GP Card Spec v2.3 Amendment D §10.8.
+// The same SecureChannel type drives both protocols; they differ in
+// how the keys arrive (symmetric for SCP03 via INITIALIZE UPDATE +
+// EXTERNAL AUTHENTICATE, asymmetric for SCP11 via ECDH and the
+// receipt mechanism), not in how the wrapped APDUs look on the wire
+// once keys are in place.
+//
+// References:
+//   - GP Card Spec v2.3.1 §10.8 (secure messaging encoding)
+//   - GP Card Spec v2.3.1 Amendment D (SCP03)
+//   - GP Card Spec v2.3.1 Amendment F (SCP11)
 package channel
 
 import (
