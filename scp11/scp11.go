@@ -385,7 +385,7 @@ type Session struct {
 // and session key derivation.
 func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, error) {
 	if cfg == nil {
-		cfg = YubiKeyDefaultSCP11bConfig()
+		return nil, errors.New("scp11: Config is required (use YubiKeyDefaultSCP11bConfig() or StrictGPSCP11bConfig() as a starting point)")
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull

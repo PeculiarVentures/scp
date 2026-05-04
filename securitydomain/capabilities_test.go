@@ -83,3 +83,13 @@ func (f *fakePlainSession) Transmit(ctx context.Context, cmd *apdu.Command) (*ap
 }
 func (f *fakePlainSession) Close()           {}
 func (f *fakePlainSession) Protocol() string { return f.proto }
+
+// TestOpenSCP11_NilConfig_RejectsExplicitly confirms OpenSCP11 returns
+// an error on nil cfg rather than silently substituting YubiKey
+// defaults. Matches OpenSCP03's contract.
+func TestOpenSCP11_NilConfig_RejectsExplicitly(t *testing.T) {
+	_, err := OpenSCP11(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("OpenSCP11(nil cfg) should return an error")
+	}
+}
