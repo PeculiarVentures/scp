@@ -90,6 +90,7 @@ var smokeCommands = map[string]func(ctx context.Context, env *runEnv, args []str
 	"scp11b-piv-verify": cmdSCP11bPIVVerify,
 	"bootstrap-oce":         cmdBootstrapOCE,
 	"bootstrap-scp11a-sd":   cmdBootstrapSCP11aSD,
+	"bootstrap-scp11a":      cmdBootstrapSCP11a,
 	"piv-provision":         cmdPIVProvision,
 	"piv-reset":         cmdPIVReset,
 	"test":              cmdTest,
@@ -286,6 +287,15 @@ Subcommands:
                        never leaves the SE; 'import' uses GP PUT KEY
                        to install a host-generated or supplied
                        keypair. Destructive; gated by --confirm-write.
+  bootstrap-scp11a     Combined SCP11a-on-fresh-card flow. Opens ONE
+                       SCP03 factory session and does both the OCE
+                       public key install and the SCP11a SD key
+                       install. Required on cards (e.g. retail
+                       YubiKey 5.7.4) where the first PUT KEY under
+                       factory SCP03 invalidates the factory keys —
+                       running bootstrap-oce and bootstrap-scp11a-sd
+                       as separate commands fails the second one.
+                       Destructive; gated by --confirm-write.
   piv-provision        Generate a PIV slot keypair and optionally install
                        a certificate / fetch attestation, all over an
                        SCP11b session targeting the PIV applet.
@@ -446,6 +456,7 @@ Forthcoming subcommands (still reachable under 'scpctl smoke' for now):
   scp11a-read          SCP11a (mutual auth) SD session read.
   bootstrap-oce        Install OCE public key onto a card via SCP03.
   bootstrap-scp11a-sd  Install card-side SCP11a SD ECDH key via SCP03.
+  bootstrap-scp11a     Combined SCP11a-on-fresh-card bootstrap.
 
 Use "scpctl sd <subcommand> -h" for per-command flags.
 `)

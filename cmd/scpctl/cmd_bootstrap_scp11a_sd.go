@@ -23,9 +23,23 @@ type bootstrapSCP11aSDData struct {
 
 // cmdBootstrapSCP11aSD installs a card-side SCP11a Security Domain
 // ECDH key (SK.SD.ECKA). This is the SD half of the SCP11a
-// provisioning flow whose OCE half is already covered by
-// bootstrap-oce. Together the two commands enable a fresh card to
-// complete an SCP11a mutual-auth handshake.
+// provisioning flow whose OCE half is covered by bootstrap-oce.
+// Together the two commands enable a fresh card to complete an
+// SCP11a mutual-auth handshake.
+//
+// IMPORTANT — fresh-card sequencing: on YubiKey 5.7.4 (and per
+// Yubico's documented behavior more broadly), the first PUT KEY
+// against the SD over factory SCP03 keys (KVN=0xFF) causes the
+// card to delete those factory keys. If you've already run
+// bootstrap-oce on a fresh card, the factory SCP03 keys are gone
+// and this command's INITIALIZE UPDATE will fail with SW=6A88. To
+// install BOTH the OCE public key and the SCP11a SD key on a fresh
+// card, use the combined `bootstrap-scp11a` command (one session,
+// both writes). Use bootstrap-scp11a-sd alone when:
+//   - you only need to install/rotate the SCP11a SD key, or
+//   - you have a custom SCP03 key set installed and pass
+//     --scp03-* flags so this command authenticates with the new
+//     keys rather than the consumed factory ones.
 //
 // Two modes:
 //
