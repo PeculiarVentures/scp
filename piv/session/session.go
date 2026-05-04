@@ -79,6 +79,16 @@ type Options struct {
 	// nil. Used by tests that supply a transmitter without a working
 	// SELECT response.
 	SkipProbe bool
+
+	// SkipSelect disables the unconditional SELECT AID PIV that New
+	// runs before returning. Set this when the underlying transmitter
+	// has already SELECTed the PIV applet (for example, an SCP11
+	// session opened with cfg.SelectAID = scp11.AIDPIV; SCP11.Open
+	// does the SELECT plaintext before the secure-channel handshake).
+	// A second SELECT through an established secure channel is read
+	// by some cards as a fresh-handshake signal and tears the session
+	// down. OpenSCP11bPIV sets this for that reason.
+	SkipSelect bool
 }
 
 // Session is a stateful PIV API over a transmitter. Instances are not
@@ -110,15 +120,18 @@ type Session struct {
 // New constructs a Session over an arbitrary transmitter.
 //
 // New always issues SELECT AID PIV against the transmitter before
-// returning. The PIV applet must be selected on the card before any
-// PIV instruction is accepted; doing it inside New means callers
-// never have to remember and tests cannot get into a "send VERIFY
-// before SELECT" state.
+// returning, unless opts.SkipSelect is set. The PIV applet must be
+// selected on the card before any PIV instruction is accepted; doing
+// it inside New means callers never have to remember and tests cannot
+// get into a "send VERIFY before SELECT" state. The skip exists for
+// callers that have already SELECTed through a different path,
+// notably OpenSCP11bPIV where scp11.Open issues SELECT plaintext
+// before the secure-channel handshake.
 //
 // If opts.Profile is nil and opts.SkipProbe is false, New also runs
 // GET VERSION to detect a YubiKey firmware version and selects the
 // resulting profile. If opts.Profile is set, New uses it without
-// running GET VERSION; the SELECT still happens.
+// running GET VERSION; the SELECT still happens unless suppressed.
 //
 // If SELECT fails, New returns the underlying error. The session is
 // not usable in that state.
@@ -127,23 +140,29 @@ func New(ctx context.Context, tx Transmitter, opts Options) (*Session, error) {
 		return nil, errors.New("piv/session: nil transmitter")
 	}
 
-	// SELECT AID PIV unconditionally. Without it the card refuses
-	// every PIV INS with 6985.
-	selectCmd := &apdu.Command{
-		CLA:  0x00,
-		INS:  0xA4,
-		P1:   0x04,
-		P2:   0x00,
-		Data: profile.AIDPIV,
-		Le:   0,
-	}
-	selectResp, err := tx.Transmit(ctx, selectCmd)
-	if err != nil {
-		return nil, fmt.Errorf("piv/session: SELECT AID PIV transport: %w", err)
-	}
-	if !selectResp.IsSuccess() {
-		return nil, fmt.Errorf("piv/session: SELECT AID PIV failed (SW=%04X)",
-			selectResp.StatusWord())
+	// SELECT AID PIV unless suppressed. Without it the card refuses
+	// every PIV INS with 6985. Suppression is used when the underlying
+	// transmitter (typically an established SCP11 session) has already
+	// SELECTed the applet; sending a second SELECT through a secure
+	// channel is read as a fresh-handshake signal by some cards and
+	// tears the session down.
+	if !opts.SkipSelect {
+		selectCmd := &apdu.Command{
+			CLA:  0x00,
+			INS:  0xA4,
+			P1:   0x04,
+			P2:   0x00,
+			Data: profile.AIDPIV,
+			Le:   0,
+		}
+		selectResp, err := tx.Transmit(ctx, selectCmd)
+		if err != nil {
+			return nil, fmt.Errorf("piv/session: SELECT AID PIV transport: %w", err)
+		}
+		if !selectResp.IsSuccess() {
+			return nil, fmt.Errorf("piv/session: SELECT AID PIV failed (SW=%04X)",
+				selectResp.StatusWord())
+		}
 	}
 
 	prof := opts.Profile
@@ -151,7 +170,14 @@ func New(ctx context.Context, tx Transmitter, opts Options) (*Session, error) {
 		// Probe re-runs SELECT and adds GET VERSION. The extra SELECT
 		// is harmless on a card that just accepted one. Trade-off:
 		// one wasted APDU on the probe path, one fewer code path to
-		// reason about.
+		// reason about. Skipped entirely when SkipSelect is set
+		// because re-SELECTing through an SCP channel is unsafe; in
+		// that case callers must supply Profile explicitly.
+		if opts.SkipSelect {
+			return nil, errors.New(
+				"piv/session: SkipSelect requires an explicit Profile " +
+					"because the auto-probe path issues SELECT")
+		}
 		res, err := profile.Probe(ctx, transmitterAdapter{tx})
 		if err != nil {
 			return nil, fmt.Errorf("piv/session: probe: %w", err)
