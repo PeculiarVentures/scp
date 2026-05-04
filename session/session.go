@@ -37,6 +37,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/channel"
+	"github.com/PeculiarVentures/scp/internal/secmem"
 	"github.com/PeculiarVentures/scp/kdf"
 	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
@@ -516,22 +517,15 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 func (s *Session) Close() {
 	s.state = StateFailed
 	if s.sessionKeys != nil {
-		zeroBytes(s.sessionKeys.SENC)
-		zeroBytes(s.sessionKeys.SMAC)
-		zeroBytes(s.sessionKeys.SRMAC)
-		zeroBytes(s.sessionKeys.DEK)
-		zeroBytes(s.sessionKeys.Receipt)
-		zeroBytes(s.sessionKeys.MACChain)
+		secmem.Zero(s.sessionKeys.SENC)
+		secmem.Zero(s.sessionKeys.SMAC)
+		secmem.Zero(s.sessionKeys.SRMAC)
+		secmem.Zero(s.sessionKeys.DEK)
+		secmem.Zero(s.sessionKeys.Receipt)
+		secmem.Zero(s.sessionKeys.MACChain)
 		s.sessionKeys = nil
 	}
 	s.channel = nil
-}
-
-//go:noinline
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
 }
 
 // InsecureExportSessionKeysForTestOnly returns a defensive copy of

@@ -31,9 +31,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"runtime"
 
 	"github.com/PeculiarVentures/scp/cmac"
+	"github.com/PeculiarVentures/scp/internal/secmem"
 )
 
 // SCP11 constants per GP Amendment F §7.6-7.7 and Amendment D §6.2.
@@ -182,7 +182,7 @@ func DeriveSessionKeysFromSharedSecrets(shSee, shSes []byte, hostID, cardGroupID
 
 	keyMaterial, err := X963KDF(z, sharedInfo, totalKeyMaterial)
 
-	zeroBytes(z)
+	secmem.Zero(z)
 
 	if err != nil {
 		return nil, fmt.Errorf("X9.63 KDF failed: %w", err)
@@ -203,19 +203,9 @@ func DeriveSessionKeysFromSharedSecrets(shSee, shSes []byte, hostID, cardGroupID
 	copy(keys.SMAC, keyMaterial[32:48])
 	copy(keys.SRMAC, keyMaterial[48:64])
 	copy(keys.DEK, keyMaterial[64:80])
-	zeroBytes(keyMaterial)
+	secmem.Zero(keyMaterial)
 
 	return keys, nil
-}
-
-// zeroBytes overwrites a byte slice with zeros.
-//
-//go:noinline
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-	runtime.KeepAlive(b)
 }
 
 // DeriveSCP03SessionKey derives a single session key using the NIST SP
