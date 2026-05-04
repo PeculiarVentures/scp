@@ -4,6 +4,18 @@ The `piv` package and its subpackages provide a Go vocabulary for PIV (NIST SP 8
 
 For the CLI built on top of this library, see [`scpctl.md`](./scpctl.md). For hardware compatibility status, see [`piv-compatibility.md`](./piv-compatibility.md).
 
+## Public API at a glance
+
+There are three entry points and the right one for a given caller is usually obvious.
+
+`piv/session` is what almost everyone wants. It is the stateful PIV API: open a session over any APDU transmitter (raw PC/SC, an established SCP channel, a mock), and the session methods orchestrate authentication state, host-side capability gating, and the multi-APDU sequences that PIV operations actually require. Cert-to-public-key binding, retry-counter parsing, and profile refusal all live here. New code targeting PIV provisioning, enrollment, or admin should use `piv/session` exclusively unless it needs something the session does not expose.
+
+`piv` (the parent package) is the shared vocabulary: typed slot constants, algorithm enums, PIN/touch policy enums, management-key types, object IDs, and the `CardError` plus its status-word predicates. It has no APDU surface of its own. Library callers consume these types; `piv/session` and `piv/apdu` produce and accept them.
+
+`piv/apdu` (Go package name `pivapdu` to avoid colliding with the unrelated GlobalPlatform `apdu` package) is the low-level builder layer. It is sharp-edged on purpose: callers are responsible for sequencing, authentication state, and capability gating, none of which the builders enforce. Use this package when you need to send a hand-rolled APDU sequence through an unusual transport, when implementing a custom session that the canonical `piv/session` does not cover, or when writing tests against APDU bytes. Most code should not need it.
+
+The package split is deliberate. Callers reaching into `piv/apdu` for routine flows are usually working around something `piv/session` should grow to handle; please file an issue rather than ship a downstream session reimplementation.
+
 ## Package layout
 
 ```

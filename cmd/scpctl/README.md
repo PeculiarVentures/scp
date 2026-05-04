@@ -253,6 +253,21 @@ scpctl smoke test \
 
 Process exit code is 1 if any check failed; 0 otherwise (including SKIP results). The SCP11a check is skipped automatically if `--oce-key`/`--oce-cert` are not supplied.
 
+## Which group is canonical?
+
+Three command groups exist and they have non-overlapping purposes:
+
+`scpctl piv` is the **canonical operator surface for PIV operations going forward**. PIN/PUK management, key generation, certificate install/read/delete, attestation, object I/O, and reset all live here, wired through `piv/session`. Profile gating is host-side: operations the active profile does not claim are refused before any APDU goes on the wire. Destructive and credential-bearing commands accept `--scp11b` for an authenticated channel; default is raw, which is the right choice for local USB administration. Standard PIV is spec-implemented but not yet hardware-verified; see `docs/piv-compatibility.md`.
+
+`scpctl sd` is the canonical operator surface for **Security Domain operations**. Today only `sd info` is wired (an unauthenticated SD session reporting CRD and key-info template). The remaining flows (SCP03, SCP11a, SCP11b reads; OCE bootstrap) still live under `smoke` until they migrate.
+
+`scpctl smoke` is the **hardware regression and validation harness**. Every original `scp-smoke` subcommand is preserved verbatim under `scpctl smoke <name>` so existing CI scripts translate by changing the binary name. New code should not target `smoke` for routine provisioning; new code should use `scpctl piv` (and `scpctl sd` once it grows). The smoke commands stay because they exercise hardware paths the new surface does not yet cover end to end:
+
+- `scpctl smoke piv-provision` runs the SCP11b-secured provisioning flow against real YubiKey hardware. The new `scpctl piv key generate` + `scpctl piv cert put` two-step flow can do the same operations but has not been hardware-validated as a complete provisioning path. Until that validation lands, `smoke piv-provision` is the path to use for production provisioning.
+- `scpctl smoke piv-reset` runs the block-PIN-and-PUK-then-reset sequence required to reset a YubiKey. The new `scpctl piv reset` issues the bare RESET APDU; the operator is responsible for the card-side preconditions. Both forms work; the smoke variant has the harness wrapping that the bare variant deliberately does not.
+
+When the new `scpctl piv` flows have been driven through real hardware end to end, the smoke duplicates will be deprecated and eventually removed. Until then both exist and both are supported. New downstream automation should target `scpctl piv` so the deprecation has a clean cutover.
+
 ## `piv info` and `sd info`
 
 The `piv` and `sd` groups expose read-only `info` commands that probe a card without authentication or state change.
@@ -270,7 +285,7 @@ Output names the active profile (`yubikey-5.7.2`, `standard-piv`, or `probed:<in
 
 ### `scpctl sd info`
 
-Opens an unauthenticated SD session and prints Card Recognition Data. Equivalent to `scpctl probe`; shipped under `sd` so the group dispatch is exercised end to end.
+Opens an unauthenticated Security Domain session and reports the card's identity: parsed Card Recognition Data (issuer identification number, card image number, application provider, application version) plus the Key Information Template if available. No authentication, no state change.
 
 ## Design notes worth knowing
 
