@@ -225,9 +225,17 @@ type transportLike = transport.Transport
 
 // cmdPIVKeyGenerate runs GENERATE KEY against a slot. Requires
 // --confirm-write because generating a key destroys whatever was in
-// the slot. The session caches the public key so a subsequent
-// 'cert put' on the same session can use it for binding; this CLI
-// flow is one-shot, so the key is also written to the path in --out.
+// the slot.
+//
+// CLI binding note: the session-level helper caches the most-recent
+// generated public key for an in-process cert-put binding check,
+// but scpctl's key generate and cert put are separate process
+// invocations and therefore separate sessions, so the cache is not
+// reachable across them. Pass --out to capture the public key, then
+// pass --expected-pubkey to 'scpctl piv cert put' for the same slot
+// to enforce binding when installing the matching certificate. The
+// in-session cache exists for downstream library callers (a single
+// process driving both steps) and does not affect this CLI.
 func cmdPIVKeyGenerate(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv key generate", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
@@ -432,13 +440,24 @@ func cmdPIVCertGet(ctx context.Context, env *runEnv, args []string) error {
 			return err
 		}
 		report.Pass("write cert", *out)
-	} else if !*jsonMode {
-		// Dump to stdout after the report so a piped consumer sees
-		// the report on stderr and the PEM on stdout. Report is going
-		// to env.out today; stash the PEM in the report data instead.
-		_, _ = env.out.Write(pemBytes)
+		return report.Emit(env.out, *jsonMode)
 	}
-	return report.Emit(env.out, *jsonMode)
+	if *jsonMode {
+		// JSON mode: report carries the cert subject and other
+		// metadata; stdout stays JSON-clean. The PEM is not in the
+		// JSON payload because callers asking for JSON typically want
+		// machine-parseable structure, not bytes-as-text. Use --out
+		// to capture the PEM in any mode.
+		return report.Emit(env.out, *jsonMode)
+	}
+	// Default text mode with no --out: PEM goes to stdout, report
+	// goes to stderr. This makes 'scpctl piv cert get > cert.pem'
+	// produce a clean PEM file rather than mixing report text into
+	// the certificate output.
+	if _, err := env.out.Write(pemBytes); err != nil {
+		return fmt.Errorf("write PEM to stdout: %w", err)
+	}
+	return report.Emit(env.errOut, false)
 }
 
 func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
@@ -648,10 +667,17 @@ func cmdPIVObjectGet(ctx context.Context, env *runEnv, args []string) error {
 			return err
 		}
 		report.Pass("write object", *out)
-	} else if !*jsonMode {
-		fmt.Fprintln(env.out, hex.EncodeToString(data))
+		return report.Emit(env.out, *jsonMode)
 	}
-	return report.Emit(env.out, *jsonMode)
+	if *jsonMode {
+		return report.Emit(env.out, *jsonMode)
+	}
+	// Default text mode with no --out: hex goes to stdout, report
+	// goes to stderr. This makes 'scpctl piv object get > obj.hex'
+	// produce a clean hex line rather than mixing report text into
+	// the data output.
+	fmt.Fprintln(env.out, hex.EncodeToString(data))
+	return report.Emit(env.errOut, false)
 }
 
 // cmdPIVObjectPut writes a raw PIV data object by ID. This is the

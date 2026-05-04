@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -63,6 +64,22 @@ func (r *Report) HasFailure() bool {
 
 // Emit writes the report to w. When jsonMode is true, output is a
 // single indented JSON object; otherwise it's human-readable text.
+//
+// Text-mode rendering shape:
+//
+//	scpctl <group> <subcommand>
+//	  reader: <name>
+//	  data:
+//	    <key>: <value>
+//	    ...
+//	  <check name>                  <PASS|FAIL|SKIP> — <detail>
+//	  ...
+//
+// The data block is rendered when Report.Data is non-nil; rendering
+// goes through encoding/json so any Data type that round-trips via
+// json.Marshal also pretty-prints, with no per-subcommand wiring.
+// Only top-level fields of object-shaped Data are listed; nested
+// objects and arrays render as compact JSON on the same line.
 func (r *Report) Emit(w io.Writer, jsonMode bool) error {
 	if jsonMode {
 		enc := json.NewEncoder(w)
@@ -86,12 +103,73 @@ func (r *Report) Emit(w io.Writer, jsonMode bool) error {
 	if r.Reader != "" {
 		fmt.Fprintln(w, "  reader:", r.Reader)
 	}
+	if r.Data != nil {
+		if err := emitDataText(w, r.Data); err != nil {
+			return err
+		}
+	}
 	for _, c := range r.Checks {
 		if c.Detail == "" {
 			fmt.Fprintf(w, "  %-32s %s\n", c.Name, c.Result)
 		} else {
 			fmt.Fprintf(w, "  %-32s %s — %s\n", c.Name, c.Result, c.Detail)
 		}
+	}
+	return nil
+}
+
+// emitDataText pretty-prints Report.Data for human-readable output.
+// Top-level fields of an object (struct or map) become 'key: value'
+// lines under a 'data:' header; scalars are rendered as Go fmt %v
+// would, slices and nested objects are rendered as compact JSON.
+//
+// The intermediate JSON round-trip is deliberate: every existing
+// Data shape in this CLI already declares JSON tags (because that's
+// how the JSON output mode works), so the JSON tag names are also
+// what humans should see in text mode. No second tag system, no
+// reflect-walk over Go field names.
+func emitDataText(w io.Writer, data any) error {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		// If the Data value is not JSON-marshalable, fall back to
+		// the Go default %v rendering rather than failing the whole
+		// report emit. This should not happen for types the CLI
+		// uses today (all of which are tagged structs) but the
+		// fallback keeps Emit total.
+		fmt.Fprintf(w, "  data: %v\n", data)
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		// Non-object Data (a bare string, number, or array). Render
+		// as compact JSON so the human still sees the value.
+		fmt.Fprintf(w, "  data: %s\n", raw)
+		return nil
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	// Sort keys for deterministic output. Test goldens and human
+	// diffs both benefit from a stable order.
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Fprintln(w, "  data:")
+	for _, k := range keys {
+		v := fields[k]
+		// String values: drop the surrounding quotes for readability.
+		if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+			var s string
+			if err := json.Unmarshal(v, &s); err == nil {
+				fmt.Fprintf(w, "    %s: %s\n", k, s)
+				continue
+			}
+		}
+		// Everything else (numbers, bools, nested objects, arrays)
+		// renders as compact JSON.
+		fmt.Fprintf(w, "    %s: %s\n", k, v)
 	}
 	return nil
 }

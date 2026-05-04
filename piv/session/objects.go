@@ -342,15 +342,19 @@ func (s *Session) ChangeManagementKey(
 	if err != nil {
 		return fmt.Errorf("CHANGE MGMT KEY: build: %w", err)
 	}
-	// Touch policy on the YubiKey 5.7+ extended SET MANAGEMENT KEY
-	// is set by P1; the existing builder hardcodes 0xFF. If
-	// opts.RequireTouch is true and the profile claims touch
-	// policy, we expose this via a future builder change; for now
-	// the call refuses RequireTouch on profiles that don't claim
-	// TouchPolicy so behavior matches the documented contract.
-	if opts.RequireTouch && !caps.TouchPolicy {
-		return fmt.Errorf("%w: touch policy not supported by profile %s",
-			piv.ErrUnsupportedByProfile, s.profile.Name())
+	// Touch-required management keys (YubiKey 5.7+ extended SET
+	// MANAGEMENT KEY, encoded via P1) are not yet implemented in
+	// the underlying APDU builder, which hardcodes the no-touch
+	// byte. RequireTouch is rejected unconditionally rather than
+	// silently dropped: a caller asking for touch enforcement must
+	// not get success without it. This is intentionally stricter
+	// than the prior behavior, which only rejected on profiles
+	// that lacked TouchPolicy capability and silently accepted
+	// otherwise. Lift this when pivapdu.SetManagementKeyWithPolicy
+	// is added.
+	if opts.RequireTouch {
+		return fmt.Errorf("%w: RequireTouch on management key is not yet implemented (pivapdu.SetManagementKey hardcodes the no-touch byte)",
+			piv.ErrUnsupportedByProfile)
 	}
 
 	if _, err := s.transmit(ctx, "CHANGE MGMT KEY", cmd); err != nil {

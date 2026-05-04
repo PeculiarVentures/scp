@@ -16,10 +16,22 @@ import (
 // are baked in; the trust posture must be supplied explicitly because
 // "skip trust" is a deliberate decision that should never default.
 type SCP11bPIVOptions struct {
-	// Profile is the active capability profile. nil triggers a probe
-	// over the established secure channel; that is the recommended
-	// path because the channel is one round trip cheaper than opening
-	// raw and re-establishing.
+	// Profile is the active capability profile. nil defaults to
+	// profile.NewYubiKeyProfile() (YubiKey 5.7+).
+	//
+	// The default is YubiKey-only because SCP11b-on-PIV is itself a
+	// YubiKey-only feature today: cards that lack SCP11b cannot reach
+	// this code path, so a successful Open implies a 5.7+ YubiKey at
+	// the other end. Probing over the secure channel after Open is a
+	// future helper; today's Open is followed directly by session.New
+	// with SkipSelect=true, which suppresses the probe path because
+	// probing requires its own SELECT and a second SELECT through
+	// the established secure channel is read as a fresh-handshake
+	// signal by some cards.
+	//
+	// Set this field explicitly when targeting older firmware
+	// (use NewYubiKeyProfileVersion) or when a non-YubiKey card with
+	// SCP11b-on-PIV becomes a thing in the future.
 	Profile profile.Profile
 
 	// CardTrustPolicy is the SCP11 card-authentication trust policy.
