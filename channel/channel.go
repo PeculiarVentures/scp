@@ -194,7 +194,12 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 	// CMAC handles its own internal padding per NIST 800-38B — we must NOT
 	// add ISO 9797-1 padding externally.
 	if sc.SecurityLevel&LevelCMAC != 0 {
-		newCLA := cmd.CLA | 0x04 // Set secure messaging bit
+		// SecureMessagingCLA picks the right bit (0x04 for first-
+		// interindustry / proprietary, 0x20 for further-
+		// interindustry) so the same Wrap call works on any logical
+		// channel a card supports, not just basic-channel CLAs like
+		// 0x00 / 0x80.
+		newCLA := SecureMessagingCLA(cmd.CLA)
 
 		// Lc will be: len(payload) + sc.macSize (for the MAC that will be appended)
 		lc := len(payload) + sc.macSize
@@ -246,7 +251,7 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 	// (or misroutes) the command.
 	outCLA := cmd.CLA
 	if sc.SecurityLevel&LevelCDEC != 0 {
-		outCLA |= 0x04
+		outCLA = SecureMessagingCLA(cmd.CLA)
 	}
 	return &apdu.Command{
 		CLA:            outCLA,

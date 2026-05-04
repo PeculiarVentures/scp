@@ -121,13 +121,15 @@ func (c *Card) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.session != nil && cmd.CLA&0x04 != 0 {
+	if c.session != nil && channel.IsSecureMessaging(cmd.CLA) {
 		return c.processSecure(cmd)
 	}
 
 	// GP §4.8: After secure channel establishment, only SELECT, GET DATA,
 	// and channel initiation commands are allowed in plaintext.
-	// All other commands must use secure messaging (CLA bit 2 set).
+	// All other commands must use secure messaging (the SM bit set per
+	// the CLA's class encoding — bit 0x04 for first-interindustry and
+	// proprietary, bit 0x20 for further-interindustry).
 	if c.session != nil {
 		// Allow SELECT (0xA4) — needed to switch applets.
 		// Reject everything else without the secure messaging bit.
@@ -331,7 +333,7 @@ func (c *Card) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	}
 
 	plainCmd := &apdu.Command{
-		CLA: cmd.CLA &^ 0x04, INS: cmd.INS, P1: cmd.P1, P2: cmd.P2,
+		CLA: channel.ClearSecureMessagingCLA(cmd.CLA), INS: cmd.INS, P1: cmd.P1, P2: cmd.P2,
 		Data: plainData, Le: -1,
 	}
 	plainResp, err := c.processPlain(plainCmd)
