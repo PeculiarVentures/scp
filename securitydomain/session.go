@@ -37,6 +37,14 @@ const (
 //
 //   - Unauthenticated: via OpenUnauthenticated.
 //     Only read-only introspection operations are available.
+//
+// A Session is NOT safe for concurrent use. Like the underlying
+// *scp03.Session and *session.Session it wraps, the secure-channel
+// state is single-threaded: the encryption counter, MAC chain, and
+// per-command APDU framing all assume one in-flight Transmit at a
+// time. Callers driving the Security Domain from multiple goroutines
+// must serialize externally (e.g. with a sync.Mutex around the
+// Session, or by funneling all calls through one goroutine).
 type Session struct {
 	scpSession    scp.Session
 	transport     transport.Transport

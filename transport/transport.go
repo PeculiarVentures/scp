@@ -15,6 +15,18 @@ import (
 	"github.com/PeculiarVentures/scp/apdu"
 )
 
+// Caps applied to GET RESPONSE chaining and collected-response sizes
+// in TransmitWithChaining and TransmitCollectAll. They exist to keep
+// a misbehaving or hostile card from looping the host indefinitely
+// or returning unbounded data.
+//
+// MaxGetResponseIterations is the maximum number of GET RESPONSE
+// APDUs the host will issue for a single command, regardless of
+// how many SW=61xx continuations the card requests.
+//
+// MaxCollectedResponseBytes is the maximum number of response
+// data bytes accumulated across chained iterations. Reached either
+// limit returns an error from the chaining helper.
 const (
 	MaxGetResponseIterations  = 256
 	MaxCollectedResponseBytes = 1 << 20

@@ -46,6 +46,10 @@ import (
 // Variant selects the SCP11 protocol variant.
 type Variant int
 
+// SCP11 protocol variants per GP Amendment F. SCP11a and SCP11c are
+// mutual-auth (the off-card entity authenticates to the card with a
+// certificate chain); SCP11b is one-way (the card authenticates to
+// the off-card entity but the OCE is unauthenticated).
 const (
 	SCP11a Variant = iota // Mutual auth, OCE provides cert first
 	SCP11b                // One-way auth, no OCE cert validation by card
@@ -55,12 +59,17 @@ const (
 // State tracks the session lifecycle.
 type State int
 
+// Session lifecycle states. The transitions are linear except for
+// StateFailed, which can be entered from any other state on a
+// terminal error (handshake failure, MAC verification failure,
+// counter exhaustion). A failed session cannot be reused; the
+// caller must call Open again to establish a fresh channel.
 const (
-	StateNew State = iota
-	StateSelected
-	StateCertRetrieved
-	StateAuthenticated
-	StateFailed
+	StateNew           State = iota // Pre-Open: no APDUs sent yet
+	StateSelected                   // Applet selected, handshake not started
+	StateCertRetrieved              // Card cert chain retrieved and validated
+	StateAuthenticated              // Secure channel established, ready for Transmit
+	StateFailed                     // Terminal: keys zeroed, channel unusable
 )
 
 // KeyRef identifies a key set on the card by its Key Identifier

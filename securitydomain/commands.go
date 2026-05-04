@@ -712,10 +712,30 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 
 // --- Serial number conversion ---
 
+// SerialToHex converts an x509 certificate serial (*big.Int) into the
+// lowercase hex string format that StoreAllowlist expects. The
+// encoding is the big-endian byte representation of the serial,
+// hex-encoded with no leading "0x", no separators, and no padding
+// to a fixed width. An odd-length result is preserved as-is when
+// the high byte happens to be 0x0X — the corresponding decoder
+// (SerialFromHex / hex.DecodeString) tolerates that, and StoreAllowlist
+// preserves the byte length the certificate originally used.
+//
+// Round-trips with SerialFromHex and matches the format consumed by
+// StoreAllowlist(ctx, ref, []string{...}).
 func SerialToHex(serial *big.Int) string {
 	return hex.EncodeToString(serial.Bytes())
 }
 
+// SerialFromHex parses a hex-encoded certificate serial back into a
+// *big.Int. The input format matches SerialToHex's output: lowercase
+// or uppercase hex, no "0x" prefix, no separators. Returns
+// ErrInvalidSerial wrapped with the offending input on a parse
+// failure.
+//
+// Provided so callers building allowlists can normalize serials they
+// pulled from x509.Certificate.SerialNumber and feed back through
+// the StoreAllowlist API.
 func SerialFromHex(s string) (*big.Int, error) {
 	b, err := hex.DecodeString(s)
 	if err != nil {
