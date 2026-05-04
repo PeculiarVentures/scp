@@ -271,7 +271,7 @@ func TestOpen_ExplicitDefaultKeys_StillWorks(t *testing.T) {
 // itself — DEK is not used by Wrap/Unwrap. But operations layered on
 // top, like PUT KEY, need the static DEK to wrap fresh key material
 // before import. Returning nil from SessionKeys() forced callers to
-// either keep their own copy or go through securitydomain.Open just
+// either keep their own copy or go through securitydomain.OpenSCP03 just
 // to access the DEK. Yubico's yubikit preserves it through derive()
 // for the same reason.
 func TestSessionKeys_PreservesStaticDEK(t *testing.T) {

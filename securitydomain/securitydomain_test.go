@@ -385,7 +385,10 @@ func TestStoreCaIssuerData_KLOC(t *testing.T) {
 
 func TestStoreAllowlistData(t *testing.T) {
 	ref := NewKeyReference(KeyIDOCE, 0x03)
-	data, err := storeAllowlistData(ref, []string{"aabb", "ccdd"})
+	data, err := storeAllowlistData(ref, []*big.Int{
+		big.NewInt(0xAABB),
+		big.NewInt(0xCCDD),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,10 +397,17 @@ func TestStoreAllowlistData(t *testing.T) {
 	}
 }
 
-func TestStoreAllowlistData_InvalidHex(t *testing.T) {
+func TestStoreAllowlistData_RejectsNilSerial(t *testing.T) {
 	ref := NewKeyReference(KeyIDOCE, 0x03)
-	if _, err := storeAllowlistData(ref, []string{"not-hex"}); err == nil {
-		t.Error("expected error")
+	if _, err := storeAllowlistData(ref, []*big.Int{nil}); err == nil {
+		t.Error("expected error for nil serial")
+	}
+}
+
+func TestStoreAllowlistData_RejectsNegativeSerial(t *testing.T) {
+	ref := NewKeyReference(KeyIDOCE, 0x03)
+	if _, err := storeAllowlistData(ref, []*big.Int{big.NewInt(-1)}); err == nil {
+		t.Error("expected error for negative serial")
 	}
 }
 
@@ -485,7 +495,9 @@ func TestParseAllowlist(t *testing.T) {
 	if len(serials) != 2 {
 		t.Fatalf("expected 2, got %d", len(serials))
 	}
-	if serials[0] != "aabbccdd" || serials[1] != "11223344" {
+	want0, _ := new(big.Int).SetString("aabbccdd", 16)
+	want1, _ := new(big.Int).SetString("11223344", 16)
+	if serials[0].Cmp(want0) != 0 || serials[1].Cmp(want1) != 0 {
 		t.Errorf("unexpected: %v", serials)
 	}
 }
@@ -814,7 +826,7 @@ func TestOpen_RejectsAllZeroStaticDEK(t *testing.T) {
 	// invoked. Pass a nil transport to make that explicit; if the code
 	// reached scp03.Open, the panic from the nil deref would be the
 	// failure mode instead of the validation error we want.
-	_, err := Open(context.Background(), nil, keys, 0x00)
+	_, err := OpenSCP03(context.Background(), nil, &scp03.Config{Keys: keys, KeyVersion: 0x00})
 	if err == nil {
 		t.Fatal("expected error: all-zero static DEK must be rejected at construction")
 	}
@@ -826,7 +838,7 @@ func TestOpen_RejectsBadStaticDEKLength(t *testing.T) {
 		MAC: bytes.Repeat([]byte{0x41}, 16),
 		DEK: []byte{0x01, 0x02, 0x03}, // wrong length
 	}
-	_, err := Open(context.Background(), nil, keys, 0x00)
+	_, err := OpenSCP03(context.Background(), nil, &scp03.Config{Keys: keys, KeyVersion: 0x00})
 	if err == nil {
 		t.Fatal("expected error: 3-byte DEK is not a valid AES key length")
 	}

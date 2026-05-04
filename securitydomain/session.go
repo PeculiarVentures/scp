@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"math/big"
 
 	scp "github.com/PeculiarVentures/scp"
 	"github.com/PeculiarVentures/scp/apdu"
@@ -153,41 +154,63 @@ func sessionDEK(s scp.Session) []byte {
 	return nil
 }
 
-// Open establishes an authenticated Security Domain session using SCP03.
+// OpenSCP03 establishes an authenticated Security Domain session
+// using SCP03 with the supplied configuration. The config is
+// shallow-copied before the SD-required fields are forced
+// (SelectAID = AIDSecurityDomain, SecurityLevel = LevelFull), so a
+// caller reusing a Config across applets/sessions stays intact.
 //
-//	sd, err := securitydomain.Open(ctx, t, scp03.DefaultKeys, 0x00)
+//	sd, err := securitydomain.OpenSCP03(ctx, t, &scp03.Config{
+//	    Keys:       scp03.DefaultKeys,
+//	    KeyVersion: 0xFF,
+//	})
 //	defer sd.Close()
-func Open(ctx context.Context, t transport.Transport, keys scp03.StaticKeys, keyVersion byte) (*Session, error) {
+//
+// The DEK from cfg.Keys is captured and used as the PUT KEY wrapping
+// key for subsequent PutSCP03Key / PutECPrivateKey / PutECPublicKey
+// calls. The DEK is validated at this boundary (length must be
+// 16/24/32 bytes, all-zero rejected) so configuration mistakes
+// surface here rather than at the first PUT KEY.
+//
+// SecurityLevel and SelectAID are always forced to LevelFull and
+// AIDSecurityDomain regardless of the values in cfg — Security Domain
+// management requires a fully-authenticated channel against the ISD,
+// and the wrapper would otherwise silently downgrade.
+func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*Session, error) {
+	if cfg == nil {
+		return nil, errors.New("securitydomain: scp03 Config is required")
+	}
+
 	// Validate the static DEK at the API boundary so configuration
 	// mistakes (all-zero key, wrong length) surface here rather than
 	// at the first PUT KEY call. The same helper backs OpenWithSession
 	// and requireDEK so all three paths agree on what a usable DEK
 	// looks like.
-	if err := validateDEK(keys.DEK); err != nil {
+	if err := validateDEK(cfg.Keys.DEK); err != nil {
 		return nil, fmt.Errorf("securitydomain: %w", err)
 	}
 
-	cfg := &scp03.Config{
-		Keys:              keys,
-		KeyVersion:        keyVersion,
-		SelectAID:         AIDSecurityDomain,
-		SecurityLevel:     channel.LevelFull,
-	}
+	// Shallow copy so we don't mutate the caller's Config. The fields
+	// we override are scalars / nil-able pointers, so a shallow copy
+	// is enough to isolate the side effect.
+	local := *cfg
+	local.SelectAID = AIDSecurityDomain
+	local.SecurityLevel = channel.LevelFull
 
-	scpSess, err := scp03.Open(ctx, t, cfg)
+	scpSess, err := scp03.Open(ctx, t, &local)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: open SCP03 session: %w", err)
 	}
 
 	// Store the DEK for use in PUT KEY operations.
-	dek := make([]byte, len(keys.DEK))
-	copy(dek, keys.DEK)
+	dek := make([]byte, len(cfg.Keys.DEK))
+	copy(dek, cfg.Keys.DEK)
 
 	return &Session{
 		scpSession:       scpSess,
 		transport:        t,
 		authenticated:    true,
-		oceAuthenticated: true, // SCP03 mutual auth
+		oceAuthenticated: sessionOCEAuthenticated(scpSess),
 		dek:              dek,
 	}, nil
 }
@@ -975,9 +998,28 @@ func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byt
 
 // --- Allowlist operations ---
 
-// StoreAllowlist stores a certificate serial number allowlist.
-// Serials are hex-encoded strings. Full replacement semantics.
-func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials []string) error {
+// StoreAllowlist replaces the certificate-serial-number allowlist
+// for the given key reference. Each entry is a *big.Int matching
+// what x509.Certificate.SerialNumber returns; the wire encoding is
+// the unsigned big-endian byte representation. Negative or nil
+// entries are rejected.
+//
+// Semantics are full-replacement: the supplied list becomes the new
+// allowlist, regardless of what was there before. To clear, pass an
+// empty (len 0) slice or nil — see also ClearAllowlist.
+//
+// Typical usage with serials pulled from x509 certificates:
+//
+//	var serials []*big.Int
+//	for _, c := range trusted {
+//	    serials = append(serials, c.SerialNumber)
+//	}
+//	if err := sd.StoreAllowlist(ctx, ref, serials); err != nil { ... }
+//
+// SerialFromHex is provided as a convenience for callers building
+// allowlists from hex-encoded serial strings (e.g. from configuration
+// files).
+func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials []*big.Int) error {
 	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
