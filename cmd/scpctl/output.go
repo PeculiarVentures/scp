@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Result is the outcome of a single check or test.
@@ -68,7 +69,20 @@ func (r *Report) Emit(w io.Writer, jsonMode bool) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(r)
 	}
-	fmt.Fprintln(w, "scpctl smoke", r.Subcommand)
+	// The Subcommand field carries the full label including any
+	// group prefix ('piv info', 'sd info', 'piv-provision', etc.),
+	// so emitting it directly is correct for all groups. Smoke
+	// commands set Subcommand to e.g. 'probe' and rely on the
+	// 'scpctl smoke' prefix being added here for backwards-
+	// compatibility with the original scp-smoke output shape.
+	switch {
+	case strings.Contains(r.Subcommand, " "):
+		// Already group-qualified ('piv info', 'sd info').
+		fmt.Fprintln(w, "scpctl", r.Subcommand)
+	default:
+		// Bare smoke subcommand name.
+		fmt.Fprintln(w, "scpctl smoke", r.Subcommand)
+	}
 	if r.Reader != "" {
 		fmt.Fprintln(w, "  reader:", r.Reader)
 	}
