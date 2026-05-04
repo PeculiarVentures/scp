@@ -64,8 +64,10 @@ func (c *MockCard) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 		return c.doExternalAuthenticate(cmd)
 	}
 
-	// Secure messaging active
-	if c.session != nil && c.session.ch != nil && cmd.CLA&0x04 != 0 {
+	// Secure messaging active. Detection is class-aware (the SM bit
+	// position differs between first-interindustry / proprietary
+	// CLAs and further-interindustry CLAs); see channel.IsSecureMessaging.
+	if c.session != nil && c.session.ch != nil && channel.IsSecureMessaging(cmd.CLA) {
 		return c.processSecure(cmd)
 	}
 

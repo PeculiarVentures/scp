@@ -673,3 +673,208 @@ func TestEmptyData_BothModes_AdvanceCounter(t *testing.T) {
 		})
 	}
 }
+
+// TestWrap_LogicalChannelEncoding confirms Wrap sets the right
+// secure-messaging bit per the CLA's class encoding. The naive
+// "cmd.CLA | 0x04" treatment that the helper replaces would silently
+// re-route logical channel 4 (CLA 0x40) to logical channel 8 (CLA
+// 0x44), turning a "missing channel" failure on the card into a
+// "wrong channel" failure that's far harder to diagnose.
+//
+// This test asserts the wire CLA round-trips through Wrap and
+// re-decoding back to the original logical channel.
+func TestWrap_LogicalChannelEncoding(t *testing.T) {
+	keys := &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{0x11}, 16),
+		SMAC:     bytes.Repeat([]byte{0x22}, 16),
+		SRMAC:    bytes.Repeat([]byte{0x33}, 16),
+		DEK:      bytes.Repeat([]byte{0x44}, 16),
+		MACChain: make([]byte, 16),
+	}
+
+	tests := []struct {
+		name        string
+		cla         byte
+		wantChannel int
+		wantSMSet   bool
+	}{
+		{"basic channel 0 first interindustry", 0x00, 0, true},
+		{"basic channel 0 proprietary", 0x80, 0, true},
+		{"basic channel 1 first interindustry", 0x01, 1, true},
+		{"basic channel 3 proprietary", 0x83, 3, true},
+		{"further channel 4", 0x40, 4, true},
+		{"further channel 8", 0x44, 8, true},
+		{"further channel 19", 0x4F, 19, true},
+		// Chaining preserved
+		{"basic channel 0 chained", 0x10, 0, true},
+		{"further channel 4 chained", 0x50, 4, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := New(keys, LevelFull)
+			cmd := &apdu.Command{
+				CLA: tt.cla, INS: 0xCA, P1: 0x00, P2: 0x00,
+				Data: []byte{0x01, 0x02}, Le: -1,
+			}
+			wrapped, err := sc.Wrap(cmd)
+			if err != nil {
+				t.Fatalf("Wrap: %v", err)
+			}
+			if got := LogicalChannel(wrapped.CLA); got != tt.wantChannel {
+				t.Errorf("wrapped CLA %#02x decoded channel %d, want %d (original CLA %#02x)",
+					wrapped.CLA, got, tt.wantChannel, tt.cla)
+			}
+			if got := IsSecureMessaging(wrapped.CLA); got != tt.wantSMSet {
+				t.Errorf("wrapped CLA %#02x SM flag %v, want %v", wrapped.CLA, got, tt.wantSMSet)
+			}
+			// Chaining bit preserved
+			if IsCommandChaining(tt.cla) != IsCommandChaining(wrapped.CLA) {
+				t.Errorf("chaining bit not preserved: original %#02x -> wrapped %#02x",
+					tt.cla, wrapped.CLA)
+			}
+		})
+	}
+}
+
+// TestResponseIsSecureMessagingProtected covers the GP SCP03 §6.2.4
+// classification of which response status words carry secure-
+// messaging protection. The helper feeds Transmit's gating decision:
+// 9000 and warning 62XX/63XX go through Unwrap (R-MAC verified);
+// error status words (6Axx, 6Bxx, 6Cxx, 6Dxx, 6Exx, 6Fxx) pass
+// through unprotected.
+func TestResponseIsSecureMessagingProtected(t *testing.T) {
+	tests := []struct {
+		sw1, sw2 byte
+		want     bool
+		note     string
+	}{
+		// Success and warnings — protected
+		{0x90, 0x00, true, "SW=9000"},
+		{0x62, 0x00, true, "SW=6200 warning, NV memory unchanged"},
+		{0x62, 0x82, true, "SW=6282 warning, end of file before Le"},
+		{0x62, 0xFF, true, "SW=62FF arbitrary 62xx warning"},
+		{0x63, 0x00, true, "SW=6300 warning, NV memory changed"},
+		{0x63, 0xC0, true, "SW=63C0 warning"},
+		{0x63, 0xCF, true, "SW=63CF warning, last verification"},
+
+		// Errors — unprotected
+		{0x67, 0x00, false, "SW=6700 wrong length"},
+		{0x69, 0x82, false, "SW=6982 security status not satisfied"},
+		{0x69, 0x85, false, "SW=6985 conditions of use not satisfied"},
+		{0x6A, 0x80, false, "SW=6A80 incorrect data"},
+		{0x6A, 0x88, false, "SW=6A88 referenced data not found"},
+		{0x6B, 0x00, false, "SW=6B00 wrong P1/P2"},
+		{0x6C, 0x10, false, "SW=6C10 Le too small"},
+		{0x6D, 0x00, false, "SW=6D00 INS not supported"},
+		{0x6E, 0x00, false, "SW=6E00 CLA not supported"},
+		{0x6F, 0x00, false, "SW=6F00 no precise diagnosis"},
+		// SW1 < 0x62 also unprotected (proprietary procedure bytes)
+		{0x61, 0x00, false, "SW=6100 GET RESPONSE indicator"},
+	}
+	for _, tt := range tests {
+		got := ResponseIsSecureMessagingProtected(tt.sw1, tt.sw2)
+		if got != tt.want {
+			t.Errorf("ResponseIsSecureMessagingProtected(%#02x, %#02x) = %v, want %v (%s)",
+				tt.sw1, tt.sw2, got, tt.want, tt.note)
+		}
+	}
+}
+
+// TestUnwrap_WarningSW_IsRMACVerified composes a card response with
+// SW=6282 (warning, end of file before Le) carrying a correctly-
+// computed R-MAC, and confirms Unwrap accepts it and surfaces the
+// warning to the caller without tearing down the channel.
+//
+// This is the positive companion to the error-status-word test in
+// session/error_status_word_test.go: the R-MAC gate must not be too
+// permissive (errors must pass through) but it also must not be too
+// restrictive (warnings must be MAC-verified per spec). Without
+// this test, a regression that excluded 62XX/63XX from the
+// "protected" set would be invisible — the 9000 path covers
+// success, the error tests cover errors, but warnings sit between.
+func TestUnwrap_WarningSW_IsRMACVerified(t *testing.T) {
+	keys := &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{0xAA}, 16),
+		SMAC:     bytes.Repeat([]byte{0xBB}, 16),
+		SRMAC:    bytes.Repeat([]byte{0xCC}, 16),
+		DEK:      bytes.Repeat([]byte{0xDD}, 16),
+		MACChain: make([]byte, 16),
+	}
+
+	sc := New(keys, LevelCMAC|LevelRMAC)
+
+	// Establish a non-zero MAC chain by wrapping a command first.
+	// Without this, the R-MAC input includes an all-zero chain,
+	// which is technically valid but doesn't exercise the chained
+	// case.
+	if _, err := sc.Wrap(&apdu.Command{CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0x00, Le: 0}); err != nil {
+		t.Fatalf("Wrap (priming): %v", err)
+	}
+
+	// Compose a 6282 response with a valid R-MAC.
+	responseData := []byte{0x55, 0x66, 0x77}
+	const sw1, sw2 byte = 0x62, 0x82
+
+	var macInput []byte
+	macInput = append(macInput, sc.macChain...)
+	macInput = append(macInput, responseData...)
+	macInput = append(macInput, sw1, sw2)
+	mac, err := cmac.AESCMAC(keys.SRMAC, macInput)
+	if err != nil {
+		t.Fatalf("AESCMAC: %v", err)
+	}
+
+	var respData []byte
+	respData = append(respData, responseData...)
+	respData = append(respData, mac[:MACLen]...)
+
+	resp := &apdu.Response{Data: respData, SW1: sw1, SW2: sw2}
+
+	// Gating helper says this is protected.
+	if !ResponseIsSecureMessagingProtected(sw1, sw2) {
+		t.Fatalf("warning SW %02X%02X must be classified as protected", sw1, sw2)
+	}
+
+	// Unwrap accepts the response.
+	out, err := sc.Unwrap(resp)
+	if err != nil {
+		t.Fatalf("Unwrap rejected a correctly-MAC'd warning response: %v", err)
+	}
+	if out.SW1 != sw1 || out.SW2 != sw2 {
+		t.Errorf("Unwrap returned SW=%02X%02X, want %02X%02X", out.SW1, out.SW2, sw1, sw2)
+	}
+	if !bytes.Equal(out.Data, responseData) {
+		t.Errorf("Unwrap returned data %x, want %x", out.Data, responseData)
+	}
+}
+
+// TestUnwrap_WarningSW_TamperedMAC_Rejected confirms that the
+// warning-protected path also catches tampering: a 62XX response
+// whose R-MAC fails verification must be rejected by Unwrap, not
+// passed through as if it were an unprotected error SW. Without
+// this, a regression that broadened "unprotected" to include
+// warnings would silently downgrade MITM detection.
+func TestUnwrap_WarningSW_TamperedMAC_Rejected(t *testing.T) {
+	keys := &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{0xAA}, 16),
+		SMAC:     bytes.Repeat([]byte{0xBB}, 16),
+		SRMAC:    bytes.Repeat([]byte{0xCC}, 16),
+		DEK:      bytes.Repeat([]byte{0xDD}, 16),
+		MACChain: make([]byte, 16),
+	}
+
+	sc := New(keys, LevelCMAC|LevelRMAC)
+
+	// Compose a 6300 response with a deliberately-wrong MAC.
+	responseData := []byte{0x11, 0x22, 0x33}
+	bogusMAC := bytes.Repeat([]byte{0xEE}, MACLen)
+
+	var respData []byte
+	respData = append(respData, responseData...)
+	respData = append(respData, bogusMAC...)
+
+	resp := &apdu.Response{Data: respData, SW1: 0x63, SW2: 0x00}
+	if _, err := sc.Unwrap(resp); err == nil {
+		t.Fatal("Unwrap accepted a 6300 response with an invalid R-MAC; warning SWs must be MAC-verified per GP SCP03 §6.2.4")
+	}
+}
