@@ -119,3 +119,19 @@ func TestStrictGPConfigs_HaveCorrectShape(t *testing.T) {
 		}
 	}
 }
+
+// TestOpen_NilConfig_RejectsExplicitly confirms scp11.Open(ctx, t, nil)
+// returns an error rather than silently substituting YubiKey defaults.
+// Earlier behavior was to fall through to YubiKeyDefaultSCP11bConfig()
+// when cfg was nil, which silently picked SCP11b plus YubiKey-shaped
+// empty-data policy without the caller naming either. Matching
+// scp03.Open's contract: Config is required.
+func TestOpen_NilConfig_RejectsExplicitly(t *testing.T) {
+	_, err := Open(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("Open(nil cfg) should return an error, not silently default")
+	}
+	if !strings.Contains(err.Error(), "Config is required") {
+		t.Errorf("error should mention Config is required; got: %v", err)
+	}
+}
