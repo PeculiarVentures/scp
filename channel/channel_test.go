@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -877,4 +878,244 @@ func TestUnwrap_WarningSW_TamperedMAC_Rejected(t *testing.T) {
 	if _, err := sc.Unwrap(resp); err == nil {
 		t.Fatal("Unwrap accepted a 6300 response with an invalid R-MAC; warning SWs must be MAC-verified per GP SCP03 §6.2.4")
 	}
+}
+
+// TestWrap_LogicalChannel_FullRoundTrip exercises wrap → card-side
+// MAC verification → response wrap → host-side unwrap across the
+// logical channels real cards use. The existing
+// TestWrapUnwrapRoundTrip covers basic channel 0 only because the
+// in-tree mocks live there; this fills the gap the README's
+// "expansion targets" section names.
+//
+// Each sub-test:
+//
+//  1. Host wraps a command on the named logical channel.
+//  2. The wrapped CLA is asserted to encode the expected channel and
+//     to have the spec-correct SM bit position (0x04 for
+//     first-interindustry/proprietary, 0x20 for further-interindustry).
+//  3. The MAC chain after the host's wrap is captured.
+//  4. A "card" SecureChannel re-derives the same MAC chain by
+//     verifying the host's MAC with proper Lc encoding (matches the
+//     extended-length form used by Wrap when wrapped data > 255 bytes).
+//  5. The card builds a response, wraps it, the host unwraps it.
+//  6. Both sides' MAC chains advance in lockstep.
+//
+// A regression in Wrap that miscoded SM-bit position for further-
+// interindustry CLAs (the naive |= 0x04 fallback) would surface as
+// either an SM-bit-not-set assertion or a MAC verification failure
+// because the wrapped CLA would no longer match what Wrap MAC'd.
+func TestWrap_LogicalChannel_FullRoundTrip(t *testing.T) {
+	cases := []struct {
+		name      string
+		cla       byte
+		wantChan  int
+		wantSMBit byte // 0x04 or 0x20
+	}{
+		{"basic-channel 1", 0x01, 1, 0x04},
+		{"basic-channel 3 proprietary", 0x83, 3, 0x04},
+		{"further-channel 4", 0x40, 4, 0x20},
+		{"further-channel 8", 0x44, 8, 0x20},
+		{"further-channel 19", 0x4F, 19, 0x20},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hostKeys := freshSessionKeys(0xAA)
+			cardKeys := freshSessionKeys(0xAA) // same material, separate state
+			scHost := New(hostKeys, LevelFull)
+			scCard := New(cardKeys, LevelFull)
+
+			// Host wraps a small command on the chosen logical channel.
+			plain := []byte{0x01, 0x02, 0x03, 0x04}
+			cmd := &apdu.Command{
+				CLA: tc.cla, INS: 0xCA, P1: 0x00, P2: 0x00,
+				Data: plain, Le: -1,
+			}
+			wrapped, err := scHost.Wrap(cmd)
+			if err != nil {
+				t.Fatalf("Wrap: %v", err)
+			}
+
+			// CLA encoding assertions.
+			if got := LogicalChannel(wrapped.CLA); got != tc.wantChan {
+				t.Errorf("wrapped CLA %#02x → channel %d, want %d", wrapped.CLA, got, tc.wantChan)
+			}
+			if wrapped.CLA&tc.wantSMBit == 0 {
+				t.Errorf("wrapped CLA %#02x missing SM bit %#02x", wrapped.CLA, tc.wantSMBit)
+			}
+
+			// Card verifies the MAC and decrypts.
+			plainOnCard, err := simulateCardUnwrap(t, scCard, wrapped, hostKeys.SMAC)
+			if err != nil {
+				t.Fatalf("card-side unwrap: %v", err)
+			}
+			if !bytes.Equal(plainOnCard, plain) {
+				t.Errorf("plaintext mismatch on card: got %X want %X", plainOnCard, plain)
+			}
+
+			// Card crafts a small response, wraps it, host unwraps.
+			respPlain := []byte{0x10, 0x20, 0x30}
+			respIn := &apdu.Response{Data: respPlain, SW1: 0x90, SW2: 0x00}
+			respWrapped, err := scCard.WrapResponse(respIn)
+			if err != nil {
+				t.Fatalf("card WrapResponse: %v", err)
+			}
+			respOut, err := scHost.Unwrap(respWrapped)
+			if err != nil {
+				t.Fatalf("host Unwrap: %v", err)
+			}
+			if !bytes.Equal(respOut.Data, respPlain) {
+				t.Errorf("response plaintext mismatch: got %X want %X", respOut.Data, respPlain)
+			}
+
+			// Both MAC chains must have advanced identically.
+			if !bytes.Equal(scHost.macChain, scCard.macChain) {
+				t.Errorf("MAC chains diverged: host=%X card=%X", scHost.macChain, scCard.macChain)
+			}
+		})
+	}
+}
+
+// TestWrap_CommandChaining_PreservedOnLogicalChannel confirms the
+// command-chaining bit (CLA |= 0x10) survives Wrap on non-zero
+// logical channels. A naive implementation that masked CLA before
+// re-applying the SM bit would lose chaining on logical channel 4+
+// silently.
+func TestWrap_CommandChaining_PreservedOnLogicalChannel(t *testing.T) {
+	cases := []struct {
+		name      string
+		cla       byte
+		wantSMBit byte
+	}{
+		{"basic-channel 0 chained", 0x10, 0x04},
+		{"basic-channel 2 chained", 0x12, 0x04},
+		{"further-channel 4 chained", 0x50, 0x20},
+		{"further-channel 19 chained", 0x5F, 0x20},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := New(freshSessionKeys(0xBB), LevelFull)
+			cmd := &apdu.Command{
+				CLA: tc.cla, INS: 0xDB, P1: 0x00, P2: 0x00,
+				Data: []byte{0xAA}, Le: -1,
+			}
+			wrapped, err := sc.Wrap(cmd)
+			if err != nil {
+				t.Fatalf("Wrap: %v", err)
+			}
+			if !IsCommandChaining(wrapped.CLA) {
+				t.Errorf("chaining bit lost: original CLA %#02x → wrapped %#02x", tc.cla, wrapped.CLA)
+			}
+			if wrapped.CLA&tc.wantSMBit == 0 {
+				t.Errorf("SM bit %#02x not set on wrapped CLA %#02x", tc.wantSMBit, wrapped.CLA)
+			}
+			// Original logical channel preserved.
+			if LogicalChannel(wrapped.CLA) != LogicalChannel(tc.cla) {
+				t.Errorf("logical channel changed: %d → %d", LogicalChannel(tc.cla), LogicalChannel(wrapped.CLA))
+			}
+		})
+	}
+}
+
+// TestWrap_ExtendedLength_OnFurtherChannel exercises a >255-byte
+// payload wrapped on logical channel 4 (further-interindustry).
+// This is the path that exposed a MAC-input encoding bug in
+// mockcard during PR #54 — the host's Lc encoding switches to the
+// extended form (0x00 || hi || lo) at the 255-byte threshold and
+// any verifier that doesn't track that produces a MAC mismatch.
+//
+// At the channel layer (no mock involved), the test verifies
+// Wrap sets the apdu.Command.ExtendedLength flag so downstream
+// transports use the 7-byte header form, and that the wrap/unwrap
+// round-trip works when both sides use the same SecureChannel logic.
+func TestWrap_ExtendedLength_OnFurtherChannel(t *testing.T) {
+	hostKeys := freshSessionKeys(0xCC)
+	cardKeys := freshSessionKeys(0xCC)
+	scHost := New(hostKeys, LevelFull)
+	scCard := New(cardKeys, LevelFull)
+
+	// 300 bytes plaintext → after pad+encrypt+MAC, well over 255
+	// bytes wrapped; Wrap must select the extended-length form.
+	plain := bytes.Repeat([]byte{0x42}, 300)
+	cmd := &apdu.Command{
+		CLA: 0x40, // logical channel 4
+		INS: 0xDA, P1: 0x00, P2: 0x00,
+		Data: plain, Le: -1,
+	}
+	wrapped, err := scHost.Wrap(cmd)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	if !wrapped.ExtendedLength {
+		t.Errorf("Wrap did not set ExtendedLength on a %d-byte payload (wrapped data %d bytes)",
+			len(plain), len(wrapped.Data))
+	}
+	if got := LogicalChannel(wrapped.CLA); got != 4 {
+		t.Errorf("logical channel changed: want 4 got %d", got)
+	}
+
+	// Card-side verification using the same Lc encoding rules.
+	plainOnCard, err := simulateCardUnwrap(t, scCard, wrapped, hostKeys.SMAC)
+	if err != nil {
+		t.Fatalf("card unwrap: %v", err)
+	}
+	if !bytes.Equal(plainOnCard, plain) {
+		t.Errorf("decrypted payload mismatch (lengths got=%d want=%d)", len(plainOnCard), len(plain))
+	}
+}
+
+// freshSessionKeys returns SessionKeys with all five 16-byte keys
+// filled with the given byte. Two calls with the same fill produce
+// independent state structs that share key material — the standard
+// pattern for simulating host-vs-card halves of the channel.
+func freshSessionKeys(fill byte) *kdf.SessionKeys {
+	return &kdf.SessionKeys{
+		SENC:     bytes.Repeat([]byte{fill}, 16),
+		SMAC:     bytes.Repeat([]byte{fill}, 16),
+		SRMAC:    bytes.Repeat([]byte{fill}, 16),
+		DEK:      bytes.Repeat([]byte{fill}, 16),
+		MACChain: make([]byte, 16),
+	}
+}
+
+// simulateCardUnwrap reproduces the card-side processing of a wrapped
+// command: verify the C-MAC using the same Lc encoding the host
+// used (extended form when wrapped data > 255 bytes), advance the
+// MAC chain, and decrypt the payload. Returns the plaintext.
+//
+// This is a test helper, not a piece of production code; the mock
+// card's processSecure is the production-shaped equivalent.
+func simulateCardUnwrap(t *testing.T, scCard *SecureChannel, wrapped *apdu.Command, smacKey []byte) ([]byte, error) {
+	t.Helper()
+	macSize := scCard.MACSize()
+	if len(wrapped.Data) < macSize {
+		return nil, fmt.Errorf("wrapped data too short for MAC")
+	}
+	receivedMAC := wrapped.Data[len(wrapped.Data)-macSize:]
+	encData := wrapped.Data[:len(wrapped.Data)-macSize]
+
+	var macInput []byte
+	macInput = append(macInput, scCard.macChain...)
+	macInput = append(macInput, wrapped.CLA, wrapped.INS, wrapped.P1, wrapped.P2)
+	if len(wrapped.Data) > 0xFF {
+		macInput = append(macInput, 0x00, byte(len(wrapped.Data)>>8), byte(len(wrapped.Data)))
+	} else {
+		macInput = append(macInput, byte(len(wrapped.Data)))
+	}
+	macInput = append(macInput, encData...)
+
+	expectedMAC, err := cmac.AESCMAC(smacKey, macInput)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(expectedMAC[:macSize], receivedMAC) {
+		return nil, fmt.Errorf("MAC mismatch")
+	}
+	scCard.macChain = expectedMAC
+
+	if len(encData) == 0 {
+		_, _ = scCard.DecryptCommand(nil)
+		return nil, nil
+	}
+	return scCard.DecryptCommand(encData)
 }
