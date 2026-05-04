@@ -158,7 +158,7 @@ The CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK). A card who
 
 ### piv-reset — restore the PIV applet to factory state
 
-Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other PIV state you want to undo without physically swapping the hardware. Erases ALL 24 PIV slot keypairs and certificates, returns PIN to `123456` and PUK to `12345678`, and resets the management key to the well-known factory default value — used as 3DES on pre-5.7 firmware and AES-192 on 5.7+ (per Yubico's PIV docs, the same `010203...0708` byte pattern is the default for both, since 3DES and AES-192 are both 24-byte keys). Does NOT touch installed OCE roots or the Issuer Security Domain — those live outside the PIV applet.
+Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other PIV state you want to undo without physically swapping the hardware. Erases ALL 24 PIV slot keypairs and certificates, returns PIN to `123456` and PUK to `12345678`, and resets the management key (to the well-known 3DES default on pre-5.7 firmware, or a randomly regenerated AES-192 key in protected metadata on 5.7+). Does NOT touch installed OCE roots or the Issuer Security Domain — those live outside the PIV applet.
 
 ```bash
 scp-smoke piv-reset \
@@ -194,7 +194,7 @@ scp-smoke piv-provision \
   --confirm-write
 ```
 
-Slots: `9a` (PIV Authentication), `9c` (Digital Signature), `9d` (Key Management), `9e` (Card Authentication), and the `82` retired-key range. Algorithms: `rsa2048`, `eccp256`, `eccp384`, plus YubiKey 5.7+ exclusives `ed25519` and `x25519`.
+Slots: `9a` (PIV Authentication), `9c` (Digital Signature), `9d` (Key Management), `9e` (Card Authentication), `82`–`95` (Retired Key Management 1–20), and `f9` (YubiKey Attestation). Algorithms: `rsa2048`, `eccp256`, `eccp384`, plus YubiKey 5.7+ exclusives `ed25519` and `x25519`.
 
 **Cert-to-pubkey binding check.** When `--cert` is supplied, after `GENERATE KEY` succeeds, `piv-provision` parses the public key returned by the card and refuses to install the cert if its public key does not match. Without this check, a wrong cert (different slot, stale chain, typo'd path that resolved to something unintended) would install onto a slot whose keypair doesn't actually correspond — the slot would then attest to an identity it can't prove possession of. Mismatch produces a `cert binding FAIL` line and a non-zero exit; `PUT CERTIFICATE` is not transmitted.
 
@@ -203,16 +203,10 @@ The check runs against the parsed public key for the relevant algorithm: RSA (mo
 **Management-key authentication.** PIV `GENERATE KEY` and `PUT CERTIFICATE` are gated on PIV management-key authentication on stock cards. Pass `--mgmt-key` (hex) and `--mgmt-key-algorithm` to run the mutual-auth flow before the writes. Without `--mgmt-key`, the auth step is skipped — useful for testing the rest of the sequence against a card you've already authenticated to out of band, or against the mock with no enforcement configured.
 
 ```bash
-# Pre-5.7 YubiKey at factory default (3DES management key)
+# YubiKey with the historic pre-5.7 factory 3DES default
 scp-smoke piv-provision \
   --reader "YubiKey" --pin 123456 --slot 9a \
   --mgmt-key default --mgmt-key-algorithm 3des \
-  --lab-skip-scp11-trust --confirm-write
-
-# YubiKey 5.7+ at factory default (AES-192 management key, same byte value)
-scp-smoke piv-provision \
-  --reader "YubiKey" --pin 123456 --slot 9a \
-  --mgmt-key default --mgmt-key-algorithm aes192 \
   --lab-skip-scp11-trust --confirm-write
 
 # YubiKey 5.7+ with a rotated AES-192 management key
@@ -222,7 +216,7 @@ scp-smoke piv-provision \
   --lab-skip-scp11-trust --confirm-write
 ```
 
-`--mgmt-key default` is shorthand for the well-known 24-byte factory value (`010203040506070801020304050607080102030405060708`). Per Yubico's PIV docs, the same value is the default for both 3DES (firmware < 5.7) and AES-192 (firmware 5.7+), so `default` works with either algorithm. AES-128 (16 bytes) and AES-256 (32 bytes) have different lengths and `--mgmt-key default` is rejected for those at the CLI boundary. The hex value accepts spaces, colons, and dashes for paste-from-docs convenience.
+`--mgmt-key default` is shorthand for the well-known pre-5.7 YubiKey 3DES factory key; only valid with `--mgmt-key-algorithm 3des`. The hex value accepts spaces, colons, and dashes for paste-from-docs convenience. Length is validated against the algorithm at the CLI boundary.
 
 The mock implements crypto-correct mutual auth when `PIVMgmtKey` and `PIVMgmtKeyAlgo` are configured; tests use this to round-trip the full flow without real hardware.
 

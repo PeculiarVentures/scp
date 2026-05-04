@@ -319,11 +319,20 @@ func parsePIVSlot(s string) (byte, error) {
 	slot := byte(v)
 	switch slot {
 	case piv.SlotAuthentication, piv.SlotSignature, piv.SlotKeyManagement,
-		piv.SlotCardAuth, piv.SlotRetired1, piv.SlotAttestation:
+		piv.SlotCardAuth, piv.SlotAttestation:
 		return slot, nil
-	default:
-		return 0, fmt.Errorf("--slot 0x%02X is not a recognized PIV slot (try 9a, 9c, 9d, 9e)", slot)
 	}
+	// Retired key management slots 1..20 (0x82..0x95) per
+	// SP 800-73-4 Part 1 Table 4b. The piv package's slotToObjectID
+	// already supports the full range; the CLI was previously only
+	// accepting SlotRetired1, which made the other 19 retired slots
+	// unreachable from the command line.
+	if slot >= piv.SlotRetired1 && slot <= piv.SlotRetired20 {
+		return slot, nil
+	}
+	return 0, fmt.Errorf("--slot 0x%02X is not a recognized PIV slot "+
+		"(try 9a/9c/9d/9e for primary slots, 82-95 for retired key management 1-20, "+
+		"or f9 for YubiKey attestation)", slot)
 }
 
 // parsePIVAlgorithm maps a friendly algorithm name to the byte
