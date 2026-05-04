@@ -307,3 +307,19 @@ func TestSessionKeys_PreservesStaticDEK(t *testing.T) {
 		t.Errorf("mutating SessionKeys().DEK affected caller's static DEK: %X", dek)
 	}
 }
+
+// TestStrictGPConfig verifies StrictGPConfig produces a Config with
+// GP-spec defaults: zero KVN ("any version") and the GP-literal
+// empty-data policy — the semantic difference from FactoryYubiKeyConfig.
+func TestStrictGPConfig(t *testing.T) {
+	cfg := StrictGPConfig(DefaultKeys)
+	if cfg.KeyVersion != 0x00 {
+		t.Errorf("KeyVersion = 0x%02X, want 0x00", cfg.KeyVersion)
+	}
+	if cfg.EmptyDataEncryption != channel.EmptyDataGPLiteral {
+		t.Errorf("EmptyDataEncryption = %v, want EmptyDataGPLiteral", cfg.EmptyDataEncryption)
+	}
+	if len(cfg.Keys.ENC) != 16 {
+		t.Errorf("Keys.ENC length = %d, want 16", len(cfg.Keys.ENC))
+	}
+}

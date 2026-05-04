@@ -162,9 +162,9 @@ func TestSCP11_RejectsNonFullSecurityLevel(t *testing.T) {
 // ============================================================
 
 func TestSCP11_FailsClosedWithoutTrustAnchorsOrOptIn(t *testing.T) {
-	// Config that matches DefaultConfig() except for the trust fields:
+	// Config that matches YubiKeyDefaultSCP11bConfig() except for the trust fields:
 	// no CardTrustAnchors, no CardTrustPolicy, no InsecureSkipCardAuthentication.
-	cfg := DefaultConfig()
+	cfg := YubiKeyDefaultSCP11bConfig()
 	// Construct a minimal session where getCardCertificate has already
 	// retrieved data — we drive the legacy path directly.
 	s := &Session{config: cfg}
@@ -184,7 +184,7 @@ func TestSCP11_FailsClosedWithoutTrustAnchorsOrOptIn(t *testing.T) {
 func TestSCP11_OptInBypassWorks(t *testing.T) {
 	// With InsecureSkipCardAuthentication = true, the legacy fallback
 	// is permitted (intended only for tests/labs).
-	cfg := DefaultConfig()
+	cfg := YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	s := &Session{config: cfg}
 

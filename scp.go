@@ -55,7 +55,7 @@
 //
 //	// SCP11b with mock card (for testing):
 //	card, _ := mockcard.New()
-//	sess, _ := scp11.Open(ctx, card.Transport(), scp11.DefaultConfig())
+//	sess, _ := scp11.Open(ctx, card.Transport(), scp11.YubiKeyDefaultSCP11bConfig())
 //	defer sess.Close()
 //
 //	// SCP03 with static keys:

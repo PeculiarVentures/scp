@@ -235,7 +235,7 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*
 	if cfg != nil {
 		local = *cfg
 	} else {
-		local = *scp11.DefaultConfig()
+		local = *scp11.YubiKeyDefaultSCP11bConfig()
 	}
 	local.SelectAID = AIDSecurityDomain
 	local.ApplicationAID = nil

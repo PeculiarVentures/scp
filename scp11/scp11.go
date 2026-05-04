@@ -268,21 +268,17 @@ var (
 	AIDOTP = []byte{0xA0, 0x00, 0x00, 0x05, 0x27, 0x20, 0x01}
 )
 
-// DefaultConfig returns sane defaults for the most common case: SCP11b
-// against the Issuer Security Domain on a YubiKey-style card. KeyID
-// 0x13 is the GP Amendment F §7.1.1 SCP11b slot.
+// YubiKeyDefaultSCP11bConfig returns a starting Config for SCP11b
+// (one-way card-to-host authentication) tuned for YubiKey defaults:
+// SD applet, KID 0x13, KVN 0x01, full security level, and the
+// YubiKey-compatible empty-data encryption policy
+// (channel.EmptyDataYubico, the zero value). The caller still has to
+// configure card-trust validation: set CardTrustPolicy or
+// CardTrustAnchors, or InsecureSkipCardAuthentication for tests.
 //
-// SCP11a and SCP11c use different KIDs (0x11 and 0x15 per the same
-// section); changing only the Variant field of this default WILL NOT
-// produce a working SCP11a/c config because KeyID will still be 0x13.
-// Use DefaultSCP11aConfig() / DefaultSCP11cConfig() instead, or set
-// KeyID explicitly.
-//
-// Trust is required: trust validation is OFF by default, so a caller
-// must set CardTrustPolicy, CardTrustAnchors, or
-// InsecureSkipCardAuthentication before Open will agree to a key with
-// the card.
-func DefaultConfig() *Config {
+// For spec-literal defaults that don't bake in YubiKey assumptions,
+// see StrictGPSCP11bConfig.
+func YubiKeyDefaultSCP11bConfig() *Config {
 	return &Config{
 		Variant:       SCP11b,
 		SelectAID:     AIDSecurityDomain,
@@ -292,31 +288,69 @@ func DefaultConfig() *Config {
 	}
 }
 
-// DefaultSCP11aConfig returns a starting Config for SCP11a (mutual
-// auth via OCE certificate chain). KeyID is set to the GP Amendment F
-// §7.1.1 SCP11a slot (0x11). The caller must still populate
-// OCECertificates, OCEPrivateKey, OCEKeyReference, and a card-trust
-// configuration (CardTrustPolicy / CardTrustAnchors / InsecureSkipCardAuthentication)
+// YubiKeyDefaultSCP11aConfig returns a starting Config for SCP11a
+// (mutual authentication via OCE certificate chain), tuned for
+// YubiKey. KeyID is set to the GP Amendment F §7.1.1 SCP11a slot
+// (0x11). The caller must still populate OCECertificates,
+// OCEPrivateKey, OCEKeyReference, and a card-trust configuration
+// (CardTrustPolicy / CardTrustAnchors / InsecureSkipCardAuthentication)
 // before calling Open.
-func DefaultSCP11aConfig() *Config {
-	cfg := DefaultConfig()
+//
+// For spec-literal defaults, see StrictGPSCP11aConfig.
+func YubiKeyDefaultSCP11aConfig() *Config {
+	cfg := YubiKeyDefaultSCP11bConfig()
 	cfg.Variant = SCP11a
 	cfg.KeyID = 0x11 // GP §7.1.1 SCP11a
 	return cfg
 }
 
-// DefaultSCP11bConfig is an alias for DefaultConfig provided for
-// symmetry with DefaultSCP11aConfig and DefaultSCP11cConfig.
-func DefaultSCP11bConfig() *Config {
-	return DefaultConfig()
+// YubiKeyDefaultSCP11cConfig returns a starting Config for SCP11c
+// (mutual authentication with offline scripting), tuned for YubiKey.
+// KeyID is set to the GP Amendment F §7.1.1 SCP11c slot (0x15).
+// Same OCE/trust caveats as YubiKeyDefaultSCP11aConfig.
+//
+// For spec-literal defaults, see StrictGPSCP11cConfig.
+func YubiKeyDefaultSCP11cConfig() *Config {
+	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg.Variant = SCP11c
+	cfg.KeyID = 0x15 // GP §7.1.1 SCP11c
+	return cfg
 }
 
-// DefaultSCP11cConfig returns a starting Config for SCP11c (mutual
-// auth with offline scripting). KeyID is set to the GP Amendment F
-// §7.1.1 SCP11c slot (0x15). Same OCE/trust caveats as
-// DefaultSCP11aConfig.
-func DefaultSCP11cConfig() *Config {
-	cfg := DefaultConfig()
+// StrictGPSCP11bConfig returns an SCP11b Config with spec-literal
+// defaults — no YubiKey-specific tinting. It explicitly sets
+// EmptyDataEncryption to channel.EmptyDataGPLiteral, which matches
+// the literal reading of GP Amendment D §6.2.4 (skip C-DEC encryption
+// when data is empty). KeyVersion is left at zero ("any version"),
+// since the GP-spec default does not pin a specific KVN.
+//
+// Use this against cards that strictly implement the GP spec rather
+// than the YubiKey-compatible interpretation. Trust configuration
+// requirements are the same as the YubiKey-default variant.
+func StrictGPSCP11bConfig() *Config {
+	return &Config{
+		Variant:             SCP11b,
+		SelectAID:           AIDSecurityDomain,
+		KeyID:               0x13, // GP §7.1.1 SCP11b
+		KeyVersion:          0x00, // GP-spec "any version"
+		SecurityLevel:       channel.LevelFull,
+		EmptyDataEncryption: channel.EmptyDataGPLiteral,
+	}
+}
+
+// StrictGPSCP11aConfig returns an SCP11a Config with spec-literal
+// defaults. See StrictGPSCP11bConfig for the rationale.
+func StrictGPSCP11aConfig() *Config {
+	cfg := StrictGPSCP11bConfig()
+	cfg.Variant = SCP11a
+	cfg.KeyID = 0x11 // GP §7.1.1 SCP11a
+	return cfg
+}
+
+// StrictGPSCP11cConfig returns an SCP11c Config with spec-literal
+// defaults. See StrictGPSCP11bConfig for the rationale.
+func StrictGPSCP11cConfig() *Config {
+	cfg := StrictGPSCP11bConfig()
 	cfg.Variant = SCP11c
 	cfg.KeyID = 0x15 // GP §7.1.1 SCP11c
 	return cfg
@@ -351,7 +385,7 @@ type Session struct {
 // and session key derivation.
 func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, error) {
 	if cfg == nil {
-		cfg = DefaultConfig()
+		cfg = YubiKeyDefaultSCP11bConfig()
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull

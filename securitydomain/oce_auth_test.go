@@ -62,7 +62,7 @@ func TestSCP11b_OCERequiredOps_Rejected_HostSide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := scp11.DefaultSCP11bConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sd, err := OpenSCP11(context.Background(), card.Transport(), cfg)
@@ -119,7 +119,7 @@ func TestSCP11b_ReadOnlyOps_Allowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := scp11.DefaultSCP11bConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sd, err := OpenSCP11(context.Background(), card.Transport(), cfg)

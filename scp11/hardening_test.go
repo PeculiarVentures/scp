@@ -18,7 +18,7 @@ func TestOpen_RejectsHostID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := DefaultSCP11bConfig()
+	cfg := YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	cfg.HostID = []byte("test-host-id")
 	_, err = Open(context.Background(), card.Transport(), cfg)
@@ -37,7 +37,7 @@ func TestOpen_RejectsCardGroupID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := DefaultSCP11bConfig()
+	cfg := YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	cfg.CardGroupID = []byte("test-cg-id")
 	_, err = Open(context.Background(), card.Transport(), cfg)
@@ -59,7 +59,7 @@ func TestOpen_SCP11b_RequiresReceiptByDefault(t *testing.T) {
 	}
 	card.LegacySCP11bNoReceipt = true // model pre-Amendment-F-v1.4 card
 
-	cfg := DefaultSCP11bConfig()
+	cfg := YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	// Note: NOT setting InsecureAllowSCP11bWithoutReceipt — should fail.
 

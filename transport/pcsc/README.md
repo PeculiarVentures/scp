@@ -37,7 +37,7 @@ defer t.Close()
 // Or address one by name (use pcsc.ListReaders() to discover them).
 // t, err := pcsc.OpenReader("Yubico YubiKey OTP+FIDO+CCID 00 00")
 
-cfg := scp11.DefaultSCP11bConfig()
+cfg := scp11.YubiKeyDefaultSCP11bConfig()
 cfg.CardTrustAnchors = myYubicoSCP11Roots // ← required for production
 sess, err := scp11.Open(context.Background(), t, cfg)
 ```

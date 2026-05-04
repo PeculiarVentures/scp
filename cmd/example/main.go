@@ -36,7 +36,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("create SCP11 card: %v", err)
 	}
-	cfg := scp11.DefaultConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true // mock card self-signed key
 	scp11Sess, err := scp11.Open(ctx, scp11Card.Transport(), cfg)
 	if err != nil {

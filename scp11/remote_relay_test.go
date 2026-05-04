@@ -107,7 +107,7 @@ func TestSCP11_OverInMemoryRelayTransport(t *testing.T) {
 	// Open SCP11b end-to-end across the relay. Every APDU of the
 	// handshake (SELECT SD, GET DATA for cert, INTERNAL AUTHENTICATE,
 	// receipt verification...) goes through reqCh / respCh.
-	cfg := scp11.DefaultSCP11bConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true // mockcard's cert chain isn't a real PKI
 	sess, err := scp11.Open(ctx, rt, cfg)
 	if err != nil {

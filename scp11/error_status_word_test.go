@@ -46,7 +46,7 @@ func TestSCP11_ErrorStatusWord_NoMACVerification(t *testing.T) {
 	// the error case, and only the SW for the unprotected error.
 	rec := &errorPassThroughRecorder{inner: card.Transport()}
 
-	cfg := scp11.DefaultSCP11bConfig()
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := scp11.Open(ctx, rec, cfg)
 	if err != nil {
