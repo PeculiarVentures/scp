@@ -174,6 +174,10 @@ scp-smoke piv-provision \
 
 Slots: `9a` (PIV Authentication), `9c` (Digital Signature), `9d` (Key Management), `9e` (Card Authentication), and the `82` retired-key range. Algorithms: `rsa2048`, `eccp256`, `eccp384`, plus YubiKey 5.7+ exclusives `ed25519` and `x25519`.
 
+**Cert-to-pubkey binding check.** When `--cert` is supplied, after `GENERATE KEY` succeeds, `piv-provision` parses the public key returned by the card and refuses to install the cert if its public key does not match. Without this check, a wrong cert (different slot, stale chain, typo'd path that resolved to something unintended) would install onto a slot whose keypair doesn't actually correspond — the slot would then attest to an identity it can't prove possession of. Mismatch produces a `cert binding FAIL` line and a non-zero exit; `PUT CERTIFICATE` is not transmitted.
+
+The check runs against the parsed public key for the relevant algorithm: RSA (modulus + exponent), ECDSA (curve + X/Y), Ed25519 (32-byte raw). X25519 keys are not bound by X.509 certs, so the binding step is skipped with a `parse pubkey SKIP` note.
+
 **Management-key authentication.** PIV `GENERATE KEY` and `PUT CERTIFICATE` are gated on PIV management-key authentication on stock cards. Pass `--mgmt-key` (hex) and `--mgmt-key-algorithm` to run the mutual-auth flow before the writes. Without `--mgmt-key`, the auth step is skipped — useful for testing the rest of the sequence against a card you've already authenticated to out of band, or against the mock with no enforcement configured.
 
 ```bash

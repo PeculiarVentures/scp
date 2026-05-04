@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -213,7 +218,46 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 		report.Pass("GENERATE KEY", fmt.Sprintf("slot 0x%02X, %s, %d bytes pubkey returned", slot, algoName, len(resp.Data)))
 	}
 
+	// Parse the generated public key. Used both for the cert-binding
+	// check below and to surface a clean error if the card returned
+	// something the parser doesn't understand. X25519 returns
+	// piv.ErrNoCertBinding here, which is fine — we just don't get
+	// a key to compare against and skip the binding check.
+	var generatedPub crypto.PublicKey
+	if data.KeyGenerated {
+		k, err := piv.ParseGeneratedPublicKey(resp.Data, algo)
+		switch {
+		case errors.Is(err, piv.ErrNoCertBinding):
+			report.Skip("parse pubkey", "X25519 — no cert binding applies")
+		case err != nil:
+			report.Fail("parse pubkey", err.Error())
+		default:
+			generatedPub = k
+			report.Pass("parse pubkey", describePub(k))
+		}
+	}
+
 	if cert != nil && data.KeyGenerated {
+		// Cert-to-pubkey binding check. Without this, a wrong cert
+		// (different slot, stale chain, typo'd path) installs onto
+		// a slot whose keypair doesn't actually correspond — the
+		// slot then attests to an identity the operator didn't
+		// intend. The check refuses PUT CERTIFICATE on mismatch
+		// rather than installing the misleading cert.
+		if generatedPub != nil {
+			if !piv.PublicKeysEqual(generatedPub, cert.PublicKey) {
+				report.Fail("cert binding", fmt.Sprintf(
+					"cert public key does not match slot 0x%02X generated key — refusing to install",
+					slot))
+				data.CertInstalled = false
+				_ = report.Emit(env.out, *jsonMode)
+				return fmt.Errorf("cert/pubkey mismatch on slot 0x%02X", slot)
+			}
+			report.Pass("cert binding", "cert matches generated slot key")
+		} else {
+			report.Skip("cert binding", "no parsed pubkey to compare against")
+		}
+
 		putCmd, err := piv.PutCertificate(slot, cert)
 		if err != nil {
 			report.Fail("PUT CERTIFICATE (build)", err.Error())
@@ -428,5 +472,21 @@ func parseMgmtKeyAlgorithm(s string) (byte, string, error) {
 		return piv.AlgoMgmtAES256, "AES-256", nil
 	default:
 		return 0, "", fmt.Errorf("--mgmt-key-algorithm %q not recognized (3des, aes128, aes192, aes256)", s)
+	}
+}
+
+// describePub renders a parsed public key in a human-readable form
+// for the report. Just enough to give the operator confidence the
+// right shape came back.
+func describePub(k crypto.PublicKey) string {
+	switch v := k.(type) {
+	case *rsa.PublicKey:
+		return fmt.Sprintf("RSA-%d", v.N.BitLen())
+	case *ecdsa.PublicKey:
+		return fmt.Sprintf("ECDSA %s", v.Curve.Params().Name)
+	case ed25519.PublicKey:
+		return fmt.Sprintf("Ed25519 (%d bytes)", len(v))
+	default:
+		return fmt.Sprintf("%T", k)
 	}
 }

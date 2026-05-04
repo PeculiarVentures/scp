@@ -794,14 +794,25 @@ func TestPIVProvision_GenerateKey_Smoke(t *testing.T) {
 
 // TestPIVProvision_WithCertAndAttest exercises the optional flags:
 // --cert installs a cert via PUT CERTIFICATE, --attest fetches
-// the attestation. The mock ACKs both with synthetic data.
+// the attestation. The cert's public key must match the slot's
+// generated keypair or piv-provision refuses to install — this
+// test pre-seeds the mock with a known keypair and builds a cert
+// from the matching public key, exercising the success path.
 func TestPIVProvision_WithCertAndAttest(t *testing.T) {
-	_, certPath := writeOCEFixturePEMs(t) // any cert works for the mock
-
 	mockCard, err := mockcard.New()
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
+	// Pre-seed the mock so we know what key GENERATE KEY will return,
+	// then build a cert that binds to that public key.
+	slotKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("slot key generate: %v", err)
+	}
+	mockCard.PIVPresetKey = slotKey
+
+	certPath := writeMatchingPIVCert(t, slotKey)
+
 	var buf bytes.Buffer
 	env := &runEnv{
 		out: &buf, errOut: &buf,
@@ -824,6 +835,10 @@ func TestPIVProvision_WithCertAndAttest(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
+		"parse pubkey",
+		"ECDSA P-256",
+		"cert binding",
+		"cert matches generated slot key",
 		"PUT CERTIFICATE",
 		"ATTESTATION",
 	} {
@@ -831,6 +846,83 @@ func TestPIVProvision_WithCertAndAttest(t *testing.T) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
 		}
 	}
+}
+
+// TestPIVProvision_RejectsCertPubkeyMismatch is the new test that
+// would have caught the gap ChatGPT flagged: a cert whose public
+// key doesn't match the slot's generated keypair must not be
+// installed. The slot's keypair would still be valid, but the
+// cert would attest to an identity the slot can't actually prove
+// possession of.
+//
+// Test setup: mock pre-seeded with key A; cert built from key B.
+// piv-provision must fail at the cert-binding step, before
+// reaching PUT CERTIFICATE.
+func TestPIVProvision_RejectsCertPubkeyMismatch(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	slotKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	mockCard.PIVPresetKey = slotKey
+
+	// Different key for the cert — the binding check must catch
+	// the mismatch.
+	otherKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPath := writeMatchingPIVCert(t, otherKey)
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	err = cmdPIVProvision(context.Background(), env, []string{
+		"--reader", "fake",
+		"--pin", "123456",
+		"--slot", "9a",
+		"--cert", certPath,
+		"--lab-skip-scp11-trust",
+		"--confirm-write",
+	})
+	if err == nil {
+		t.Fatalf("expected mismatch to fail; output:\n%s", buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "cert binding") || !strings.Contains(out, "FAIL") {
+		t.Errorf("expected cert binding FAIL in output; got:\n%s", out)
+	}
+	if strings.Contains(out, "PUT CERTIFICATE                  PASS") {
+		t.Error("PUT CERTIFICATE happened after binding FAIL — guard is broken")
+	}
+}
+
+// writeMatchingPIVCert generates a minimal self-signed X.509 cert
+// bound to the given key's public part and writes it to a temp file
+// in PEM form. The cert isn't otherwise meaningful — its only
+// purpose is to make the cert-binding check pass (or, if the caller
+// uses a different key for slot vs cert, fail).
+func writeMatchingPIVCert(t *testing.T, key *ecdsa.PrivateKey) string {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "scp-smoke test PIV slot"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "piv-slot.pem")
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
 }
 
 // TestPIVProvision_RejectsBadSlotAndAlgo confirms inputs are

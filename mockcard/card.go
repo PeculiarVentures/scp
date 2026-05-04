@@ -95,6 +95,33 @@ type Card struct {
 	// Internal: witness generated in step 1, expected back from host
 	// (decrypted) in step 2.
 	pivMgmtAuthWitness []byte
+
+	// Public key of the most recent successful GENERATE KEY (PIV
+	// INS 0x47). Tests use this to construct an X.509 certificate
+	// that matches the slot's key, so the cert-binding check in
+	// piv-provision exercises the success path against the mock.
+	// nil before the first GENERATE KEY.
+	pivLastGenKey *ecdsa.PublicKey
+
+	// PIVPresetKey, when non-nil, makes GENERATE KEY (PIV INS 0x47)
+	// return this keypair's public key instead of generating a
+	// fresh random one. Tests use this to build a matching X.509
+	// cert before invoking piv-provision, so the cert-binding
+	// check has a known-good cert to validate against. The mock
+	// still doesn't know how to actually sign with this key (it's
+	// just for shape), but the public part round-trips through
+	// the GENERATE KEY response.
+	PIVPresetKey *ecdsa.PrivateKey
+}
+
+// LastGeneratedPIVKey returns the public key from the most recent
+// successful PIV GENERATE KEY against this mock, or nil if none
+// has happened. Useful in tests that need to build a cert matching
+// the slot's keypair.
+func (c *Card) LastGeneratedPIVKey() *ecdsa.PublicKey {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pivLastGenKey
 }
 
 type cardSession struct {
@@ -211,10 +238,37 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		if !c.pivSelected {
 			return mkSW(0x6985), nil
 		}
-		pub := make([]byte, 65)
-		pub[0] = 0x04
-		_, _ = rand.Read(pub[1:])
-		return &apdu.Response{Data: pub, SW1: 0x90, SW2: 0x00}, nil
+		// If PIVPresetKey is set (tests use this), return that key's
+		// public part instead of generating fresh material. Otherwise
+		// generate a real on-curve P-256 keypair. The mock always
+		// produces P-256 regardless of what the host requested in
+		// the data TLV; if a future test needs RSA or P-384 from
+		// the mock, branch here on the requested algorithm.
+		// Pre-fix the mock returned 65 bytes of pure random data —
+		// not an on-curve point and not in the spec-mandated TLV
+		// envelope. ParseGeneratedPublicKey would correctly reject
+		// it on both counts.
+		var pub *ecdsa.PublicKey
+		if c.PIVPresetKey != nil {
+			pub = &c.PIVPresetKey.PublicKey
+		} else {
+			priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				return mkSW(0x6F00), nil
+			}
+			pub = &priv.PublicKey
+		}
+		c.pivLastGenKey = pub
+		// Encode uncompressed point: 0x04 || X(32) || Y(32).
+		point := make([]byte, 65)
+		point[0] = 0x04
+		pub.X.FillBytes(point[1:33])
+		pub.Y.FillBytes(point[33:])
+		// Wrap in 7F 49 LL { 86 LL <point> } per NIST SP 800-73-4
+		// Part 2 §3.3.2.
+		body := append([]byte{0x86, byte(len(point))}, point...)
+		respData := append([]byte{0x7F, 0x49, byte(len(body))}, body...)
+		return &apdu.Response{Data: respData, SW1: 0x90, SW2: 0x00}, nil
 
 	case 0x20: // PIV VERIFY (PIN)
 		if !c.pivSelected {
