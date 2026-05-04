@@ -431,13 +431,13 @@ func ctEq(a, b []byte) bool {
 // parseRaw decodes a wire-format APDU (ISO 7816-4) into an apdu.Command.
 // Handles both short and extended length encoding:
 //
-//   short:    CLA INS P1 P2 [Lc Data ...] [Le]
-//             Lc is 1 byte (1-255), Le is 1 byte (0 means 256).
+//	short:    CLA INS P1 P2 [Lc Data ...] [Le]
+//	          Lc is 1 byte (1-255), Le is 1 byte (0 means 256).
 //
-//   extended: CLA INS P1 P2 [00 Lc_hi Lc_lo Data ...] [Le_hi Le_lo]
-//             Lc is 2 bytes after a 0x00 marker (1-65535).
-//             Le, when present, is the trailing 2 bytes (no marker
-//             since the extended marker was already consumed).
+//	extended: CLA INS P1 P2 [00 Lc_hi Lc_lo Data ...] [Le_hi Le_lo]
+//	          Lc is 2 bytes after a 0x00 marker (1-65535).
+//	          Le, when present, is the trailing 2 bytes (no marker
+//	          since the extended marker was already consumed).
 //
 // An earlier version handled only short encoding, which silently
 // dropped the data field of any extended-length command — a real

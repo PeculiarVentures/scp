@@ -283,13 +283,13 @@ func TestValidateSCP11Chain_AcceptsCertWithoutServerAuthEKU(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "SCP11 Card (clientAuth only)"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, // intentionally NOT serverAuth
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "SCP11 Card (clientAuth only)"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, // intentionally NOT serverAuth
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &leafKey.PublicKey, leafKey)
@@ -317,13 +317,13 @@ func TestValidateSCP11Chain_AcceptsCertWithoutServerAuthEKU(t *testing.T) {
 func TestValidateSCP11Chain_RespectsExplicitEKUs(t *testing.T) {
 	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "SCP11 Card (clientAuth)"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		IsCA:         true,
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "SCP11 Card (clientAuth)"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	leafDER, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &leafKey.PublicKey, leafKey)
