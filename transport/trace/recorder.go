@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -169,6 +170,39 @@ func (r *Recorder) Snapshot() File {
 	out := r.file
 	out.Exchanges = append([]Exchange(nil), r.file.Exchanges...)
 	return out
+}
+
+// CaptureCRD probes Card Recognition Data (GET DATA tag 0x66) on the
+// inner transport and stores the parsed result in the trace header.
+// This is the spec-defined way for a card to publish its claimed GP
+// version, supported SCP version, and identification OIDs (GP Card
+// Spec §H.2/H.3); putting it in the trace header makes a checked-in
+// trace self-describing — anyone reading it can see what kind of
+// card produced it without external metadata.
+//
+// The probe goes through the inner transport directly, bypassing the
+// recorder's record path. It does NOT show up as an exchange in the
+// trace; an exchange is what the test code did, and the test code
+// did not request CRD. If you want CRD-as-an-exchange, call
+// cardrecognition.Probe through the recorder yourself.
+//
+// Call CaptureCRD after SELECTing the applet whose CRD you want
+// (typically the ISD). Calling before any SELECT may return CRD
+// from whatever applet the OS happened to leave selected, or fail.
+//
+// CaptureCRD is independent of the recording itself — a probe error
+// is returned to the caller without affecting the trace's other
+// state, and successful probes do not interact with subsequent
+// Transmit / TransmitRaw calls.
+func (r *Recorder) CaptureCRD(ctx context.Context) error {
+	info, err := cardrecognition.Probe(ctx, r.inner)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.file.CardInfo = info
+	r.mu.Unlock()
+	return nil
 }
 
 // fillHeaderFields populates CLA/INS/P1/P2 from the wire bytes.

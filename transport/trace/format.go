@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/PeculiarVentures/scp/cardrecognition"
 )
 
 // SchemaVersion is the on-disk format identifier. Any breaking
@@ -23,14 +25,15 @@ const SchemaVersion = "scp-trace/v1"
 
 // File is the on-disk shape of a trace.
 type File struct {
-	Schema      string      `json:"schema"`
-	CapturedAt  time.Time   `json:"captured_at"`
-	Profile     string      `json:"profile,omitempty"`
-	Reader      string      `json:"reader,omitempty"`
-	CardATR     HexBytes    `json:"card_atr,omitempty"`
-	Notes       string      `json:"notes,omitempty"`
-	Determinism Determinism `json:"determinism"`
-	Exchanges   []Exchange  `json:"exchanges"`
+	Schema      string                    `json:"schema"`
+	CapturedAt  time.Time                 `json:"captured_at"`
+	Profile     string                    `json:"profile,omitempty"`
+	Reader      string                    `json:"reader,omitempty"`
+	CardATR     HexBytes                  `json:"card_atr,omitempty"`
+	CardInfo    *cardrecognition.CardInfo `json:"card_info,omitempty"`
+	Notes       string                    `json:"notes,omitempty"`
+	Determinism Determinism               `json:"determinism"`
+	Exchanges   []Exchange                `json:"exchanges"`
 }
 
 // Determinism records the caller-supplied randomness that was used
