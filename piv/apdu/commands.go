@@ -11,10 +11,17 @@
 // SET_MGMKEY = 0xFF) and YubiKey-specific data layouts. Behavior
 // against non-YubiKey PIV applets is unverified.
 //
-// PIV management-key authentication is intentionally not provided:
-// it is a multi-step GENERAL AUTHENTICATE challenge-response that
-// the caller must drive directly. A "simplified" single-call helper
-// would be wrong both protocol-wise and as a security primitive.
+// PIV management-key authentication is intentionally not provided
+// at this APDU-builder layer: it is a multi-step GENERAL
+// AUTHENTICATE challenge-response, and packaging it into a single
+// "authenticate management key" function at the APDU layer would
+// hide the round-trip structure from callers that need to see it
+// (for trace recording, fault injection, partial-flow testing).
+// The full auth flow lives in piv/session.AuthenticateManagementKey,
+// which composes the GENERAL AUTHENTICATE primitives this package
+// exposes (chal-rsp building blocks via GeneralAuthenticate).
+// Library consumers wanting a one-call mgmt-auth use piv/session;
+// consumers wanting the underlying APDUs use this package.
 //
 // Each function returns a plain *apdu.Command; the session's Transmit
 // method wraps it with secure messaging before sending.

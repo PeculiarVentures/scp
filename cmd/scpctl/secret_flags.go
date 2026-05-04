@@ -69,7 +69,7 @@ func registerSecretFlags(fs *flag.FlagSet, name, defaultValue, usage string) *se
 		stdinFlag: fs.Bool(name+"-stdin", false,
 			fmt.Sprintf("Read the %s from stdin (one line). Only one --*-stdin flag may be active per invocation.", name)),
 		filePath: fs.String(name+"-file", "",
-			fmt.Sprintf("Read the %s from the given file path. Trailing newline stripped. Keep mode 0600.", name)),
+			fmt.Sprintf("Read the %s from the given file path. Trailing newline stripped. File permissions must not permit group/world read (chmod 0600 or 0400); enforced on Unix.", name)),
 	}
 }
 
@@ -115,6 +115,35 @@ func (s *secretFlags) resolve(stdinSrc *singleShotStdin) (string, error) {
 		return line, nil
 	}
 	if *s.filePath != "" {
+		// Permission gate: secret files must not be group- or
+		// world-readable. Operators who use --*-file expect the
+		// file to be a hardened secret store; a 0644 file defeats
+		// the point because it surfaces the secret to every local
+		// process. Refusing here forces the operator to chmod 0600
+		// (or 0400) before continuing, which is the right habit.
+		//
+		// Symlinks: os.Stat follows symlinks, so a symlink to a
+		// 0600 target passes; a symlink to a 0644 target is
+		// refused, which is the safe behavior. We don't separately
+		// check the symlink mode itself because symlink modes on
+		// Linux are advisory; the target's mode is what matters.
+		//
+		// On Windows, file mode bits don't represent ACLs the way
+		// they do on Unix, and Go reports a synthesized mode. The
+		// check still fires structurally; if it produces false
+		// positives on Windows, the operator can fall back to
+		// --*-stdin or argv with the warning. This is a tradeoff
+		// in favor of safety on the platform where the check is
+		// meaningful (Linux/macOS production hosts).
+		info, err := os.Stat(*s.filePath)
+		if err != nil {
+			return "", fmt.Errorf("--%s-file: %w", s.name, err)
+		}
+		if mode := info.Mode().Perm(); mode&0o077 != 0 {
+			return "", fmt.Errorf(
+				"--%s-file %q has permissions %#o, which permits group/world read; chmod 0600 (or 0400) before retrying. Secret files are no safer than argv if anyone else on the host can read them.",
+				s.name, *s.filePath, mode)
+		}
 		raw, err := os.ReadFile(*s.filePath)
 		if err != nil {
 			return "", fmt.Errorf("--%s-file: %w", s.name, err)

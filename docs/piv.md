@@ -193,7 +193,7 @@ The three forms:
 |---|---|---|
 | `--<name> <value>` | Lab work, one-off invocations the operator chooses. | Visible in argv; leaks to history, ps, audit logs. |
 | `--<name>-stdin` | Piped from a credential helper or HSM agent: `printf '%s' "$pin" \| scpctl piv ...`. | Not in argv. Visible to whoever can ptrace the process or read the parent's piped output. |
-| `--<name>-file <path>` | Credential mounted from a tmpfs or a 0600 file. | Not in argv. File permissions are the gate; path is in argv but the value is not. |
+| `--<name>-file <path>` | Credential mounted from a tmpfs or a 0600 file. | Not in argv. File permissions are the gate; path is in argv but the value is not. scpctl refuses files whose mode permits group/world read (anything looser than 0600) on Unix. |
 
 The flags affected:
 

@@ -348,3 +348,68 @@ func TestSecretFlags_MgmtKeySecretsDoNotLeak(t *testing.T) {
 		t.Errorf("mgmt-key value (case-insensitive) leaked into output:\n%s", combined)
 	}
 }
+
+// TestSecretFlags_FilePermissionsRefusedWhenLooseOnUnix verifies
+// that --pin-file (and by extension every other --*-file flag,
+// since they share the resolve path) refuses to read a secret
+// file whose permissions allow group or world read. The
+// regression this protects against is the operator who creates
+// a file with default umask (often 0644) and points --pin-file
+// at it; the file form was advertised as more secure than argv,
+// but it isn't if anyone else on the host can read the file.
+//
+// Test creates a temp file with 0644, points --pin-file at it,
+// and asserts the error names both the actual mode and the
+// remediation. The check is structurally on every Unix-like
+// system; the test runs on every supported CI platform.
+func TestSecretFlags_FilePermissionsRefusedWhenLooseOnUnix(t *testing.T) {
+	dir := t.TempDir()
+	loose := filepath.Join(dir, "pin")
+	if err := os.WriteFile(loose, []byte("123456\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	pinFlag := registerSecretFlags(fs, "pin", "", "Application PIN.")
+	if err := fs.Parse([]string{"--pin-file", loose}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	_, err := pinFlag.resolve(nil)
+	if err == nil {
+		t.Fatal("expected error reading 0644 secret file")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "permits group/world read") {
+		t.Errorf("error should explain why the file was refused: %v", err)
+	}
+	if !strings.Contains(msg, "chmod 0600") {
+		t.Errorf("error should suggest the fix: %v", err)
+	}
+}
+
+// TestSecretFlags_FilePermissionsAcceptedWhen0600 is the positive
+// counterpart: the same file at 0600 should resolve without error.
+// Together with the refusal test, this pins the boundary at the
+// expected mode.
+func TestSecretFlags_FilePermissionsAcceptedWhen0600(t *testing.T) {
+	dir := t.TempDir()
+	tight := filepath.Join(dir, "pin")
+	if err := os.WriteFile(tight, []byte("123456\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	pinFlag := registerSecretFlags(fs, "pin", "", "Application PIN.")
+	if err := fs.Parse([]string{"--pin-file", tight}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	got, err := pinFlag.resolve(nil)
+	if err != nil {
+		t.Fatalf("0600 file should resolve: %v", err)
+	}
+	if got != "123456" {
+		t.Errorf("got %q, want %q", got, "123456")
+	}
+}
