@@ -385,6 +385,14 @@ func (c *Card) processPlain(cmd *apdu.Command) (*apdu.Response, error) {
 	switch cmd.INS {
 	case 0xA4:
 		return c.doSelect(cmd)
+	case 0xCA: // GET DATA — same handler as the pre-auth path in processAPDU.
+		// Reachable both unauthenticated (handled in processAPDU's switch
+		// because GP §4.8 permits GET DATA outside SM) and post-auth (this
+		// case, after processSecure unwraps). Keeping both dispatchers is
+		// a hazard — every INS that should work in both modes must be added
+		// twice — but factoring them is out of scope here. Tracked: TODO
+		// merge into a single per-INS dispatch table.
+		return c.doGetData(cmd)
 	case 0xFD: // Echo for testing
 		return &apdu.Response{Data: cmd.Data, SW1: 0x90, SW2: 0x00}, nil
 	case 0x47: // PIV GENERATE KEY
