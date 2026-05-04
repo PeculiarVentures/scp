@@ -174,7 +174,25 @@ scp-smoke piv-provision \
 
 Slots: `9a` (PIV Authentication), `9c` (Digital Signature), `9d` (Key Management), `9e` (Card Authentication), and the `82` retired-key range. Algorithms: `rsa2048`, `eccp256`, `eccp384`, plus YubiKey 5.7+ exclusives `ed25519` and `x25519`.
 
-**Real-card authorization caveat.** PIV `GENERATE KEY` and `PUT CERTIFICATE` are gated on PIV management-key authentication on stock cards. The library doesn't yet expose a management-key auth builder, so against a card with a non-default management key these writes will be refused with `6982`. On YubiKey 5.7+ with an SCP11 session, the firmware may accept SCP-authenticated provisioning in lieu of management auth; this varies by firmware. The mock card does not enforce PIV authorization, so the smoke test exercises wire-layer correctness, not real-world provisioning policy.
+**Management-key authentication.** PIV `GENERATE KEY` and `PUT CERTIFICATE` are gated on PIV management-key authentication on stock cards. Pass `--mgmt-key` (hex) and `--mgmt-key-algorithm` to run the mutual-auth flow before the writes. Without `--mgmt-key`, the auth step is skipped — useful for testing the rest of the sequence against a card you've already authenticated to out of band, or against the mock with no enforcement configured.
+
+```bash
+# YubiKey with the historic pre-5.7 factory 3DES default
+scp-smoke piv-provision \
+  --reader "YubiKey" --pin 123456 --slot 9a \
+  --mgmt-key default --mgmt-key-algorithm 3des \
+  --lab-skip-scp11-trust --confirm-write
+
+# YubiKey 5.7+ with a rotated AES-192 management key
+scp-smoke piv-provision \
+  --reader "YubiKey" --pin 123456 --slot 9a \
+  --mgmt-key A1B2C3...  --mgmt-key-algorithm aes192 \
+  --lab-skip-scp11-trust --confirm-write
+```
+
+`--mgmt-key default` is shorthand for the well-known pre-5.7 YubiKey 3DES factory key; only valid with `--mgmt-key-algorithm 3des`. The hex value accepts spaces, colons, and dashes for paste-from-docs convenience. Length is validated against the algorithm at the CLI boundary.
+
+The mock implements crypto-correct mutual auth when `PIVMgmtKey` and `PIVMgmtKeyAlgo` are configured; tests use this to round-trip the full flow without real hardware.
 
 ### `test` aggregator
 
@@ -212,7 +230,7 @@ The library implementations and behaviors validated by this tool are documented 
 
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision`, `test`.
-- Next: PIV management-key authentication builder in the `piv` package (so `piv-provision` works against cards with non-default management keys), custom SCP03 key flags for `bootstrap-oce` against rotated cards.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (with mgmt-key mutual auth), `test`.
+- Next: custom SCP03 key flags for `bootstrap-oce` against rotated cards (`--kvn` / `--enc` / `--mac` / `--dek`), and a `piv-mgmt-key-set` command that runs SetManagementKey with mutual auth as a precondition.
 - Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
 - Deferred: `restore-yubikey-factory` (destructive; needs explicit-destructive-confirmation flag, OCE-auth requirement, SCP11b refusal, YubiKey-only).
