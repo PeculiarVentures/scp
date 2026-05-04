@@ -3,6 +3,7 @@ package scp03
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -226,9 +227,12 @@ func TestParseInitUpdateResponse_MinLength(t *testing.T) {
 // to open a "secure" channel with publicly-known keys without ever naming
 // them. Now the caller has to type DefaultKeys themselves.
 func TestOpen_NilConfig_RejectsExplicitly(t *testing.T) {
-	_, err := Open(context.Background(), nil, nil)
+	_, err := Open(context.Background(), NewMockCard(DefaultKeys).Transport(), nil)
 	if err == nil {
 		t.Fatal("Open(nil cfg) should return an error, not silently use DefaultKeys")
+	}
+	if !strings.Contains(err.Error(), "Config is required") {
+		t.Errorf("error should mention Config is required (this test guards the cfg path, not the transport path); got: %v", err)
 	}
 }
 
@@ -236,7 +240,7 @@ func TestOpen_NilConfig_RejectsExplicitly(t *testing.T) {
 // StaticKeys is also rejected — otherwise &Config{} (no Keys set) would
 // hit the same footgun via a different path.
 func TestOpen_EmptyKeys_RejectsExplicitly(t *testing.T) {
-	_, err := Open(context.Background(), nil, &Config{})
+	_, err := Open(context.Background(), NewMockCard(DefaultKeys).Transport(), &Config{})
 	if err == nil {
 		t.Fatal("Open with empty Keys should return an error")
 	}
@@ -321,5 +325,20 @@ func TestStrictGPConfig(t *testing.T) {
 	}
 	if len(cfg.Keys.ENC) != 16 {
 		t.Errorf("Keys.ENC length = %d, want 16", len(cfg.Keys.ENC))
+	}
+}
+
+// TestOpen_NilTransport_RejectsExplicitly confirms that scp03.Open
+// with a nil transport fails fast at the API boundary rather than
+// panicking with a nil-pointer dereference inside the SELECT path.
+// The guard is the very first check in Open so the failure surfaces
+// before any other validation work.
+func TestOpen_NilTransport_RejectsExplicitly(t *testing.T) {
+	_, err := Open(context.Background(), nil, &Config{Keys: DefaultKeys})
+	if err == nil {
+		t.Fatal("Open(nil transport) should return an error")
+	}
+	if !strings.Contains(err.Error(), "transport is required") {
+		t.Errorf("error should mention transport is required; got: %v", err)
 	}
 }

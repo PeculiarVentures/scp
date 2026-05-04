@@ -127,11 +127,29 @@ func TestStrictGPConfigs_HaveCorrectShape(t *testing.T) {
 // empty-data policy without the caller naming either. Matching
 // scp03.Open's contract: Config is required.
 func TestOpen_NilConfig_RejectsExplicitly(t *testing.T) {
-	_, err := Open(context.Background(), nil, nil)
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	_, err = Open(context.Background(), mc.Transport(), nil)
 	if err == nil {
 		t.Fatal("Open(nil cfg) should return an error, not silently default")
 	}
 	if !strings.Contains(err.Error(), "Config is required") {
 		t.Errorf("error should mention Config is required; got: %v", err)
+	}
+}
+
+// TestOpen_NilTransport_RejectsExplicitly confirms that scp11.Open
+// with a nil transport fails fast at the API boundary. The guard
+// is the very first check so the failure surfaces before config
+// validation or any other work.
+func TestOpen_NilTransport_RejectsExplicitly(t *testing.T) {
+	_, err := Open(context.Background(), nil, YubiKeyDefaultSCP11bConfig())
+	if err == nil {
+		t.Fatal("Open(nil transport) should return an error")
+	}
+	if !strings.Contains(err.Error(), "transport is required") {
+		t.Errorf("error should mention transport is required; got: %v", err)
 	}
 }

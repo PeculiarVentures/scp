@@ -93,3 +93,29 @@ func TestOpenSCP11_NilConfig_RejectsExplicitly(t *testing.T) {
 		t.Fatal("OpenSCP11(nil cfg) should return an error")
 	}
 }
+
+// TestOpenSCP03_NilTransport / TestOpenSCP11_NilTransport /
+// TestOpenUnauthenticated_NilTransport confirm each entry point
+// guards against a nil transport at the API boundary, matching
+// scp03.Open and scp11.Open.
+
+func TestOpenSCP03_NilTransport(t *testing.T) {
+	_, err := OpenSCP03(context.Background(), nil, &scp03.Config{Keys: scp03.DefaultKeys})
+	if err == nil {
+		t.Fatal("OpenSCP03(nil transport) should return an error")
+	}
+}
+
+func TestOpenSCP11_NilTransport(t *testing.T) {
+	_, err := OpenSCP11(context.Background(), nil, scp11.YubiKeyDefaultSCP11bConfig())
+	if err == nil {
+		t.Fatal("OpenSCP11(nil transport) should return an error")
+	}
+}
+
+func TestOpenUnauthenticated_NilTransport(t *testing.T) {
+	_, err := OpenUnauthenticated(context.Background(), nil)
+	if err == nil {
+		t.Fatal("OpenUnauthenticated(nil transport) should return an error")
+	}
+}

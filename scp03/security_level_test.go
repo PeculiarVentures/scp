@@ -31,7 +31,7 @@ func TestOpen_RejectsCDECWithoutCMAC(t *testing.T) {
 		KeyVersion:    0xFF,
 		SecurityLevel: channel.LevelCDEC, // C-DEC alone, no C-MAC
 	}
-	_, err := Open(context.Background(), nil, cfg)
+	_, err := Open(context.Background(), NewMockCard(DefaultKeys).Transport(), cfg)
 	if err == nil {
 		t.Fatal("Open with C-DEC sans C-MAC should fail; got success")
 	}
@@ -48,7 +48,7 @@ func TestOpen_RejectsRENCWithoutRMAC(t *testing.T) {
 		KeyVersion:    0xFF,
 		SecurityLevel: channel.LevelCMAC | channel.LevelCDEC | channel.LevelRENC, // R-ENC alone, no R-MAC
 	}
-	_, err := Open(context.Background(), nil, cfg)
+	_, err := Open(context.Background(), NewMockCard(DefaultKeys).Transport(), cfg)
 	if err == nil {
 		t.Fatal("Open with R-ENC sans R-MAC should fail; got success")
 	}

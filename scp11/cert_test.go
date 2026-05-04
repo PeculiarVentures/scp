@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PeculiarVentures/scp/channel"
+	"github.com/PeculiarVentures/scp/mockcard"
 )
 
 // ============================================================
@@ -137,12 +138,16 @@ func TestSCP11_RejectsNonFullSecurityLevel(t *testing.T) {
 		channel.LevelCMAC | channel.LevelCDEC,
 		channel.LevelCMAC | channel.LevelRMAC,
 	}
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
 	for _, level := range levels {
 		cfg := &Config{
 			Variant:       SCP11b,
 			SecurityLevel: level,
 		}
-		_, err := Open(context.Background(), nil, cfg)
+		_, err := Open(context.Background(), mc.Transport(), cfg)
 		if err == nil {
 			t.Errorf("SecurityLevel 0x%02X should be rejected", level)
 		}

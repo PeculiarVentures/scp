@@ -34,7 +34,7 @@ func TestOpen_RejectsMixedKeyLengths(t *testing.T) {
 				},
 				KeyVersion: 0xFF,
 			}
-			_, err := Open(context.Background(), nil, cfg)
+			_, err := Open(context.Background(), NewMockCard(DefaultKeys).Transport(), cfg)
 			if err == nil {
 				t.Fatal("Open should have rejected mixed key lengths")
 			}

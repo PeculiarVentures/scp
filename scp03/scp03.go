@@ -241,6 +241,9 @@ type Session struct {
 // keys on a factory-fresh card, set cfg.Keys = scp03.DefaultKeys
 // explicitly. The act of typing that name is the consent.
 func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, error) {
+	if t == nil {
+		return nil, errors.New("scp03: transport is required")
+	}
 	if cfg == nil {
 		return nil, errors.New("scp03: Config is required (cfg.Keys cannot be nil)")
 	}
