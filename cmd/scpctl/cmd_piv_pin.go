@@ -55,14 +55,18 @@ func cmdPIVPuk(ctx context.Context, env *runEnv, args []string) error {
 func cmdPIVPinVerify(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv pin verify", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
-	pin := fs.String("pin", "", "Application PIN to verify.")
+	pinFlag := registerSecretFlags(fs, "pin", "", "Application PIN to verify.")
 	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
-	if *pin == "" {
-		return &usageError{msg: "--pin is required"}
+	pin, err := pinFlag.resolve(env.stdin)
+	if err != nil {
+		return err
+	}
+	if pin == "" {
+		return &usageError{msg: "--pin (or --pin-stdin / --pin-file) is required"}
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -83,7 +87,7 @@ func cmdPIVPinVerify(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
-	if err := sess.VerifyPIN(ctx, []byte(*pin)); err != nil {
+	if err := sess.VerifyPIN(ctx, []byte(pin)); err != nil {
 		// Decode the retry count when it's available and surface it
 		// without leaking the wrong-PIN state ambiguously.
 		if retries, ok := piv.RetriesRemaining(err); ok {
@@ -106,15 +110,23 @@ func cmdPIVPinVerify(ctx context.Context, env *runEnv, args []string) error {
 func cmdPIVPinChange(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv pin change", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
-	oldPIN := fs.String("old-pin", "", "Current application PIN.")
-	newPIN := fs.String("new-pin", "", "New application PIN.")
+	oldFlag := registerSecretFlags(fs, "old-pin", "", "Current application PIN.")
+	newFlag := registerSecretFlags(fs, "new-pin", "", "New application PIN.")
 	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
-	if *oldPIN == "" || *newPIN == "" {
-		return &usageError{msg: "--old-pin and --new-pin are both required"}
+	oldPIN, err := oldFlag.resolve(env.stdin)
+	if err != nil {
+		return err
+	}
+	newPIN, err := newFlag.resolve(env.stdin)
+	if err != nil {
+		return err
+	}
+	if oldPIN == "" || newPIN == "" {
+		return &usageError{msg: "old PIN and new PIN are both required (--old-pin/--old-pin-stdin/--old-pin-file and --new-pin/--new-pin-stdin/--new-pin-file)"}
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -135,7 +147,7 @@ func cmdPIVPinChange(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
-	if err := sess.ChangePIN(ctx, []byte(*oldPIN), []byte(*newPIN)); err != nil {
+	if err := sess.ChangePIN(ctx, []byte(oldPIN), []byte(newPIN)); err != nil {
 		if retries, ok := piv.RetriesRemaining(err); ok {
 			report.Fail("change pin", fmt.Sprintf("wrong old PIN (%d retries left)", retries))
 		} else if piv.IsPINBlocked(err) {
@@ -153,15 +165,23 @@ func cmdPIVPinChange(ctx context.Context, env *runEnv, args []string) error {
 func cmdPIVPinUnblock(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv pin unblock", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
-	puk := fs.String("puk", "", "PUK (PIN unblocking key).")
-	newPIN := fs.String("new-pin", "", "New application PIN to set after unblock.")
+	pukFlag := registerSecretFlags(fs, "puk", "", "PUK (PIN unblocking key).")
+	newPINFlag := registerSecretFlags(fs, "new-pin", "", "New application PIN to set after unblock.")
 	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
-	if *puk == "" || *newPIN == "" {
-		return &usageError{msg: "--puk and --new-pin are both required"}
+	puk, err := pukFlag.resolve(env.stdin)
+	if err != nil {
+		return err
+	}
+	newPIN, err := newPINFlag.resolve(env.stdin)
+	if err != nil {
+		return err
+	}
+	if puk == "" || newPIN == "" {
+		return &usageError{msg: "PUK and new PIN are both required (--puk/--puk-stdin/--puk-file and --new-pin/--new-pin-stdin/--new-pin-file)"}
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -182,7 +202,7 @@ func cmdPIVPinUnblock(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
-	if err := sess.UnblockPIN(ctx, []byte(*puk), []byte(*newPIN)); err != nil {
+	if err := sess.UnblockPIN(ctx, []byte(puk), []byte(newPIN)); err != nil {
 		if retries, ok := piv.RetriesRemaining(err); ok {
 			report.Fail("unblock pin", fmt.Sprintf("wrong PUK (%d retries left)", retries))
 		} else if errors.Is(err, piv.ErrNotAuthenticated) {
@@ -200,15 +220,23 @@ func cmdPIVPinUnblock(ctx context.Context, env *runEnv, args []string) error {
 func cmdPIVPukChange(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv puk change", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
-	oldPUK := fs.String("old-puk", "", "Current PUK.")
-	newPUK := fs.String("new-puk", "", "New PUK.")
+	oldFlag := registerSecretFlags(fs, "old-puk", "", "Current PUK.")
+	newFlag := registerSecretFlags(fs, "new-puk", "", "New PUK.")
 	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
-	if *oldPUK == "" || *newPUK == "" {
-		return &usageError{msg: "--old-puk and --new-puk are both required"}
+	oldPUK, err := oldFlag.resolve(env.stdin)
+	if err != nil {
+		return err
+	}
+	newPUK, err := newFlag.resolve(env.stdin)
+	if err != nil {
+		return err
+	}
+	if oldPUK == "" || newPUK == "" {
+		return &usageError{msg: "old PUK and new PUK are both required (--old-puk/--old-puk-stdin/--old-puk-file and --new-puk/--new-puk-stdin/--new-puk-file)"}
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -229,7 +257,7 @@ func cmdPIVPukChange(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
-	if err := sess.ChangePUK(ctx, []byte(*oldPUK), []byte(*newPUK)); err != nil {
+	if err := sess.ChangePUK(ctx, []byte(oldPUK), []byte(newPUK)); err != nil {
 		if retries, ok := piv.RetriesRemaining(err); ok {
 			report.Fail("change puk", fmt.Sprintf("wrong old PUK (%d retries left)", retries))
 		} else {

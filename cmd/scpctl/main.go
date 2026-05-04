@@ -124,6 +124,7 @@ func main() {
 		out:     os.Stdout,
 		errOut:  os.Stderr,
 		connect: pcscConnect,
+		stdin:   newSingleShotStdin(os.Stdin),
 	}
 
 	group := os.Args[1]
@@ -192,6 +193,14 @@ type runEnv struct {
 	out     io.Writer
 	errOut  io.Writer
 	connect connectFunc
+
+	// stdin is the single-shot stdin source used by --*-stdin
+	// secret flags. Production main wires this to os.Stdin; tests
+	// that exercise --*-stdin pass a bytes.Reader instead. Tests
+	// that do not exercise stdin can leave this nil; resolve() does
+	// not call into it unless --*-stdin is set, so the nil case is
+	// a programmer error rather than a runtime crash.
+	stdin *singleShotStdin
 }
 
 func printUsage(w io.Writer) {
@@ -373,6 +382,28 @@ Channel mode (destructive and credential-bearing subcommands):
   --lab-skip-scp11-trust    Skip card-cert validation entirely.
                             Lab use only; opportunistic encryption,
                             not authenticated key agreement.
+
+Credential input (PIN, PUK, and management-key flags):
+  --<name>                  Pass the credential as an argv value.
+                            Visible in shell history (~/.bash_history)
+                            and process listings (ps, /proc/<pid>/
+                            cmdline). Acceptable for lab work.
+  --<name>-stdin            Read the credential from stdin (one
+                            line; trailing newline stripped). Only
+                            one --*-stdin flag may be active per
+                            invocation because stdin is single-
+                            consumer. Use for piped credentials
+                            (e.g. printf with no trailing newline
+                            piped to scpctl).
+  --<name>-file <path>      Read the credential from a file. Whole
+                            file is read; one trailing newline (if
+                            present) is stripped. Keep the file at
+                            mode 0600.
+
+  Affected flags: --pin, --old-pin, --new-pin, --puk, --old-puk,
+  --new-puk, --mgmt-key, --old-mgmt-key, --new-mgmt-key. Each
+  registers all three forms; the three are mutually exclusive per
+  logical credential.
 
 See docs/piv.md for the threat-model split between raw and SCP11b.
 

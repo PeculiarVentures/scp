@@ -178,6 +178,44 @@ scpctl piv key generate --slot 9a --confirm-write \
 
 The PIN, PUK, and management-key change paths in `scpctl piv pin`, `scpctl piv puk`, and `scpctl piv mgmt` accept the same flags. They are technically not "destructive" in the `--confirm-write` sense (they manipulate counters that the card itself enforces), but the secret material they carry is exactly what an untrusted host would target. Pass `--scp11b --trust-roots ...` whenever the host between you and the card is not in your trust boundary.
 
+## Credential input
+
+Every PIN, PUK, and management-key flag in the `scpctl piv` surface registers three input forms. The forms are mutually exclusive per logical credential, and `-stdin` is single-consumer per process.
+
+The reason is that secrets in `argv` leak. The shell records every command line in history (`~/.bash_history`, `~/.zsh_history`, `~/.psql_history`-style files for any tool that maintains its own). The kernel exposes process command lines through `/proc/<pid>/cmdline`, which `ps`, `top`, and any monitoring agent on the host can read. Audit infrastructure that captures executions records argv. A PIN passed as `--pin 123456` ends up in three or four of those places by default; a management key passed as `--mgmt-key 0102030405060708...` ends up in the same places and is generally far more sensitive than the PIN.
+
+The three forms:
+
+| Form | Use case | Threat model |
+|---|---|---|
+| `--<name> <value>` | Lab work, one-off invocations the operator chooses. | Visible in argv; leaks to history, ps, audit logs. |
+| `--<name>-stdin` | Piped from a credential helper or HSM agent: `printf '%s' "$pin" \| scpctl piv ...`. | Not in argv. Visible to whoever can ptrace the process or read the parent's piped output. |
+| `--<name>-file <path>` | Credential mounted from a tmpfs or a 0600 file. | Not in argv. File permissions are the gate; path is in argv but the value is not. |
+
+The flags affected:
+
+```
+--pin / --pin-stdin / --pin-file
+--old-pin / --old-pin-stdin / --old-pin-file
+--new-pin / --new-pin-stdin / --new-pin-file
+--puk / --puk-stdin / --puk-file
+--old-puk / --old-puk-stdin / --old-puk-file
+--new-puk / --new-puk-stdin / --new-puk-file
+--mgmt-key / --mgmt-key-stdin / --mgmt-key-file
+--old-mgmt-key / --old-mgmt-key-stdin / --old-mgmt-key-file
+--new-mgmt-key / --new-mgmt-key-stdin / --new-mgmt-key-file
+```
+
+Single-consumer stdin means a command like `scpctl piv pin change --old-pin-stdin --new-pin-stdin` is a usage error: only one credential per invocation can come from stdin. Workarounds:
+
+- Use `--*-file` for one and `--*-stdin` for the other.
+- Use `--*-file` for both. This is the usual production pattern with two tmpfs-mounted files.
+- Use `--*` argv for the less-sensitive credential and `--*-stdin` for the more-sensitive one. Acceptable when the operator has decided the trade-off explicitly.
+
+Trailing newline handling: both `-stdin` and `-file` strip a single trailing newline if present. A PIN written to a file with `printf '%s\n' "$pin" > pinfile` and a PIN written with `printf '%s' "$pin" > pinfile` resolve to the same value. Embedded newlines inside the credential are preserved as-is, which is the right answer for management keys (binary hex strings have no newlines anyway) but worth knowing for any future credential type that might legitimately contain a newline.
+
+The literal `default` for management-key flags continues to work in all three forms: `--mgmt-key default`, `printf default | scpctl ... --mgmt-key-stdin`, or a file containing `default`. The well-known factory value resolution happens after credential resolution.
+
 ## Adding a new card profile
 
 When a non-YubiKey card has been validated end to end:
