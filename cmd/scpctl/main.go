@@ -41,6 +41,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
@@ -56,7 +57,14 @@ var version = "dev"
 // flows (probe a card, read its applet info), 'smoke' covers the
 // existing SCP-secured provisioning paths until they migrate over.
 var pivCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
-	"info": cmdPIVInfo,
+	"info":   cmdPIVInfo,
+	"pin":    cmdPIVPin,
+	"puk":    cmdPIVPuk,
+	"mgmt":   cmdPIVMgmt,
+	"key":    cmdPIVKey,
+	"cert":   cmdPIVCert,
+	"object": cmdPIVObject,
+	"reset":  cmdPIVGroupReset,
 }
 
 // sdCommands maps the sd-group subcommand names. Today only 'info'
@@ -286,10 +294,20 @@ func (u *usageError) Error() string { return u.msg }
 // usage errors and uses ContinueOnError so errors propagate up rather
 // than calling os.Exit inside the flag library.
 //
-// The flag-set name is the full "scpctl smoke <sub>" form so flag
-// usage messages match what the user typed.
+// The name argument is the full subcommand path that should appear
+// in usage messages. Callers in the smoke group still pass the bare
+// subcommand and get the "scpctl smoke <sub>" prefix automatically;
+// callers in other groups pass the full "scpctl piv key generate"
+// form to keep the usage line accurate.
 func newSubcommandFlagSet(name string, env *runEnv) *flag.FlagSet {
-	fs := flag.NewFlagSet("scpctl smoke "+name, flag.ContinueOnError)
+	prefix := "scpctl"
+	// Heuristic: if name does not already start with a known group
+	// prefix, treat it as a smoke subcommand for back-compat with
+	// the original scp-smoke help shape.
+	if !strings.HasPrefix(name, "piv ") && !strings.HasPrefix(name, "sd ") && !strings.HasPrefix(name, "smoke ") {
+		prefix = "scpctl smoke"
+	}
+	fs := flag.NewFlagSet(prefix+" "+name, flag.ContinueOnError)
 	fs.SetOutput(env.errOut)
 	return fs
 }
@@ -299,20 +317,43 @@ func pivUsage(w io.Writer) {
 
 Usage:
   scpctl piv <subcommand> [flags]
+  scpctl piv <group> <verb> [flags]
 
 Subcommands:
-  info     Probe the PIV applet (SELECT AID PIV + GET VERSION) and
-           report the detected profile and capability set. Read-only,
-           no authentication, no state change. Use this before
-           deciding whether to run scpctl smoke piv-provision.
+  info                  Probe the PIV applet and report the detected
+                        profile and capability set. Read-only.
 
-Forthcoming subcommands (still reachable under 'scpctl smoke' for now):
-  pin verify | pin change | puk change | pin unblock
-  mgmt auth | mgmt change-key
-  key generate | key import | key attest
-  cert put | cert get | cert delete
-  object get | object put
-  reset
+  pin verify            Verify the application PIN.
+  pin change            Change the application PIN.
+  pin unblock           Use the PUK to unblock and reset the PIN.
+  puk change            Change the PUK.
+
+  mgmt auth             Authenticate to the PIV management key.
+  mgmt change-key       Rotate the PIV management key. Destructive.
+
+  key generate          Generate an asymmetric key in a slot. Destructive.
+  key attest            Fetch the YubiKey attestation certificate
+                        for a slot (YubiKey-only).
+
+  cert get              Read the certificate from a slot.
+  cert put              Install a certificate into a slot. Destructive.
+  cert delete           Clear the certificate from a slot. Destructive.
+
+  object get            Read a PIV data object by ID.
+  object put            Write a PIV data object by ID. Destructive.
+
+  reset                 Reset the PIV applet to factory state. Erases
+                        all slots, certificates, and credentials.
+                        YubiKey-only. Destructive. The card-side
+                        precondition (PIN and PUK both blocked) is
+                        the operator's responsibility; for the
+                        block-then-reset harness flow, see
+                        'scpctl smoke piv-reset'.
+
+Destructive subcommands all require --confirm-write. Operations that
+the active profile does not claim (e.g. ATTEST under StandardPIV,
+Ed25519 under YubiKey 5.6) are refused host-side before any APDU
+goes on the wire, with piv.ErrUnsupportedByProfile.
 
 Use "scpctl piv <subcommand> -h" for per-command flags.
 `)
