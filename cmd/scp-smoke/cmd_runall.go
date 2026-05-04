@@ -25,8 +25,12 @@ import (
 func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("test", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
+	trustRoots := fs.String("trust-roots", "",
+		"Path to PEM bundle of trusted SCP11 card-cert root CAs. Forwarded to "+
+			"scp11b-sd-read, scp11a-sd-read, scp11b-piv-verify. Mutually exclusive "+
+			"with --lab-skip-scp11-trust.")
 	labSkipTrust := fs.Bool("lab-skip-scp11-trust", false,
-		"Skip SCP11 card certificate validation. Lab use only.")
+		"Skip SCP11 card certificate validation. Lab use only. Mutually exclusive with --trust-roots.")
 	pin := fs.String("pin", "",
 		"PIV PIN. If empty, the SCP11b PIV smoke check is skipped.")
 	oceKeyPath := fs.String("oce-key", "",
@@ -36,6 +40,10 @@ func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if *labSkipTrust && *trustRoots != "" {
+		return &usageError{msg: "--trust-roots and --lab-skip-scp11-trust are mutually exclusive"}
+	}
+	trustConfigured := *labSkipTrust || *trustRoots != ""
 
 	type outcome struct {
 		name   string
@@ -71,16 +79,21 @@ func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 	scp11bArgs := append([]string(nil), commonArgs...)
 	if *labSkipTrust {
 		scp11bArgs = append(scp11bArgs, "--lab-skip-scp11-trust")
+	}
+	if *trustRoots != "" {
+		scp11bArgs = append(scp11bArgs, "--trust-roots", *trustRoots)
+	}
+	if trustConfigured {
 		run("scp11b-sd-read", cmdSCP11bSDRead, scp11bArgs)
 	} else {
-		skip("scp11b-sd-read", "no trust roots; pass --lab-skip-scp11-trust for wire-only smoke")
+		skip("scp11b-sd-read", "no trust configured; pass --trust-roots <pem> or --lab-skip-scp11-trust")
 	}
 
 	switch {
 	case *oceKeyPath == "" || *oceCertPath == "":
 		skip("scp11a-sd-read", "no --oce-key/--oce-cert supplied")
-	case !*labSkipTrust:
-		skip("scp11a-sd-read", "no trust roots; pass --lab-skip-scp11-trust for wire-only smoke")
+	case !trustConfigured:
+		skip("scp11a-sd-read", "no trust configured; pass --trust-roots <pem> or --lab-skip-scp11-trust")
 	default:
 		scp11aArgs := append([]string(nil), scp11bArgs...)
 		scp11aArgs = append(scp11aArgs, "--oce-key", *oceKeyPath, "--oce-cert", *oceCertPath)
@@ -90,8 +103,8 @@ func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 	switch {
 	case *pin == "":
 		skip("scp11b-piv-verify", "no --pin supplied")
-	case !*labSkipTrust:
-		skip("scp11b-piv-verify", "no trust roots; pass --lab-skip-scp11-trust for wire-only smoke")
+	case !trustConfigured:
+		skip("scp11b-piv-verify", "no trust configured; pass --trust-roots <pem> or --lab-skip-scp11-trust")
 	default:
 		pivArgs := append([]string(nil), scp11bArgs...)
 		pivArgs = append(pivArgs, "--pin", *pin)

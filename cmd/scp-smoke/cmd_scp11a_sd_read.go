@@ -55,8 +55,7 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 		"OCE Key ID on the card (P2 of PERFORM SECURITY OPERATION). Default 0x10 (KeyIDOCE per GP §7.1.1).")
 	oceKVN := fs.Int("oce-kvn", 0x03,
 		"OCE Key Version Number on the card (P1 of PERFORM SECURITY OPERATION). Default 0x03 matches Yubico factory provisioning.")
-	labSkipTrust := fs.Bool("lab-skip-scp11-trust", false,
-		"Skip SCP11 card certificate validation. Lab use only — separates wire-protocol failures from trust-bootstrap failures.")
+	trust := registerTrustFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
@@ -100,13 +99,11 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 		OCECertificates: oceChain,
 		OCEKeyReference: scp11.KeyRef{KID: byte(*oceKID), KVN: byte(*oceKVN)},
 	}
-	if *labSkipTrust {
-		cfg.InsecureSkipCardAuthentication = true
-		report.Pass("trust mode", "lab-skip (card cert NOT validated)")
-	} else {
-		// Same posture as scp11b-sd-read: until the CLI learns to
-		// load a pinned trust root, the only honest outcome is SKIP.
-		report.Skip("trust mode", "no trust roots configured; use --lab-skip-scp11-trust for wire-protocol smoke")
+	proceed, err := trust.applyTrust(cfg, report)
+	if err != nil {
+		return err
+	}
+	if !proceed {
 		_ = report.Emit(env.out, *jsonMode)
 		return nil
 	}

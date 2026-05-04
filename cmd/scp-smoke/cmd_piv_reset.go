@@ -56,8 +56,7 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv-reset", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	labSkipTrust := fs.Bool("lab-skip-scp11-trust", false,
-		"Skip SCP11 card certificate validation. Lab use only.")
+	trust := registerTrustFlags(fs)
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, piv-reset runs in dry-run mode and prints what would happen.")
 	if err := fs.Parse(args); err != nil {
@@ -85,11 +84,11 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.SelectAID = scp11.AIDPIV
 	cfg.ApplicationAID = nil
-	if *labSkipTrust {
-		cfg.InsecureSkipCardAuthentication = true
-		report.Pass("trust mode", "lab-skip (card cert NOT validated)")
-	} else {
-		report.Skip("trust mode", "no trust roots configured; use --lab-skip-scp11-trust for wire-protocol smoke")
+	proceed, err := trust.applyTrust(cfg, report)
+	if err != nil {
+		return err
+	}
+	if !proceed {
 		_ = report.Emit(env.out, *jsonMode)
 		return nil
 	}
