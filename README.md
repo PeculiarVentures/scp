@@ -150,7 +150,7 @@ sess.Close()
 | `piv` | YubiKey-flavored PIV command builders (APDU only â€” no PIV session layer; see package doc) |
 | `mockcard` | In-memory SCP11 Security Domain for testing |
 
-A separate hardware-validation binary lives in [`cmd/scp-smoke`](./cmd/scp-smoke). It exercises SCP03, SCP11b, and SCP11b-over-PIV against a real PC/SC card and prints PASS/FAIL/SKIP results. See its README for details.
+A separate hardware-validation binary lives in [`cmd/scpctl`](./cmd/scpctl). It exercises SCP03, SCP11b, and SCP11b-over-PIV against a real PC/SC card and prints PASS/FAIL/SKIP results. See its README for details.
 
 ## Security Domain Management
 
@@ -264,7 +264,7 @@ sess, err := scp11.Open(ctx, t, cfg)
 
 A few points worth knowing for this profile specifically:
 
-- **`InsecureSkipCardAuthentication` is the lab escape hatch, not a production option.** Setting it disables the Yubico-root check entirely; the SCP11b channel still establishes (the card still authenticates to the host with its private key) but you lose the binding between the channel and a particular Yubico-issued identity. Only set it when the goal is to separate "is the wire protocol working?" from "is trust bootstrap configured correctly?". The [`scp-smoke`](./cmd/scp-smoke) harness exposes this via `--lab-skip-scp11-trust` for exactly that purpose.
+- **`InsecureSkipCardAuthentication` is the lab escape hatch, not a production option.** Setting it disables the Yubico-root check entirely; the SCP11b channel still establishes (the card still authenticates to the host with its private key) but you lose the binding between the channel and a particular Yubico-issued identity. Only set it when the goal is to separate "is the wire protocol working?" from "is trust bootstrap configured correctly?". The [`scpctl`](./cmd/scpctl) harness exposes this via `--lab-skip-scp11-trust` for exactly that purpose.
 
 - **SCP11b is read-only against the Security Domain.** It authenticates the card to the host but not the host to the card, so `securitydomain.OpenSCP11` over SCP11b will refuse OCE-gated writes (key rotation, reset, etc.) regardless of how the trust policy is configured. SCP11a or SCP11c, with an OCE private key and matching trust material on the card, is the path for write authorization.
 
@@ -433,7 +433,7 @@ These mocks are not reference implementations of GlobalPlatform card behavior â€
 
 ### Hardware verification
 
-For end-to-end verification against an actual card, the [`cmd/scp-smoke`](./cmd/scp-smoke) binary runs a smoke suite over a PC/SC reader. PASS/FAIL/SKIP per check, plus a `--json` flag for machine consumption. The current command set covers the read paths, the trust-bootstrap path, and PIV provisioning over an SCP-secured channel:
+For end-to-end verification against an actual card, the [`cmd/scpctl`](./cmd/scpctl) binary runs a smoke suite over a PC/SC reader. PASS/FAIL/SKIP per check, plus a `--json` flag for machine consumption. The current command set covers the read paths, the trust-bootstrap path, and PIV provisioning over an SCP-secured channel:
 
 | Subcommand | What it does |
 |---|---|
@@ -449,7 +449,7 @@ For end-to-end verification against an actual card, the [`cmd/scp-smoke`](./cmd/
 | `test` | Run probe + the SD/PIV reads in sequence with a single PASS/FAIL/SKIP summary. Provisioning commands are not in `test` (they're destructive and sequencing-sensitive). |
 
 ```
-scp-smoke test --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
+scpctl smoke test --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
 ```
 
 The harness lives in its own Go submodule because PC/SC needs CGo; see its README for build prerequisites, the worked examples for each subcommand, and the safety-relevant notes about `--lab-skip-scp11-trust` and the `--confirm-write` destructive gate.
