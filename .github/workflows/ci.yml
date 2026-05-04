@@ -114,8 +114,11 @@ jobs:
   # main submodules job because they require Go 1.24+ (forced by
   # google.golang.org/grpc >= 1.79.3, which is the first release
   # that includes the CVE-2026-33186 authorization-bypass fix).
-  # No CGo, so no apt install is needed and the OS matrix can stay
-  # OS-diverse without extra setup steps.
+  #
+  # transport/grpc/example/server imports transport/pcsc (CGo) so
+  # this job needs libpcsclite-dev on Linux just like the
+  # submodules job. macOS has PC/SC built into the OS, no install
+  # needed.
   grpc-submodules:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -130,6 +133,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
+
+      - name: Install pcsclite headers (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcsclite-dev
 
       - name: transport/grpc — verify, vet, test
         working-directory: transport/grpc
@@ -186,7 +195,8 @@ jobs:
           args: --timeout=5m
 
   # Lint for the grpc submodules — separate from submodules-lint
-  # because they require Go 1.24+. No CGo, so no apt install.
+  # because they require Go 1.24+. transport/grpc/example/server
+  # imports transport/pcsc (CGo) so libpcsclite-dev is required.
   grpc-submodules-lint:
     runs-on: ubuntu-latest
     steps:
@@ -196,6 +206,11 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+
+      - name: Install pcsclite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcsclite-dev
 
       - name: golangci-lint transport/grpc
         uses: golangci/golangci-lint-action@v6
