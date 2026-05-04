@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -59,8 +58,18 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	trust := registerTrustFlags(fs)
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, piv-reset runs in dry-run mode and prints what would happen.")
+	maxAttempts := fs.Int("max-block-attempts", 16,
+		"Maximum wrong-PIN/wrong-PUK attempts before giving up trying to block "+
+			"a credential. YubiKey defaults to 3 retries, so 3 attempts is the typical "+
+			"answer; the cap exists so a card returning unexpected status doesn't loop "+
+			"forever. Yubico supports retry counts up to 255; raise this for cards "+
+			"configured with high retry counts.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+	if *maxAttempts < 1 || *maxAttempts > 255 {
+		return &usageError{msg: fmt.Sprintf(
+			"--max-block-attempts must be in [1, 255]; got %d", *maxAttempts)}
 	}
 
 	report := &Report{Subcommand: "piv-reset", Reader: *reader}
@@ -104,7 +113,7 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("open SCP11b vs PIV", "")
 
 	// Step 1: block PIN.
-	pinAttempts, err := blockPIVPIN(ctx, sess)
+	pinAttempts, err := blockPIVPIN(ctx, sess, *maxAttempts)
 	data.PINAttemptsUsed = pinAttempts
 	if err != nil {
 		report.Fail("block PIN", err.Error())
@@ -115,7 +124,7 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("block PIN", fmt.Sprintf("blocked after %d wrong attempts", pinAttempts))
 
 	// Step 2: block PUK.
-	pukAttempts, err := blockPIVPUK(ctx, sess)
+	pukAttempts, err := blockPIVPUK(ctx, sess, *maxAttempts)
 	data.PUKAttemptsUsed = pukAttempts
 	if err != nil {
 		report.Fail("block PUK", err.Error())
@@ -159,15 +168,18 @@ type sessionTransmitter interface {
 // The "wrong" PIN here is "00000000" — distinct from any of the
 // common factory defaults (123456, 999999, etc.) so we don't
 // accidentally succeed on a card someone left at a non-default
-// retail PIN.
+// retail PIN. (If somebody's actual PIN really is "00000000", the
+// 9000 response triggers the unexpected-SW abort below — safer
+// than completing the reset against the wrong assumptions.)
 //
 // Returns the number of attempts made before blocking. The retry
 // counter on YubiKey defaults to 3, so 3 attempts is the typical
-// answer; the loop caps at 10 to avoid infinite spinning if the
-// card returns something unexpected.
-func blockPIVPIN(ctx context.Context, sess sessionTransmitter) (int, error) {
+// answer; maxAttempts caps the loop so a card returning unexpected
+// status doesn't loop forever. Yubico supports retry counts up to
+// 255 and the CLI flag exposes that range.
+func blockPIVPIN(ctx context.Context, sess sessionTransmitter, maxAttempts int) (int, error) {
 	wrong := []byte("00000000")
-	for attempt := 1; attempt <= 10; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		cmd, err := piv.VerifyPIN(wrong)
 		if err != nil {
 			return attempt - 1, fmt.Errorf("build VERIFY PIN: %w", err)
@@ -186,7 +198,7 @@ func blockPIVPIN(ctx context.Context, sess sessionTransmitter) (int, error) {
 			return attempt, fmt.Errorf("unexpected SW=%04X attempting to block PIN", resp.StatusWord())
 		}
 	}
-	return 10, errors.New("PIN did not block within 10 attempts")
+	return maxAttempts, fmt.Errorf("PIN did not block within %d attempts (raise --max-block-attempts if the card has a higher retry counter)", maxAttempts)
 }
 
 // blockPIVPUK sends RESET RETRY COUNTER with deliberately wrong
@@ -194,10 +206,10 @@ func blockPIVPIN(ctx context.Context, sess sessionTransmitter) (int, error) {
 // of RESET RETRY COUNTER also requires a "new PIN" buffer, which
 // we fill with 0xFF — the card never gets to that step because
 // it rejects the wrong PUK first.
-func blockPIVPUK(ctx context.Context, sess sessionTransmitter) (int, error) {
+func blockPIVPUK(ctx context.Context, sess sessionTransmitter, maxAttempts int) (int, error) {
 	wrongPUK := []byte("00000000")
 	dummyPIN := []byte("11111111")
-	for attempt := 1; attempt <= 10; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		cmd, err := piv.ResetRetryCounter(wrongPUK, dummyPIN)
 		if err != nil {
 			return attempt - 1, fmt.Errorf("build RESET RETRY COUNTER: %w", err)
@@ -213,5 +225,5 @@ func blockPIVPUK(ctx context.Context, sess sessionTransmitter) (int, error) {
 			return attempt, fmt.Errorf("unexpected SW=%04X attempting to block PUK", resp.StatusWord())
 		}
 	}
-	return 10, errors.New("PUK did not block within 10 attempts")
+	return maxAttempts, fmt.Errorf("PUK did not block within %d attempts (raise --max-block-attempts if the card has a higher retry counter)", maxAttempts)
 }
