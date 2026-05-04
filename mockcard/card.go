@@ -1,5 +1,34 @@
-// Package mockcard implements a simulated GlobalPlatform Security Domain
-// that speaks SCP11b. Enables full end-to-end testing without hardware.
+// Package mockcard implements an in-memory GlobalPlatform Security
+// Domain that speaks SCP11 (a, b, and c) and a slice of management
+// commands. It exists so the SCP11 stack can be exercised end-to-end
+// without hardware: handshake, OCE certificate upload, secure
+// messaging, replay rejection, and Security Domain key/cert/data
+// operations all flow through this fake card in tests.
+//
+// Scope:
+//
+//   - Card: SCP11-only mock. Configures with a P-256 key and an
+//     auto-generated self-signed cert. Tests that need to vary the
+//     card's behavior (variant, legacy receipt-omission) tweak the
+//     exported fields before calling Transport().
+//
+//   - For SCP03 testing, see scp03.MockCard / scp03.NewMockCard /
+//     scp03.MockTransport in the scp03 package. SCP03 and SCP11
+//     have different setup requirements (pre-shared symmetric keys
+//     vs. asymmetric key + certificate), so the mocks live in their
+//     respective packages rather than being conflated into one
+//     either/or configuration on a single Card type.
+//
+//   - Both mocks expose a Transport() method that returns something
+//     satisfying transport.Transport, so test code at a layer above
+//     transport (session-level, securitydomain-level) can be
+//     parameterized over the mock if it needs to cover both
+//     protocols.
+//
+// This package is intended for tests, examples, and local development
+// only. It is not a reference implementation: it covers the subset
+// of card behavior the SCP11 host code exercises, not arbitrary
+// GlobalPlatform card behavior.
 package mockcard
 
 import (
