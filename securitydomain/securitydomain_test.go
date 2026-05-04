@@ -6,13 +6,17 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/kdf"
 	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -939,4 +943,101 @@ func TestKeyIDConstants_MatchGPAmendmentF(t *testing.T) {
 
 func (r *recordingTransport) TrustBoundary() transport.TrustBoundary {
 	return transport.TrustBoundaryUnknown
+}
+
+// TestParseCertificates_GPSpecBF21With7F21Children locks in support
+// for the GlobalPlatform-spec shape: BF21 outer cert store containing
+// one or more 7F21 single-cert wrappers, each whose Value is the
+// bare DER. This is what the in-tree mockcard returns and what
+// some real GP-conformant cards emit. Regression fence for the
+// piv-reset SCP11b-on-PIV layering fix (PR following PR #82): the
+// previous parser unwrapped BF21 but then handed the 7F21-wrapped
+// bytes to splitDERCertificates, which mis-treated 0x7F as a
+// non-SEQUENCE single cert and produced unparseable output.
+func TestParseCertificates_GPSpecBF21With7F21Children(t *testing.T) {
+	// Build a synthetic cert and wrap as the GP spec says.
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject:      pkix.Name{CommonName: "BF21+7F21 fixture"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+
+	// BF21 { 7F21 { der } }.
+	inner := tlv.Build(tlv.TagCertificate, der)
+	outer := tlv.BuildConstructed(tlv.TagCertStore, inner)
+	wire := outer.Encode()
+
+	got, err := parseCertificates(wire)
+	if err != nil {
+		t.Fatalf("parseCertificates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d certs; want 1", len(got))
+	}
+	parsed, err := x509.ParseCertificate(got[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	if parsed.Subject.CommonName != "BF21+7F21 fixture" {
+		t.Errorf("CN = %q; want BF21+7F21 fixture", parsed.Subject.CommonName)
+	}
+}
+
+// TestParseCertificates_GPSpecBF21WithMultiple7F21Children confirms
+// the parser returns multiple certs when the BF21 store contains
+// several 7F21 wrappers. Order is preserved (leaf last is the
+// caller's contract).
+func TestParseCertificates_GPSpecBF21WithMultiple7F21Children(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	mk := func(cn string) []byte {
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(1),
+			Subject:      pkix.Name{CommonName: cn},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+		if err != nil {
+			t.Fatalf("create cert %q: %v", cn, err)
+		}
+		return der
+	}
+	derA := mk("intermediate")
+	derB := mk("leaf")
+
+	// BF21 { 7F21 { derA } || 7F21 { derB } }
+	innerA := tlv.Build(tlv.TagCertificate, derA).Encode()
+	innerB := tlv.Build(tlv.TagCertificate, derB).Encode()
+	concatInner := append(append([]byte(nil), innerA...), innerB...)
+	outer := tlv.Node{Tag: tlv.TagCertStore, Value: concatInner}
+	wire := outer.Encode()
+
+	got, err := parseCertificates(wire)
+	if err != nil {
+		t.Fatalf("parseCertificates: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d certs; want 2", len(got))
+	}
+	for i, want := range []string{"intermediate", "leaf"} {
+		c, err := x509.ParseCertificate(got[i])
+		if err != nil {
+			t.Fatalf("cert %d: ParseCertificate: %v", i, err)
+		}
+		if c.Subject.CommonName != want {
+			t.Errorf("cert %d CN = %q; want %q", i, c.Subject.CommonName, want)
+		}
+	}
 }
