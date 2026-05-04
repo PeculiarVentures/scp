@@ -8,7 +8,7 @@ This binary is hardware-targeting: most subcommands need an actual reader and ca
 
 The two questions this tool answers, against a real card:
 
-1. **Does the SCP library produce wire bytes that an actual card accepts?** — `scp03-sd-read`, `scp11b-sd-read`
+1. **Does the SCP library produce wire bytes that an actual card accepts?** — `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`
 2. **Does the wire layer survive being wrapped around a higher-level applet protocol?** — `scp11b-piv-verify`
 
 Plus a `probe` step that tells you what the card claims to be before you authenticate to it, and a `test` aggregator that runs the lot.
@@ -115,15 +115,42 @@ A successful `VERIFY PIN` proves three things at once: SCP11b can target a non-S
 
 If the card returns a `63Cx` SW (PIN wrong, x retries), the failure surfaces with the status word in the error so you can distinguish "wire broken" from "PIN wrong."
 
-### `test` aggregator
+### SCP11a Security Domain read
 
-Runs `probe` + the three smoke checks in sequence and prints a single PASS/FAIL/SKIP summary at the end.
+SCP11a is mutual auth: the host validates the card AND the card validates the host's OCE certificate chain against an OCE root that was previously installed on the card. After a successful open, the session is OCE-authenticated and capable of driving SD writes (key rotation, certificate store, allowlist updates).
 
 ```bash
-scp-smoke test --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
+scp-smoke scp11a-sd-read \
+  --reader "YubiKey" \
+  --oce-key /path/to/oce.key.pem \
+  --oce-cert /path/to/oce-chain.pem \
+  --lab-skip-scp11-trust
 ```
 
-Process exit code is 1 if any check failed; 0 otherwise (including SKIP results).
+Pre-conditions for this to succeed against real hardware:
+
+1. The card has an OCE root + key reference provisioned at `--oce-kid` (default `0x10`) / `--oce-kvn` (default `0x03`). On factory-fresh YubiKey this is **not** the case; the OCE has to be bootstrapped first (see `bootstrap-oce`, follow-up).
+2. The OCE private key file corresponds to the leaf certificate in the chain.
+3. The chain leaf is signed by the OCE root the card has installed.
+
+The smoke command asserts the SCP11a-specific invariant `Session.OCEAuthenticated() == true` — a regression that silently downgraded to SCP11b-shape session keys would be caught here rather than going unnoticed.
+
+PEM key formats accepted: PKCS#8 (`PRIVATE KEY`, modern `openssl genpkey` default) and SEC1 (`EC PRIVATE KEY`, what older `openssl ecparam -genkey` produces and what Yubico fixtures use). Curve must be P-256 — the loader rejects other curves explicitly.
+
+### `test` aggregator
+
+Runs `probe` + the SCP smoke checks in sequence and prints a single PASS/FAIL/SKIP summary at the end.
+
+```bash
+scp-smoke test \
+  --reader "YubiKey" \
+  --pin 123456 \
+  --oce-key /path/to/oce.key.pem \
+  --oce-cert /path/to/oce-chain.pem \
+  --lab-skip-scp11-trust
+```
+
+Process exit code is 1 if any check failed; 0 otherwise (including SKIP results). The SCP11a check is skipped automatically if `--oce-key`/`--oce-cert` are not supplied.
 
 ## Design notes worth knowing
 
@@ -146,6 +173,7 @@ The library implementations and behaviors validated by this tool are documented 
 
 ## Status
 
-- v0 (this version): `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11b-piv-verify`, `test`.
-- v0.1 (next): `restore-yubikey-factory` (guarded), trace capture with redaction, custom SCP03 key flags.
-- v1 (later): PIV provisioning over SCP, OCE trust bootstrap, SCP11a/c support.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `test`.
+- Next: `bootstrap-oce` (provision an OCE root onto a card with an SCP03 session), PIV provisioning commands (key generation, certificate install) over an SCP session, custom SCP03 key flags.
+- Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
+- Deferred: `restore-yubikey-factory` (destructive; needs explicit-destructive-confirmation flag, OCE-auth requirement, SCP11b refusal, YubiKey-only).

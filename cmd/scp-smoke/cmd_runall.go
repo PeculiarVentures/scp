@@ -29,6 +29,10 @@ func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 		"Skip SCP11 card certificate validation. Lab use only.")
 	pin := fs.String("pin", "",
 		"PIV PIN. If empty, the SCP11b PIV smoke check is skipped.")
+	oceKeyPath := fs.String("oce-key", "",
+		"Path to OCE private key PEM. If empty, scp11a-sd-read is skipped.")
+	oceCertPath := fs.String("oce-cert", "",
+		"Path to OCE cert chain PEM, leaf last. If empty, scp11a-sd-read is skipped.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
@@ -70,6 +74,17 @@ func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 		run("scp11b-sd-read", cmdSCP11bSDRead, scp11bArgs)
 	} else {
 		skip("scp11b-sd-read", "no trust roots; pass --lab-skip-scp11-trust for wire-only smoke")
+	}
+
+	switch {
+	case *oceKeyPath == "" || *oceCertPath == "":
+		skip("scp11a-sd-read", "no --oce-key/--oce-cert supplied")
+	case !*labSkipTrust:
+		skip("scp11a-sd-read", "no trust roots; pass --lab-skip-scp11-trust for wire-only smoke")
+	default:
+		scp11aArgs := append([]string(nil), scp11bArgs...)
+		scp11aArgs = append(scp11aArgs, "--oce-key", *oceKeyPath, "--oce-cert", *oceCertPath)
+		run("scp11a-sd-read", cmdSCP11aSDRead, scp11aArgs)
 	}
 
 	switch {
