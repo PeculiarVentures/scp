@@ -51,16 +51,25 @@ jobs:
 
   # CGo submodules. transport/pcsc wraps github.com/ebfe/scard which
   # links against pcsclite/winscard, so the submodule (and anything
-  # depending on it) needs libpcsclite-dev installed before `go test`.
+  # depending on it) needs libpcsclite-dev installed before `go test`
+  # on Linux. macOS has PC/SC built into the OS (CryptoTokenKit /
+  # winscard); no install needed.
+  #
+  # The OS matrix exists because PC/SC behavior and CGo paths differ
+  # between Linux and macOS, and the CLI is meant to work on both.
+  # Without macOS coverage, every Mac-side regression has to wait
+  # for a developer to run it locally.
   #
   # All three submodules share one job: parallelism here costs more
   # in apt-install overhead than it saves in test time. If any
   # individual submodule grows large enough to be worth its own
   # job, split it then.
   submodules:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         go-version: ['1.22', '1.23']
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +79,8 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
-      - name: Install pcsclite headers
+      - name: Install pcsclite headers (Linux only)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libpcsclite-dev
