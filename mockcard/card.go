@@ -39,6 +39,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"sync"
@@ -127,6 +128,18 @@ type Card struct {
 	pivPUK        []byte
 	pivPINCounter int
 	pivPUKCounter int
+
+	// pivObjects is the in-memory PIV data object store, keyed by
+	// the 3-byte object ID rendered as a hex string. PUT DATA
+	// (INS=0xDB) writes here; GET DATA (INS=0xCB) reads from here.
+	// Tests use this to verify round-trips through ReadObject /
+	// WriteObject and through GetCertificate / DeleteCertificate.
+	//
+	// Stored values are the inner-payload bytes (the contents of
+	// the 0x53 wrapper that PUT DATA receives). The wrapper is
+	// stripped on write and reapplied on read so callers see the
+	// same shape regardless of which path they took in.
+	pivObjects map[string][]byte
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -175,6 +188,7 @@ func New() (*Card, error) {
 		pivPUK:        []byte("12345678"),
 		pivPINCounter: 3,
 		pivPUKCounter: 3,
+		pivObjects:    make(map[string][]byte),
 	}, nil
 }
 
@@ -348,10 +362,94 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		c.pivPUKCounter = 3
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 
-	case 0xDB: // PIV PUT DATA (cert install on a slot)
+	case 0x24: // PIV CHANGE REFERENCE DATA (PIN or PUK)
 		if !c.pivSelected {
 			return mkSW(0x6985), nil
 		}
+		// Data: oldRef (8 bytes 0xFF-padded) || newRef (8 bytes
+		// 0xFF-padded). P2 selects PIN (0x80) or PUK (0x81).
+		if len(cmd.Data) != 16 {
+			return mkSW(0x6A80), nil
+		}
+		oldRef := cmd.Data[:8]
+		newRef := cmd.Data[8:]
+		switch cmd.P2 {
+		case 0x80: // PIN
+			if c.pivPINCounter == 0 {
+				return mkSW(0x6983), nil
+			}
+			if !bytesEqualPadded(oldRef, c.pivPIN) {
+				c.pivPINCounter--
+				if c.pivPINCounter == 0 {
+					return mkSW(0x6983), nil
+				}
+				return mkSW(0x6300 | uint16(c.pivPINCounter)), nil
+			}
+			c.pivPIN = stripPINPad(newRef)
+			c.pivPINCounter = 3
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		case 0x81: // PUK
+			if c.pivPUKCounter == 0 {
+				return mkSW(0x6983), nil
+			}
+			if !bytesEqualPadded(oldRef, c.pivPUK) {
+				c.pivPUKCounter--
+				if c.pivPUKCounter == 0 {
+					return mkSW(0x6983), nil
+				}
+				return mkSW(0x6300 | uint16(c.pivPUKCounter)), nil
+			}
+			c.pivPUK = stripPINPad(newRef)
+			c.pivPUKCounter = 3
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		default:
+			return mkSW(0x6A86), nil
+		}
+
+	case 0xCB: // PIV GET DATA
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		// Data is a 0x5C-tagged object ID.
+		nodes, err := tlv.Decode(cmd.Data)
+		if err != nil {
+			return mkSW(0x6A80), nil
+		}
+		idTag := tlv.Find(nodes, 0x5C)
+		if idTag == nil || len(idTag.Value) == 0 {
+			return mkSW(0x6A80), nil
+		}
+		key := hex.EncodeToString(idTag.Value)
+		stored, ok := c.pivObjects[key]
+		if !ok {
+			return mkSW(0x6A82), nil // file not found
+		}
+		// Wrap stored payload in 0x53 for the response.
+		wrapper := tlv.Build(tlv.Tag(0x53), stored)
+		return &apdu.Response{
+			Data: wrapper.Encode(),
+			SW1:  0x90, SW2: 0x00,
+		}, nil
+
+	case 0xDB: // PIV PUT DATA (cert install on a slot, generic objects)
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		// Data is 0x5C-tagged objectID followed by 0x53-tagged value.
+		nodes, err := tlv.Decode(cmd.Data)
+		if err != nil {
+			// Fall back to the original lenient behavior: any PUT
+			// DATA we cannot parse simply succeeds. Tests written
+			// against the older mock used unstructured payloads.
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		}
+		idTag := tlv.Find(nodes, 0x5C)
+		valTag := tlv.Find(nodes, 0x53)
+		if idTag == nil || valTag == nil {
+			return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+		}
+		key := hex.EncodeToString(idTag.Value)
+		c.pivObjects[key] = append([]byte{}, valTag.Value...)
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 
 	case 0xFB: // YubiKey PIV RESET (Yubico extension)

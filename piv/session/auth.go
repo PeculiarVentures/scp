@@ -138,3 +138,61 @@ func (s *Session) requirePINVerified(op string) error {
 // errInvalidArg is a sentinel for argument-validation errors that
 // should not be wrapped as CardError.
 var errInvalidArg = errors.New("invalid argument")
+
+// ChangePIN replaces the application PIN. The card requires the
+// current PIN to authorize replacement; wrong oldPIN decrements the
+// retry counter the same way VerifyPIN does and returns
+// piv.IsWrongPIN with retries remaining via piv.RetriesRemaining.
+//
+// On success the PIN-verified flag is cleared because the prior
+// VERIFY (if any) is consumed; callers that need PIN-gated
+// operations after a change must call VerifyPIN with the new PIN.
+func (s *Session) ChangePIN(ctx context.Context, oldPIN, newPIN []byte) error {
+	cmd, err := pivapdu.ChangePIN(oldPIN, newPIN)
+	if err != nil {
+		return fmt.Errorf("CHANGE PIN: %w", err)
+	}
+	if _, err := s.transmit(ctx, "CHANGE PIN", cmd); err != nil {
+		return err
+	}
+	s.pinVerified = false
+	return nil
+}
+
+// ChangePUK replaces the PUK. The card requires the current PUK to
+// authorize replacement; wrong oldPUK decrements the PUK retry
+// counter and returns piv.IsWrongPIN (the same SW family covers PUK
+// errors at the PIN-blocked-style level).
+func (s *Session) ChangePUK(ctx context.Context, oldPUK, newPUK []byte) error {
+	cmd, err := pivapdu.ChangePUK(oldPUK, newPUK)
+	if err != nil {
+		return fmt.Errorf("CHANGE PUK: %w", err)
+	}
+	if _, err := s.transmit(ctx, "CHANGE PUK", cmd); err != nil {
+		return err
+	}
+	return nil
+}
+
+// UnblockPIN uses the PUK to reset a blocked PIN to a new value
+// (NIST SP 800-73-4 Part 2 §3.2.3, RESET RETRY COUNTER instruction).
+//
+// Wrong PUK decrements the PUK retry counter; PUK blocking on a
+// YubiKey-flavored card means the only path forward is the YubiKey
+// PIV reset, and on a Standard PIV card the recovery is out of band.
+//
+// On success the PIN retry counter resets to its factory value (3
+// on YubiKey) and the PIN is set to newPIN. The session does not
+// mark PIN-verified after UnblockPIN; the caller must call VerifyPIN
+// with the new PIN to authorize PIN-gated operations.
+func (s *Session) UnblockPIN(ctx context.Context, puk, newPIN []byte) error {
+	cmd, err := pivapdu.ResetRetryCounter(puk, newPIN)
+	if err != nil {
+		return fmt.Errorf("UNBLOCK PIN: %w", err)
+	}
+	if _, err := s.transmit(ctx, "UNBLOCK PIN", cmd); err != nil {
+		return err
+	}
+	s.pinVerified = false
+	return nil
+}
