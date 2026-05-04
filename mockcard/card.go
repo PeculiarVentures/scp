@@ -138,19 +138,69 @@ func (c *Card) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 		}
 	}
 
+	return c.dispatchINS(cmd, false /* underSM */)
+}
+
+// dispatchINS is the single source of truth for "which handler runs
+// for which INS." It is called from two places:
+//
+//   - processAPDU, with underSM=false, for plaintext commands (either
+//     pre-session, or the SELECT-only carve-out post-session enforced
+//     above).
+//   - processSecure, with underSM=true, after an SM-wrapped command's
+//     MAC has been verified and its data decrypted.
+//
+// Adding a new command means adding one case here and (where relevant)
+// gating it on underSM. The handshake commands (0x88, 0x82, 0x2A) are
+// the canonical example: they only make sense pre-session, so under SM
+// they refuse with 6985 rather than running a fresh handshake step
+// inside the very channel that's wrapping them.
+//
+// This function exists because the mock previously had two parallel
+// switches — one for the plaintext path and one for the post-decrypt
+// path — and they drifted: GET DATA was in both, but the post-auth
+// switch missed it for several months until #50 fixed the symptom.
+// Collapsing them removes the duplication permanently.
+func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {
 	switch cmd.INS {
-	case 0xA4:
+	case 0xA4: // SELECT
 		return c.doSelect(cmd)
-	case 0xCA:
+
+	case 0xCA: // GET DATA
 		return c.doGetData(cmd)
-	case 0x88: // INTERNAL AUTHENTICATE (SCP11b)
+
+	case 0x88: // INTERNAL AUTHENTICATE (SCP11b handshake)
+		if underSM {
+			return mkSW(0x6985), nil // conditions not satisfied
+		}
 		return c.doInternalAuth(cmd)
-	case 0x82: // EXTERNAL AUTHENTICATE (SCP11a/c - mutual auth)
+
+	case 0x82: // EXTERNAL AUTHENTICATE (SCP11a/c handshake)
+		if underSM {
+			return mkSW(0x6985), nil
+		}
 		return c.doInternalAuth(cmd)
-	case 0x2A: // PERFORM SECURITY OPERATION (OCE cert for SCP11a)
+
+	case 0x2A: // PERFORM SECURITY OPERATION (OCE cert upload, SCP11a/c)
+		if underSM {
+			return mkSW(0x6985), nil
+		}
 		return c.doPerformSecurityOp(cmd)
+
+	case 0xFD: // Echo (test-only — no security implication)
+		return &apdu.Response{Data: cmd.Data, SW1: 0x90, SW2: 0x00}, nil
+
+	case 0x47: // PIV GENERATE KEY
+		if !c.pivSelected {
+			return mkSW(0x6985), nil
+		}
+		pub := make([]byte, 65)
+		pub[0] = 0x04
+		_, _ = rand.Read(pub[1:])
+		return &apdu.Response{Data: pub, SW1: 0x90, SW2: 0x00}, nil
+
 	default:
-		return mkSW(0x6D00), nil
+		return mkSW(0x6D00), nil // instruction not supported
 	}
 }
 
@@ -373,39 +423,12 @@ func (c *Card) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 		CLA: channel.ClearSecureMessagingCLA(cmd.CLA), INS: cmd.INS, P1: cmd.P1, P2: cmd.P2,
 		Data: plainData, Le: -1,
 	}
-	plainResp, err := c.processPlain(plainCmd)
+	plainResp, err := c.dispatchINS(plainCmd, true /* underSM */)
 	if err != nil {
 		return nil, err
 	}
 
 	return sess.ch.WrapResponse(plainResp)
-}
-
-func (c *Card) processPlain(cmd *apdu.Command) (*apdu.Response, error) {
-	switch cmd.INS {
-	case 0xA4:
-		return c.doSelect(cmd)
-	case 0xCA: // GET DATA — same handler as the pre-auth path in processAPDU.
-		// Reachable both unauthenticated (handled in processAPDU's switch
-		// because GP §4.8 permits GET DATA outside SM) and post-auth (this
-		// case, after processSecure unwraps). Keeping both dispatchers is
-		// a hazard — every INS that should work in both modes must be added
-		// twice — but factoring them is out of scope here. Tracked: TODO
-		// merge into a single per-INS dispatch table.
-		return c.doGetData(cmd)
-	case 0xFD: // Echo for testing
-		return &apdu.Response{Data: cmd.Data, SW1: 0x90, SW2: 0x00}, nil
-	case 0x47: // PIV GENERATE KEY
-		if !c.pivSelected {
-			return mkSW(0x6985), nil
-		}
-		pub := make([]byte, 65)
-		pub[0] = 0x04
-		_, _ = rand.Read(pub[1:])
-		return &apdu.Response{Data: pub, SW1: 0x90, SW2: 0x00}, nil
-	default:
-		return mkSW(0x6D00), nil
-	}
 }
 
 // --- MockTransport ---

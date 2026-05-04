@@ -399,3 +399,52 @@ func TestCard_GetData_KeyInfo(t *testing.T) {
 		t.Errorf("key info response should begin with 0xE0; got %X", resp.Data)
 	}
 }
+
+// TestCard_HandshakeINS_RefusedUnderSM is a structural test: the
+// SCP11 handshake commands (INTERNAL AUTHENTICATE 0x88, EXTERNAL
+// AUTHENTICATE 0x82, PERFORM SECURITY OPERATION 0x2A) must not be
+// runnable inside an active session — they only make sense
+// pre-handshake. Pre-refactor, the post-auth dispatcher (processPlain)
+// silently fell through to 6D00 for these because none of them had
+// cases there; the new dispatchINS makes the policy explicit by
+// returning 6985 (conditions not satisfied) when invoked under SM.
+//
+// This test guards against the kind of dispatcher-drift that
+// originally hid the GET DATA bug fixed in #50 — if someone adds a
+// new INS case to dispatchINS in the future and it should be
+// pre-auth-only, omitting the underSM check would let it run
+// mid-session unnoticed.
+func TestCard_HandshakeINS_RefusedUnderSM(t *testing.T) {
+	ctx := context.Background()
+	card, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg.InsecureSkipCardAuthentication = true
+	sess, err := scp11.Open(ctx, card.Transport(), cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+
+	// Each of these would return 6985 if dispatchINS routed them
+	// correctly under SM. Pre-refactor, processPlain had no case for
+	// them and they fell through to 6D00; the test now also asserts
+	// the SW so a regression to the silent-fallthrough behavior
+	// fails loudly.
+	for _, ins := range []byte{0x88, 0x82, 0x2A} {
+		resp, err := sess.Transmit(ctx, &apdu.Command{
+			CLA: 0x80, INS: ins, P1: 0x00, P2: 0x00, Le: 0,
+		})
+		if err != nil {
+			t.Errorf("INS=%02X transmit: %v", ins, err)
+			continue
+		}
+		if resp.StatusWord() != 0x6985 {
+			t.Errorf("INS=%02X under SM should return 6985 (conditions not satisfied); got %04X",
+				ins, resp.StatusWord())
+		}
+	}
+}
