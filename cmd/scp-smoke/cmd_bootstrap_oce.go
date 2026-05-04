@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/securitydomain"
 )
 
@@ -62,8 +61,14 @@ func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
 		"KVN to replace (0 = add new). Use this when rotating an existing OCE registration.")
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, bootstrap-oce runs in dry-run mode (validates inputs and reports planned operations without transmitting writes).")
+	scp03Keys := registerSCP03KeyFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	scp03Cfg, err := scp03Keys.applyToConfig()
+	if err != nil {
+		return err
 	}
 
 	if *oceCertPath == "" {
@@ -120,10 +125,9 @@ func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	// SCP03 with factory keys. A card whose SCP03 keys have been
-	// rotated needs custom-keys flags (follow-up).
-	cfg := scp03.FactoryYubiKeyConfig()
-	sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
+	// SCP03 keys come from --scp03-* flags (or factory default).
+	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
+	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
 	if err != nil {
 		report.Fail("open SCP03 SD", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
