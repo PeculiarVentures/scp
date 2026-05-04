@@ -71,24 +71,38 @@ type CardInfo struct {
 	GPVersion []int `json:"gpVersion,omitempty"`
 
 	// SCPVersion identifies the secure channel protocol the card
-	// supports. 0x02 = SCP02, 0x03 = SCP03, 0x11 = SCP11. The value
-	// is decoded from the second-to-last arc of the OID
+	// supports. GlobalPlatform encodes the version as a single byte
+	// where the digits read as decimal, not as the integer value of
+	// the version number:
+	//
+	//   0x02 = SCP02
+	//   0x03 = SCP03
+	//   0x10 = SCP10
+	//   0x11 = SCP11
+	//
+	// The value is decoded from the second-to-last arc of the OID
 	// 1.2.840.114283.4.<SCP>.<i>. Zero means the SCP element was
 	// absent from the CRD.
 	SCPVersion byte `json:"scpVersion,omitempty"`
 
 	// SCPParameter is the SCP "i" parameter from the OID, decoded
-	// from the last arc. Interpretation is SCP-version-specific:
+	// from the last arc. The field is uint16 because GP Card Spec
+	// v2.3 Amendment F (SCP11 v1.3) widened the i-parameter encoding
+	// from a fixed single byte to one or two bytes; SCP02 and SCP03
+	// only ever use the low byte. Interpretation is SCP-version-
+	// specific:
 	//
 	//   SCP02: encodes initiation method, key derivation, base key
 	//          count (see GP Amendment A).
 	//   SCP03: bit 0 = pseudo-random card challenge, bit 4 = R-MAC
 	//          support, bit 5 = R-ENC support (see GP Amendment D).
-	//   SCP11: variant flags (see GP Amendment F).
+	//   SCP11: variant flags as a 1- or 2-byte bitmap (see GP
+	//          Amendment F §6.2). Real YubiKey 5 firmware ≥5.7.2
+	//          emits a 2-byte value here.
 	//
 	// Zero is meaningful (it's a valid `i` value), not "absent" —
 	// check SCPVersion to detect presence.
-	SCPParameter byte `json:"scpParameter,omitempty"`
+	SCPParameter uint16 `json:"scpParameter,omitempty"`
 
 	// CardIdentificationOID is the value of tag 0x63 (Card
 	// Identification Scheme). Empty if absent. Vendor-specific.
@@ -210,19 +224,31 @@ func Parse(data []byte) (*CardInfo, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%w: SCP (tag 0x64): %v", ErrMalformed, err)
 			}
-			// 1.2.840.114283.4.<SCP>.<i>
-			if len(oid) < 6 || !startsWith(oid, append(gpRIDPrefix, 4)) {
+			// 1.2.840.114283.4.<SCP>.<i> per GP §H.2. The OID is
+			// always exactly seven arcs: the four-arc GP RID, the
+			// fixed .4 sub-tree marker, the SCP version byte, and
+			// the i-parameter. The i-parameter is a single arc even
+			// when SCP11 v1.3 (GP Card Spec 2.3 Amendment F §6.2)
+			// uses a 2-byte value — the bytes are packed into one
+			// arc whose integer value can exceed 0xFF.
+			if len(oid) != 7 || !startsWith(oid, append(gpRIDPrefix, 4)) {
 				return nil, fmt.Errorf("%w: SCP OID has unexpected shape: %v",
 					ErrMalformed, oid)
 			}
-			scp := oid[len(oid)-2]
-			i := oid[len(oid)-1]
-			if scp < 0 || scp > 0xFF || i < 0 || i > 0xFF {
-				return nil, fmt.Errorf("%w: SCP OID arcs out of byte range: %v",
+			scp := oid[5]
+			i := oid[6]
+			if scp < 0 || scp > 0xFF {
+				return nil, fmt.Errorf("%w: SCP version arc out of byte range: %v",
+					ErrMalformed, oid)
+			}
+			// Per GP SCP11 v1.3 the i-parameter is one or two bytes.
+			// Anything wider is genuinely malformed.
+			if i < 0 || i > 0xFFFF {
+				return nil, fmt.Errorf("%w: SCP i-parameter arc out of 16-bit range: %v",
 					ErrMalformed, oid)
 			}
 			info.SCPVersion = byte(scp)
-			info.SCPParameter = byte(i)
+			info.SCPParameter = uint16(i)
 
 		case 0x65:
 			oid, err := extractInnerOID(child)

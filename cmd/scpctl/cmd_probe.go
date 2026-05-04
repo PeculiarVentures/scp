@@ -127,7 +127,14 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	}
 	if info.SCPVersion != 0 {
 		data.SCPVersion = fmt.Sprintf("0x%02X", info.SCPVersion)
-		data.SCPParameter = fmt.Sprintf("0x%02X", info.SCPParameter)
+		// SCP11 v1.3 i-parameters can be 2 bytes; render the wider
+		// form when needed so SCP02/03 stay 0xNN and SCP11 reports
+		// 0xNNNN truthfully instead of being truncated to the low byte.
+		if info.SCPParameter > 0xFF {
+			data.SCPParameter = fmt.Sprintf("0x%04X", info.SCPParameter)
+		} else {
+			data.SCPParameter = fmt.Sprintf("0x%02X", info.SCPParameter)
+		}
 	}
 	if len(info.CardIdentificationOID) > 0 {
 		data.CardIdentificationOID = info.CardIdentificationOID.String()
