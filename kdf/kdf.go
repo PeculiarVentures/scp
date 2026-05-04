@@ -1,28 +1,50 @@
-// Package kdf implements the key derivation functions used by SCP11.
+// Package kdf implements the key derivation functions used by both
+// SCP11 and SCP03 in this library.
 //
-// SCP11 derives all session-key material in a single X9.63 KDF
-// pass over the concatenated ECDH shared secret(s):
+// # SCP11
+//
+// SCP11 derives all session-key material in a single X9.63 KDF pass
+// over the concatenated ECDH shared secret(s):
 //
 //   - SCP11a/c: Z = ShSee || ShSes (the ephemeral-ephemeral and
 //     ephemeral-static shared secrets, concatenated)
 //   - SCP11b: Z = ShSee
 //
-// The KDF outputs 80 bytes that are sliced into five 16-byte
-// AES-128 keys in fixed order: receipt key (used for SCP11a/c key
+// The KDF outputs 80 bytes that are sliced into five 16-byte AES-128
+// keys in fixed order: receipt key (used for SCP11a/c key
 // confirmation), S-ENC, S-MAC, S-RMAC, DEK. The MAC chaining value
 // is initialized to all zeros at session establishment.
 //
 // This single-stage layout matches the GP Amendment F YubiKey-
-// compatible full-security profile and is byte-exact against
-// Samsung OpenSCP-Java SCP11a/P-256/AES-128/S8 reference vectors.
+// compatible full-security profile and is byte-exact against Samsung
+// OpenSCP-Java SCP11a/P-256/AES-128/S8 reference vectors.
 //
-// Note: GP Amendment F also describes a two-stage variant where
-// X9.63 derives a master key and NIST SP 800-108 in counter mode
-// (with AES-CMAC) derives the individual session keys. This
-// package does NOT implement that two-stage variant — it is not
-// used by the YubiKey profile this library targets. The
-// NIST SP 800-108 / AES-CMAC primitives in this package are used
-// by SCP03 (DeriveSCP03SessionKey), not by SCP11.
+// GP Amendment F also describes a two-stage variant where X9.63
+// derives a master key and NIST SP 800-108 in counter mode (with
+// AES-CMAC) derives the individual session keys. This package does
+// NOT implement that two-stage variant — it is not used by the
+// YubiKey profile this library targets.
+//
+// SCP11 entry points: X963KDF, DeriveSessionKeysFromSharedSecrets,
+// ComputeReceipt, VerifyReceipt.
+//
+// # SCP03
+//
+// SCP03 uses NIST SP 800-108 in counter mode with AES-CMAC as the
+// PRF to derive each session key from the static base key, the
+// derivation constant (one byte distinguishing S-ENC / S-MAC /
+// S-RMAC), and the host+card challenge context.
+//
+// SCP03 entry point: DeriveSCP03SessionKey. The CMAC primitive
+// itself lives in the cmac package; this package consumes it.
+//
+// # Shared
+//
+// SessionKeys is the common output type for both protocols and is
+// what the channel package consumes. Pad / Unpad implement ISO 9797-1
+// padding method 2 (one 0x80 byte then zeroes), used in both protocol
+// stacks for plaintext that needs alignment to AES block boundaries
+// before encryption.
 package kdf
 
 import (
