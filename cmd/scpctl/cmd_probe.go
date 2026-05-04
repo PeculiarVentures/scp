@@ -17,10 +17,11 @@ type probeData struct {
 	GPVersion             string `json:"gp_version,omitempty"`
 	SCPVersion            string `json:"scp_version,omitempty"`
 	SCPParameter          string `json:"scp_parameter,omitempty"`
-	CardIdentificationOID string `json:"card_identification_oid,omitempty"`
-	CardConfigDetailsOID  string `json:"card_config_details_oid,omitempty"`
-	CardChipDetailsOID    string `json:"card_chip_details_oid,omitempty"`
-	RawHex                string `json:"raw_hex,omitempty"`
+	SCPs                  []string `json:"scps,omitempty"`
+	CardIdentificationOID string   `json:"card_identification_oid,omitempty"`
+	CardConfigDetailsOID  string   `json:"card_config_details_oid,omitempty"`
+	CardChipDetailsOID    string   `json:"card_chip_details_oid,omitempty"`
+	RawHex                string   `json:"raw_hex,omitempty"`
 
 	// KeyInfo is populated by 'sd info' (and other callers that set
 	// probeOptions.fetchKeyInfo). Each entry is a human-readable
@@ -125,16 +126,23 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	if len(info.GPVersion) > 0 {
 		data.GPVersion = joinInts(info.GPVersion, ".")
 	}
-	if info.SCPVersion != 0 {
-		data.SCPVersion = fmt.Sprintf("0x%02X", info.SCPVersion)
+	if len(info.SCPs) > 0 {
+		// JSON back-compat: scp_version and scp_parameter mirror
+		// SCPs[0] for any consumer still parsing the old single-
+		// SCP shape. The SCPs slice carries the full set.
+		first := info.SCPs[0]
+		data.SCPVersion = fmt.Sprintf("0x%02X", first.Version)
 		// SCP11 v1.3 i-parameters can be 2 bytes; render the wider
 		// form when needed so SCP02/03 stay 0xNN and SCP11 reports
 		// 0xNNNN truthfully instead of being truncated to the low byte.
-		if info.SCPParameter > 0xFF {
-			data.SCPParameter = fmt.Sprintf("0x%04X", info.SCPParameter)
+		if first.Parameter > 0xFF {
+			data.SCPParameter = fmt.Sprintf("0x%04X", first.Parameter)
 		} else {
-			data.SCPParameter = fmt.Sprintf("0x%02X", info.SCPParameter)
+			data.SCPParameter = fmt.Sprintf("0x%02X", first.Parameter)
 		}
+	}
+	for _, s := range info.SCPs {
+		data.SCPs = append(data.SCPs, formatSCP(s))
 	}
 	if len(info.CardIdentificationOID) > 0 {
 		data.CardIdentificationOID = info.CardIdentificationOID.String()
@@ -154,17 +162,17 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	} else {
 		report.Skip("GP version", "not advertised in CRD")
 	}
-	switch info.SCPVersion {
-	case 0x02:
-		report.Pass("SCP advertised", "SCP02 i="+data.SCPParameter)
-	case 0x03:
-		report.Pass("SCP advertised", "SCP03 i="+data.SCPParameter)
-	case 0x11:
-		report.Pass("SCP advertised", "SCP11 i="+data.SCPParameter)
-	case 0:
+	if len(info.SCPs) == 0 {
 		report.Skip("SCP advertised", "no SCP element in CRD")
-	default:
-		report.Skip("SCP advertised", fmt.Sprintf("unknown SCP version 0x%02X", info.SCPVersion))
+	} else {
+		// One report line per advertised SCP. Cards that advertise
+		// more than one (e.g. retail YubiKey 5.7+ ships SCP03 and
+		// SCP11 together) get multiple PASS lines so the operator
+		// can see exactly what's available without inspecting the
+		// raw CRD bytes.
+		for _, s := range info.SCPs {
+			report.Pass("SCP advertised", formatSCP(s))
+		}
 	}
 
 	// Key Information Template. Optional because many cards do not
@@ -227,4 +235,24 @@ func joinInts(xs []int, sep string) string {
 		parts[i] = strconv.Itoa(x)
 	}
 	return strings.Join(parts, sep)
+}
+
+// formatSCP renders one SCPInfo in the report-line shape, e.g.
+// "SCP03 i=0x60" or "SCP11 i=0x0D86". The version byte is
+// rendered using GP's BCD-ish convention (0x10 = SCP10,
+// 0x11 = SCP11, etc.) so users see the labels they recognize.
+// i-parameters that don't fit one byte render as four hex digits.
+func formatSCP(s cardrecognition.SCPInfo) string {
+	var label string
+	switch s.Version {
+	case 0x02, 0x03, 0x10, 0x11:
+		// BCD-ish: high nibble * 10 + low nibble = decimal label.
+		label = fmt.Sprintf("SCP%X%X", (s.Version>>4)&0x0F, s.Version&0x0F)
+	default:
+		label = fmt.Sprintf("SCP(0x%02X)", s.Version)
+	}
+	if s.Parameter > 0xFF {
+		return fmt.Sprintf("%s i=0x%04X", label, s.Parameter)
+	}
+	return fmt.Sprintf("%s i=0x%02X", label, s.Parameter)
 }

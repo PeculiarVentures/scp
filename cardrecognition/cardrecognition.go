@@ -53,6 +53,20 @@ import (
 	"github.com/PeculiarVentures/scp/transport"
 )
 
+// SCPInfo is one Secure Channel Protocol indicator from the CRD.
+// A single CardInfo can have several of these — GP §H.2 permits
+// multiple 0x64 children, and retail YubiKey 5.7+ uses that to
+// advertise SCP03 and SCP11 simultaneously.
+type SCPInfo struct {
+	// Version is the GP-encoded SCP version byte. Examples:
+	// 0x02 (SCP02), 0x03 (SCP03), 0x10 (SCP10), 0x11 (SCP11).
+	Version byte `json:"version"`
+
+	// Parameter is the SCP "i" parameter from the last OID arc.
+	// 1 byte for SCP02/03, 1 or 2 bytes for SCP11 v1.3.
+	Parameter uint16 `json:"parameter"`
+}
+
 // CardInfo is a parsed Card Recognition Data record.
 //
 // Fields are populated from the corresponding TLV elements when
@@ -70,10 +84,25 @@ type CardInfo struct {
 	// values: {2,1,1}, {2,2}, {2,3}, {2,3,1}.
 	GPVersion []int `json:"gpVersion,omitempty"`
 
-	// SCPVersion identifies the secure channel protocol the card
-	// supports. GlobalPlatform encodes the version as a single byte
-	// where the digits read as decimal, not as the integer value of
-	// the version number:
+	// SCPs lists every secure channel protocol indicator the card
+	// advertises in its CRD. GP §H.2 explicitly permits multiple
+	// 0x64 children — that's how a single Security Domain declares
+	// support for more than one SCP. Real YubiKey 5.7+ emits two:
+	// SCP03 with i=0x60 and SCP11 with i=0x0D86.
+	//
+	// Order matches the order the CRD lists them. Empty when the CRD
+	// has no SCP element at all.
+	SCPs []SCPInfo `json:"scps,omitempty"`
+
+	// SCPVersion is a back-compat shim populated from SCPs[0] when
+	// SCPs is non-empty, zero otherwise. New code should iterate
+	// SCPs instead of using this field — it cannot represent a card
+	// that advertises both SCP03 and SCP11, which retail YubiKey
+	// 5.7+ does. The field will be removed in a future release.
+	//
+	// GlobalPlatform encodes the version as a single byte where the
+	// digits read as decimal, not as the integer value of the
+	// version number:
 	//
 	//   0x02 = SCP02
 	//   0x03 = SCP03
@@ -81,16 +110,20 @@ type CardInfo struct {
 	//   0x11 = SCP11
 	//
 	// The value is decoded from the second-to-last arc of the OID
-	// 1.2.840.114283.4.<SCP>.<i>. Zero means the SCP element was
-	// absent from the CRD.
+	// 1.2.840.114283.4.<SCP>.<i>.
+	//
+	// Deprecated: iterate SCPs instead.
 	SCPVersion byte `json:"scpVersion,omitempty"`
 
-	// SCPParameter is the SCP "i" parameter from the OID, decoded
-	// from the last arc. The field is uint16 because GP Card Spec
-	// v2.3 Amendment F (SCP11 v1.3) widened the i-parameter encoding
-	// from a fixed single byte to one or two bytes; SCP02 and SCP03
-	// only ever use the low byte. Interpretation is SCP-version-
-	// specific:
+	// SCPParameter is a back-compat shim populated from SCPs[0]
+	// when SCPs is non-empty, zero otherwise. Same caveat as
+	// SCPVersion: a single byte/uint16 pair cannot represent a card
+	// that advertises multiple SCPs. New code should iterate SCPs.
+	//
+	// The field is uint16 because GP Card Spec v2.3 Amendment F
+	// (SCP11 v1.3) widened the i-parameter encoding from a fixed
+	// single byte to one or two bytes; SCP02 and SCP03 only ever
+	// use the low byte. Interpretation is SCP-version-specific:
 	//
 	//   SCP02: encodes initiation method, key derivation, base key
 	//          count (see GP Amendment A).
@@ -100,8 +133,7 @@ type CardInfo struct {
 	//          Amendment F §6.2). Real YubiKey 5 firmware ≥5.7.2
 	//          emits a 2-byte value here.
 	//
-	// Zero is meaningful (it's a valid `i` value), not "absent" —
-	// check SCPVersion to detect presence.
+	// Deprecated: iterate SCPs instead.
 	SCPParameter uint16 `json:"scpParameter,omitempty"`
 
 	// CardIdentificationOID is the value of tag 0x63 (Card
@@ -247,8 +279,19 @@ func Parse(data []byte) (*CardInfo, error) {
 				return nil, fmt.Errorf("%w: SCP i-parameter arc out of 16-bit range: %v",
 					ErrMalformed, oid)
 			}
-			info.SCPVersion = byte(scp)
-			info.SCPParameter = uint16(i)
+			info.SCPs = append(info.SCPs, SCPInfo{
+				Version:   byte(scp),
+				Parameter: uint16(i),
+			})
+			// Back-compat: keep SCPVersion/SCPParameter pinned to
+			// the first indicator. Existing callers that read these
+			// fields continue to see exactly the same behavior they
+			// got when the CRD had a single SCP element. New callers
+			// should iterate SCPs.
+			if len(info.SCPs) == 1 {
+				info.SCPVersion = byte(scp)
+				info.SCPParameter = uint16(i)
+			}
 
 		case 0x65:
 			oid, err := extractInnerOID(child)
