@@ -34,21 +34,31 @@ const (
 // AUTHENTICATE for mgmt-key auth.
 const MgmtKeyRef byte = 0x9B
 
-// DefaultMgmt3DESKey is the well-known TDES management key shipped
-// on YubiKeys with firmware < 5.7. Documented at
-// developers.yubico.com/PIV/Introduction/Admin_access.html. Including
-// it here so callers don't have to type the bytes; production
-// deployments must rotate it via SetManagementKey before relying
-// on the card for anything sensitive.
+// DefaultMgmtKey is the well-known 24-byte management key value
+// shipped on YubiKeys with default PIV settings. The same byte
+// pattern serves as both the 3DES default (firmware < 5.7) and the
+// AES-192 default (firmware 5.7+) — Yubico's PIV docs are explicit
+// that "the default management key uses the same default value
+// (3DES and AES-192 keys are the same length)."
 //
-// Newer YubiKeys (5.7+) ship with a randomly generated AES-192
-// management key stored in the protected metadata; there is no
-// well-known default for those.
-var DefaultMgmt3DESKey = []byte{
+// Reference: developers.yubico.com/PIV/Introduction/YubiKey_and_PIV.html
+//
+// Including it here so callers don't have to type the bytes;
+// production deployments must rotate it via SetManagementKey before
+// relying on the card for anything sensitive.
+var DefaultMgmtKey = []byte{
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 }
+
+// DefaultMgmt3DESKey is a backward-compatibility alias for callers
+// that imported the original name. Both names point at the same
+// 24-byte buffer — see DefaultMgmtKey for current naming.
+//
+// Deprecated: Prefer DefaultMgmtKey. The 3DES suffix was misleading
+// because the same value is the 5.7+ AES-192 default too.
+var DefaultMgmt3DESKey = DefaultMgmtKey
 
 // PIV mutual-authentication TLV tags inside the 7C Authentication
 // Template (NIST SP 800-73-4 Part 2 §3.2.4).

@@ -434,10 +434,19 @@ func parseMgmtKey(hexStr, algoStr string) ([]byte, byte, string, error) {
 	}
 	var key []byte
 	if strings.EqualFold(hexStr, "default") {
-		if algo != piv.AlgoMgmt3DES {
-			return nil, 0, "", fmt.Errorf("--mgmt-key=default is only valid with --mgmt-key-algorithm=3des")
+		// Per Yubico's PIV docs, the well-known default management
+		// key value is shared by 3DES (firmware < 5.7) and AES-192
+		// (firmware 5.7+) — both are 24 bytes and use the same
+		// 010203040506070801020304050607080102030405060708 value.
+		// AES-128 (16 bytes) and AES-256 (32 bytes) have different
+		// lengths, so "default" doesn't apply to them; reject those
+		// combinations at the CLI boundary.
+		if algo != piv.AlgoMgmt3DES && algo != piv.AlgoMgmtAES192 {
+			return nil, 0, "", fmt.Errorf(
+				"--mgmt-key=default is only valid with --mgmt-key-algorithm=3des or aes192 " +
+					"(the well-known default value is 24 bytes; AES-128/256 use different key lengths)")
 		}
-		key = append([]byte{}, piv.DefaultMgmt3DESKey...)
+		key = append([]byte{}, piv.DefaultMgmtKey...)
 	} else {
 		// Allow whitespace/colons in the hex for paste-from-docs convenience.
 		clean := strings.NewReplacer(" ", "", ":", "", "-", "").Replace(hexStr)
