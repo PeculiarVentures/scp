@@ -2053,3 +2053,69 @@ func TestParsePIVSlot_NamedSlots(t *testing.T) {
 		t.Error("0x01 should be rejected")
 	}
 }
+
+// TestPIVReset_MaxBlockAttempts_RangeCheck confirms the flag
+// validation: out-of-range values fail at the CLI boundary.
+func TestPIVReset_MaxBlockAttempts_RangeCheck(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+	}{
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"too high", "256"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			env := &runEnv{
+				out: &buf, errOut: &buf,
+				connect: func(_ context.Context, _ string) (transport.Transport, error) {
+					return nil, errors.New("should not connect")
+				},
+			}
+			err := cmdPIVReset(context.Background(), env, []string{
+				"--reader", "f",
+				"--lab-skip-scp11-trust",
+				"--confirm-write",
+				"--max-block-attempts", tc.val,
+			})
+			if err == nil {
+				t.Fatal("expected usage error")
+			}
+			var ue *usageError
+			if !errors.As(err, &ue) {
+				t.Errorf("expected *usageError, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+// TestPIVReset_MaxBlockAttempts_HighValueAccepted confirms a high
+// retry count works against a normal card. The mock blocks at 3
+// regardless of the cap, so this also confirms that raising the
+// cap doesn't change normal-case behavior.
+func TestPIVReset_MaxBlockAttempts_HighValueAccepted(t *testing.T) {
+	mockCard, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+	err = cmdPIVReset(context.Background(), env, []string{
+		"--reader", "f",
+		"--lab-skip-scp11-trust", "--confirm-write",
+		"--max-block-attempts", "100",
+	})
+	if err != nil {
+		t.Fatalf("cmdPIVReset: %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "blocked after 3 wrong attempts") {
+		t.Errorf("expected 3-attempt block (mock counter is 3); got:\n%s", buf.String())
+	}
+}

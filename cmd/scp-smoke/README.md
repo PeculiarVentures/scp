@@ -178,6 +178,8 @@ The card's own foot-gun guard is the precondition that BOTH PIN and PUK retry co
 
 After a successful reset, you can immediately re-run `piv-provision` against the now-clean card.
 
+The `--max-block-attempts` flag (default 16) caps the wrong-PIN/wrong-PUK loop. YubiKey defaults to 3 retries so 3 attempts is the typical answer; the cap exists so a card returning unexpected status can't loop forever. Yubico documents retry counts up to 255 — raise `--max-block-attempts` for cards configured with high retry counts.
+
 ### piv-provision — generate a slot keypair (and optionally install a cert)
 
 Provisions a PIV slot through an SCP11b-secured channel: `VERIFY PIN` → `GENERATE KEY` → optional `PUT CERTIFICATE` → optional `ATTESTATION`. Same `--confirm-write` dry-run gating as `bootstrap-oce`.
