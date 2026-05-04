@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/securitydomain"
 )
 
@@ -37,8 +36,14 @@ func cmdSCP03SDRead(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("scp03-sd-read", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
+	scp03Keys := registerSCP03KeyFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	cfg, err := scp03Keys.applyToConfig()
+	if err != nil {
+		return err
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -50,8 +55,8 @@ func cmdSCP03SDRead(ctx context.Context, env *runEnv, args []string) error {
 	report := &Report{Subcommand: "scp03-sd-read", Reader: *reader}
 	data := &scp03SDReadData{}
 	report.Data = data
+	report.Pass("SCP03 keys", scp03Keys.describeKeys(cfg))
 
-	cfg := scp03.FactoryYubiKeyConfig()
 	sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
 	if err != nil {
 		report.Fail("open SCP03 SD", err.Error())

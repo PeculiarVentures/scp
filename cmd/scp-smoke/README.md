@@ -281,8 +281,39 @@ scp-smoke scp11b-piv-verify \
 
 The PEM bundle may contain multiple CERTIFICATE blocks; non-CERTIFICATE blocks (e.g. a stray private key) are rejected so a misnamed file doesn't silently produce an empty trust pool.
 
+## SCP03 keys for `scp03-sd-read` and `bootstrap-oce`
+
+Both commands default to YubiKey factory SCP03 keys (KVN `0xFF`, the publicly documented `404142...4F` AES-128 key set). For cards whose SCP03 keys have been rotated, supply the rotated set explicitly:
+
+| Flag | Purpose |
+|---|---|
+| `--scp03-keys-default` | Explicit opt-in to factory keys. Same as the implicit default; useful when scripts want the choice to be visible. |
+| `--scp03-kvn <hex byte>` | Custom key version number (e.g. `01`, `FF`). |
+| `--scp03-enc <hex>` | Custom channel encryption key (16/24/32 bytes for AES-128/192/256). |
+| `--scp03-mac <hex>` | Custom channel MAC key, same length as `--scp03-enc`. |
+| `--scp03-dek <hex>` | Custom data encryption key, same length as `--scp03-enc`. |
+
+The four custom-key flags must all be supplied together — partial specification fails closed at the CLI boundary so a half-completed rotation can't misfire. `--scp03-keys-default` and the custom-key flags are mutually exclusive. Hex values tolerate spaces, colons, and dashes for paste-from-docs convenience.
+
+```bash
+# Factory (implicit)
+scp-smoke scp03-sd-read --reader "YubiKey"
+
+# Rotated to a custom AES-128 set
+scp-smoke bootstrap-oce \
+  --reader "YubiKey" \
+  --oce-cert /path/to/oce-chain.pem \
+  --scp03-kvn 01 \
+  --scp03-enc 11111111111111111111111111111111 \
+  --scp03-mac 22222222222222222222222222222222 \
+  --scp03-dek 33333333333333333333333333333333 \
+  --confirm-write
+```
+
+The CLI never logs key bytes — the report shows `SCP03 keys PASS — custom (KVN 0x01, AES-128)` (or `factory (KVN 0xFF, AES-128 well-known)`), nothing more.
+
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (mgmt-key auth + cert-binding), `piv-reset`, `test`. SCP11 commands accept `--trust-roots <pem>` for production trust validation or `--lab-skip-scp11-trust` for wire-only smoke.
-- Next: custom SCP03 key flags for `bootstrap-oce` against rotated cards (`--kvn` / `--enc` / `--mac` / `--dek`); GET METADATA support for auto-detecting management-key algorithm against a card whose state isn't known up front.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (mgmt-key auth + cert-binding), `piv-reset`, `test`. SCP11 commands accept `--trust-roots <pem>` for production trust validation. SCP03 commands accept `--scp03-{kvn,enc,mac,dek}` for rotated-key cards.
+- Next: `GET METADATA` (Yubico extension) for auto-detecting management-key algorithm against a card whose state isn't known up front.
 - Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
