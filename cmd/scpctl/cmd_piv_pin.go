@@ -61,6 +61,9 @@ func cmdPIVPinVerify(ctx context.Context, env *runEnv, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if err := chFlags.validate(); err != nil {
+		return err
+	}
 	pin, err := pinFlag.resolve(env.stdin)
 	if err != nil {
 		return err
@@ -117,6 +120,9 @@ func cmdPIVPinChange(ctx context.Context, env *runEnv, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if err := chFlags.validate(); err != nil {
+		return err
+	}
 	oldPIN, err := oldFlag.resolve(env.stdin)
 	if err != nil {
 		return err
@@ -172,6 +178,9 @@ func cmdPIVPinUnblock(ctx context.Context, env *runEnv, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if err := chFlags.validate(); err != nil {
+		return err
+	}
 	puk, err := pukFlag.resolve(env.stdin)
 	if err != nil {
 		return err
@@ -226,6 +235,9 @@ func cmdPIVPukChange(ctx context.Context, env *runEnv, args []string) error {
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+	if err := chFlags.validate(); err != nil {
+		return err
 	}
 	oldPUK, err := oldFlag.resolve(env.stdin)
 	if err != nil {

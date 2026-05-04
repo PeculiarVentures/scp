@@ -3,8 +3,8 @@
 Administrative CLI for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. Three command groups:
 
 - `smoke` runs the original hardware smoke harness, preserved verbatim. The two questions it answers, against a real card, are still: does the SCP library produce wire bytes that an actual card accepts (`scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`), and does the wire layer survive being wrapped around a higher-level applet protocol (`scp11b-piv-verify`).
-- `piv` is the user-facing PIV operation surface backed by `piv/session`. `info` is wired today; key/cert/PIN operations land in follow-up commits.
-- `sd` is the Security Domain operation surface. `info` is wired today; the SCP-secured read paths still live under `smoke` until they migrate.
+- `piv` is the user-facing PIV operation surface backed by `piv/session`. The full surface is wired: `info`, `pin verify|change|unblock`, `puk change`, `mgmt auth|change-key`, `key generate|attest`, `cert get|put|delete`, `object get|put`, and `reset`. Destructive and credential-bearing commands require an explicit channel-mode choice (`--scp11b` or `--raw-local-ok`) and either `--confirm-write` or, for `reset`, both `--confirm-write` and `--confirm-reset-piv`.
+- `sd` is the Security Domain operation surface. `info` is wired today (parses Card Recognition Data and the Key Information Template over an unauthenticated session); the SCP-secured read paths still live under `smoke` until they migrate.
 
 Plus two top-level utilities, `readers` and `probe`, for the things operators reach for outside any group.
 
@@ -12,23 +12,29 @@ This binary is hardware-targeting: most subcommands need an actual reader and ca
 
 ## What this is for
 
-The two questions the smoke group answers, against a real card:
+The smoke group answers two questions against a real card:
 
 1. **Does the SCP library produce wire bytes that an actual card accepts?** — `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`
 2. **Does the wire layer survive being wrapped around a higher-level applet protocol?** — `scp11b-piv-verify`
 
 Plus a `probe` step that tells you what the card claims to be before you authenticate to it, and a `test` aggregator that runs the lot.
 
+The `piv` group is the operator-facing surface for PIV administration: PIN/PUK lifecycle, management-key authentication and rotation, slot key generation, certificate install/read/delete, raw object I/O, attestation, and full applet reset. These commands write to the card; safety is documented in the next section.
+
+The `sd` group exposes Security Domain identity. Today: `sd info` (read-only). Future: SCP-secured read and bootstrap flows currently in `smoke` will migrate here once they have hardware coverage parity.
+
 ## Safety
 
-This tool is read-only by default. It will **not**:
+The smoke group is read-only and behaves as it always did: no key rotation, no authentication lockouts, no SD writes over SCP11b, no card reset as a recovery mechanism.
 
-- Rotate SCP03 keys.
-- Trigger authentication lockouts.
-- Attempt Security Domain writes over SCP11b.
-- Reset cards as a recovery mechanism.
+The `piv` group writes to the card. The safety model rests on four explicit gates:
 
-A `restore-yubikey-factory` subcommand is described in the design doc but **deliberately not implemented in this version**. It will land in a follow-up under heavy guards: explicit destructive confirmation flag, OCE-authenticated session required, refused over SCP11b, and YubiKey-only.
+- **`--confirm-write`** is required for every destructive PIV operation (`key generate`, `cert put`, `cert delete`, `object put`, `mgmt change-key`, `reset`). The flag exists so destructive commands can never run without an explicit operator decision.
+- **`--confirm-reset-piv`** is required *in addition* for `piv reset`, because a full applet wipe is qualitatively different from a single-slot operation. The two-flag pattern prevents an operator who pastes a stale slot-rotation command line from accidentally turning it into a full reset.
+- **`--scp11b` or `--raw-local-ok`** must be specified explicitly on every destructive or credential-bearing PIV command. Specifying neither is a usage error; specifying both is a usage error. This fail-closed default closes the silent-downgrade gap that existed when raw was implicit (the predecessor smoke harness used SCP11b unconditionally; an operator migrating to the new surface would have lost the secure-channel posture by forgetting to type a flag).
+- **Cert-to-public-key binding is on by default.** `piv cert put` requires `--expected-pubkey <path>` unless `--no-pubkey-binding` is explicitly passed; the safe default rejects installing a certificate whose public key does not match the slot's generated key.
+
+Profile gating is host-side: operations the active card profile does not claim are refused with `piv.ErrUnsupportedByProfile` before any APDU goes on the wire (Ed25519 under Standard PIV, attestation under Standard PIV, reset under Standard PIV, etc.). The active profile is selected by probing the card; YubiKey-specific assumptions are not made unprobed.
 
 ## Build
 

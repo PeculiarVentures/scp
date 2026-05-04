@@ -132,44 +132,55 @@ func TestPIVReset_RequiresBothGates(t *testing.T) {
 		}, &buf
 	}
 
-	// No flags: --confirm-write gate fires first.
+	// Each gate is tested in isolation by satisfying every OTHER
+	// gate. This decouples the tests from the order of the gate
+	// checks in the handler: if a future commit reorders them
+	// (channel-mode first vs confirm-write first), each gate-
+	// specific test still asserts the right thing.
+
+	// confirm-write missing (with channel-mode and reset-piv ok).
 	env, _ := makeEnv()
-	err = cmdPIVGroupReset(context.Background(), env, []string{"--reader", "fake"})
+	err = cmdPIVGroupReset(context.Background(), env, []string{
+		"--reader", "fake",
+		"--raw-local-ok",
+		"--confirm-reset-piv",
+	})
 	if err == nil {
-		t.Fatal("expected error with no confirmation flags")
+		t.Fatal("expected error without --confirm-write")
 	}
 	if !strings.Contains(err.Error(), "--confirm-write") {
-		t.Errorf("first gate should mention --confirm-write: %v", err)
+		t.Errorf("error should mention --confirm-write: %v", err)
 	}
 
-	// --confirm-write only: --confirm-reset-piv gate fires next.
+	// confirm-reset-piv missing (with channel-mode and confirm-write ok).
+	env, _ = makeEnv()
+	err = cmdPIVGroupReset(context.Background(), env, []string{
+		"--reader", "fake",
+		"--raw-local-ok",
+		"--confirm-write",
+	})
+	if err == nil {
+		t.Fatal("expected error without --confirm-reset-piv")
+	}
+	if !strings.Contains(err.Error(), "--confirm-reset-piv") {
+		t.Errorf("error should mention --confirm-reset-piv: %v", err)
+	}
+
+	// channel-mode missing (with both confirmations ok). This is
+	// covered by the table-driven TestChannelMode_* tests in
+	// cmd_piv_channel_test.go but kept here as the locality marker
+	// for the reset-specific gate set.
 	env, _ = makeEnv()
 	err = cmdPIVGroupReset(context.Background(), env, []string{
 		"--reader", "fake",
 		"--confirm-write",
-	})
-	if err == nil {
-		t.Fatal("expected error with only --confirm-write")
-	}
-	if !strings.Contains(err.Error(), "--confirm-reset-piv") {
-		t.Errorf("second gate should mention --confirm-reset-piv: %v", err)
-	}
-
-	// --confirm-reset-piv without --confirm-write: still fails because
-	// the first gate fires first. This is the stable error-order
-	// guarantee: an operator who mistypes the second flag without
-	// the first sees the missing-first-flag error rather than a
-	// confusing "second flag not enough" message.
-	env, _ = makeEnv()
-	err = cmdPIVGroupReset(context.Background(), env, []string{
-		"--reader", "fake",
 		"--confirm-reset-piv",
 	})
 	if err == nil {
-		t.Fatal("expected error with only --confirm-reset-piv")
+		t.Fatal("expected error without channel-mode flag")
 	}
-	if !strings.Contains(err.Error(), "--confirm-write") {
-		t.Errorf("first gate should fire first regardless of flag ordering: %v", err)
+	if !strings.Contains(err.Error(), "--scp11b") || !strings.Contains(err.Error(), "--raw-local-ok") {
+		t.Errorf("error should mention both channel-mode flags: %v", err)
 	}
 }
 

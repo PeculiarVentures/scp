@@ -197,6 +197,25 @@ func registerSCP11bChannelFlags(fs *flag.FlagSet) *scp11bChannelFlags {
 	}
 }
 
+// validate is the early-return channel-mode check. Every handler
+// that uses registerSCP11bChannelFlags should call this immediately
+// after fs.Parse, before any handler-specific I/O. The reason for
+// the early call is ordering: an operator who passes incompatible
+// channel-mode flags should see that error before any downstream
+// flag-reading-from-disk (like --cert <path> or --in <path>) gets
+// a chance to fail with a different error. openPIVSession does the
+// same check defensively, but every handler should call validate
+// up front so the error surface is predictable.
+func (f *scp11bChannelFlags) validate() error {
+	switch {
+	case *f.scp11b && *f.rawLocalOK:
+		return &usageError{msg: "--scp11b and --raw-local-ok are mutually exclusive; pick one"}
+	case !*f.scp11b && !*f.rawLocalOK:
+		return &usageError{msg: "this command requires either --scp11b (secure channel) or --raw-local-ok (explicit raw-mode acknowledgement for local-USB administration); see docs/piv.md for the threat-model split"}
+	}
+	return nil
+}
+
 // openPIVSession is the session-construction path every destructive
 // or credential-bearing scpctl piv handler uses. The channel mode is
 // chosen by the flag pair (--scp11b, --raw-local-ok); exactly one
@@ -290,6 +309,9 @@ func cmdPIVKeyGenerate(ctx context.Context, env *runEnv, args []string) error {
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+	if err := chFlags.validate(); err != nil {
+		return err
 	}
 	if !*confirm {
 		return fmt.Errorf("piv key generate is destructive (overwrites slot %s); pass --confirm-write to proceed", *slotStr)
@@ -523,6 +545,9 @@ func cmdPIVCertPut(ctx context.Context, env *runEnv, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if err := chFlags.validate(); err != nil {
+		return err
+	}
 	if !*confirm {
 		return fmt.Errorf("piv cert put is destructive; pass --confirm-write to proceed")
 	}
@@ -609,6 +634,9 @@ func cmdPIVCertDelete(ctx context.Context, env *runEnv, args []string) error {
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+	if err := chFlags.validate(); err != nil {
+		return err
 	}
 	if !*confirm {
 		return fmt.Errorf("piv cert delete is destructive; pass --confirm-write to proceed")
@@ -766,6 +794,9 @@ func cmdPIVObjectPut(ctx context.Context, env *runEnv, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if err := chFlags.validate(); err != nil {
+		return err
+	}
 	if !*confirm {
 		return fmt.Errorf("piv object put is destructive; pass --confirm-write to proceed")
 	}
@@ -833,6 +864,9 @@ func cmdPIVMgmtAuth(ctx context.Context, env *runEnv, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if err := chFlags.validate(); err != nil {
+		return err
+	}
 	mgmtKey, err := mgmtKeyFlag.resolve(env.stdin)
 	if err != nil {
 		return err
@@ -881,6 +915,9 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+	if err := chFlags.validate(); err != nil {
+		return err
 	}
 	if !*confirm {
 		return fmt.Errorf("piv mgmt change-key is destructive; pass --confirm-write to proceed")
@@ -970,6 +1007,9 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+	if err := chFlags.validate(); err != nil {
+		return err
 	}
 	if !*confirm {
 		return fmt.Errorf("piv reset erases all slots, certificates, and credentials; pass --confirm-write to proceed")
