@@ -67,13 +67,14 @@ var pivCommands = map[string]func(ctx context.Context, env *runEnv, args []strin
 	"reset":  cmdPIVGroupReset,
 }
 
-// sdCommands maps the sd-group subcommand names. Today only 'info'
-// is wired; the remaining flows (scp03-read, scp11b-read,
+// sdCommands maps the sd-group subcommand names. Today 'info' and
+// 'reset' are wired; the remaining flows (scp03-read, scp11b-read,
 // scp11a-read, bootstrap-oce) still live under 'scpctl smoke' and
 // will move when their dependencies on the smoke-specific report
 // shape are decoupled.
 var sdCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
-	"info": cmdSDInfo,
+	"info":  cmdSDInfo,
+	"reset": cmdSDReset,
 }
 
 // smokeCommands maps the smoke-group subcommand names to handlers.
@@ -449,6 +450,12 @@ Subcommands:
   info     Open an unauthenticated SD session and report Card
            Recognition Data. Equivalent to 'scpctl probe' /
            'scpctl smoke probe'. Read-only.
+  reset    Factory-reset Security Domain key material. Restores
+           the factory SCP03 key set, regenerates the SCP11b key,
+           and removes any custom OCE / SCP11a / SCP11c keys.
+           Dry-run by default; pass --confirm-reset-sd to mutate.
+           Does NOT touch PIV applet state — for that, see
+           'scpctl smoke piv-reset'.
 
 Forthcoming subcommands (still reachable under 'scpctl smoke' for now):
   scp03-read           SCP03 SD session read.
