@@ -8,6 +8,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/channel"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 func TestSCP03_Handshake(t *testing.T) {
@@ -340,5 +341,142 @@ func TestOpen_NilTransport_RejectsExplicitly(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "transport is required") {
 		t.Errorf("error should mention transport is required; got: %v", err)
+	}
+}
+
+// recordingTransport wraps a transport.Transport and captures every
+// APDU the SCP layer emits to the wire. Used to assert wire shape
+// (chunk count, CLA chaining bits, P1/P2 constancy) for long
+// commands without parsing the parsed-response stream.
+type recordingTransport struct {
+	inner    *MockTransport
+	commands []*apdu.Command
+}
+
+func (r *recordingTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	// Copy the command so later mutation by callers can't change
+	// what we recorded. Data slice is shared; tests only inspect.
+	c := *cmd
+	r.commands = append(r.commands, &c)
+	return r.inner.Transmit(ctx, cmd)
+}
+
+func (r *recordingTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+	return r.inner.TransmitRaw(ctx, raw)
+}
+func (r *recordingTransport) Close() error                         { return r.inner.Close() }
+func (r *recordingTransport) TrustBoundary() transport.TrustBoundary { return r.inner.TrustBoundary() }
+
+// TestSCP03_Transmit_LongPayloadIsWrapThenChain is the regression
+// pin for the wrap-then-chain layering. A logical command whose
+// wrapped form exceeds short-Lc (255 bytes) must emit:
+//
+//   - exactly ONE SCP wrap (one C-MAC advance, computed over the
+//     extended-format header), followed by
+//   - N transport-layer chunks sharing INS/P1/P2 with the chaining
+//     bit (CLA b5 = 0x10) on every chunk except the last.
+//
+// The earlier inverted layering (chain at the application layer,
+// wrap each chunk independently) advanced the C-MAC chain N times
+// for one logical command and computed each MAC over short-form
+// Lc on each chunk. Real cards reassemble chained chunks before
+// applying secure messaging, so the card sees ONE logical APDU
+// with extended-form Lc — different MAC math from what the host
+// emitted, hence MAC verification fails. This test catches the
+// inverted layering deterministically: with the recording
+// transport seeing N chunks for one logical command, if the SCP
+// wrap layer ran per-chunk the underlying mock's MAC verification
+// would fail (the mock reassembles chains and MAC's once, exactly
+// like real cards). A green test means the host emits exactly one
+// MAC over the assembled command.
+func TestSCP03_Transmit_LongPayloadIsWrapThenChain(t *testing.T) {
+	card := NewMockCard(DefaultKeys)
+	ctx := context.Background()
+	rec := &recordingTransport{inner: card.Transport()}
+
+	sess, err := Open(ctx, rec, &Config{
+		Keys:          DefaultKeys,
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+
+	// Drop the handshake commands so we can assert chunk count on
+	// the long-payload command alone.
+	rec.commands = rec.commands[:0]
+
+	// 600-byte payload. Wrapped form (ISO 9797-1 method 2 padding
+	// to 608 + 8-byte MAC) = 616 bytes (S8 mode is the YubiKey
+	// factory default; S16 would give 624). Splits into 3 short-
+	// form chunks of 255 + 255 + 106 with CLA chaining bits 0x10,
+	// 0x10, 0x00.
+	payload := make([]byte, 600)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	// STORE DATA shape (P1=0x90 P2=0x00) is what the real call
+	// site uses; the mock dispatches it through processPlain
+	// (records and returns 9000). For this test we only care that
+	// the wire shape is correct and the host's MAC verifies on
+	// the card side.
+	resp, err := sess.Transmit(ctx, &apdu.Command{
+		CLA: 0x80, INS: 0xE2, P1: 0x90, P2: 0x00,
+		Data: payload, Le: -1,
+	})
+	if err != nil {
+		t.Fatalf("Transmit: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("expected SW=9000, got %04X (host wrap or card MAC verify must have desynced — "+
+			"this is the wrap-then-chain regression: long commands MUST be wrapped once, "+
+			"chunked at the transport, with the card reassembling before MAC check)",
+			resp.StatusWord())
+	}
+
+	if len(rec.commands) != 3 {
+		t.Fatalf("wire shape: expected 3 chunks for a 616-byte wrapped APDU "+
+			"(255 + 255 + 106), got %d", len(rec.commands))
+	}
+
+	// First two chunks have the chaining bit set; the third does not.
+	for i, c := range rec.commands {
+		isLast := i == len(rec.commands)-1
+		hasChainBit := c.CLA&0x10 != 0
+		switch {
+		case isLast && hasChainBit:
+			t.Errorf("chunk %d (final): CLA = %02X has chain bit set; final chunk must clear it",
+				i, c.CLA)
+		case !isLast && !hasChainBit:
+			t.Errorf("chunk %d (intermediate): CLA = %02X has chain bit clear; intermediate chunks must set it",
+				i, c.CLA)
+		}
+		// INS/P1/P2 are identical across chunks — chunking only
+		// varies CLA chain bit and data slice. If a future
+		// refactor reintroduces application-level chaining (P2
+		// stepping through block numbers, P1 b8 clearing on
+		// non-final blocks) this assertion fails.
+		if c.INS != 0xE2 {
+			t.Errorf("chunk %d: INS = %02X, want E2", i, c.INS)
+		}
+		if c.P1 != 0x90 {
+			t.Errorf("chunk %d: P1 = %02X, want 90 (constant across chunks; no app-level block numbering)",
+				i, c.P1)
+		}
+		if c.P2 != 0x00 {
+			t.Errorf("chunk %d: P2 = %02X, want 00 (constant across chunks; no app-level block numbering)",
+				i, c.P2)
+		}
+	}
+
+	// Sizes: 255 + 255 + 106 = 616 bytes total wrapped data
+	// (608-byte padded ciphertext + 8-byte S8 MAC).
+	wantSizes := []int{255, 255, 106}
+	for i, c := range rec.commands {
+		if len(c.Data) != wantSizes[i] {
+			t.Errorf("chunk %d: data size = %d, want %d", i, len(c.Data), wantSizes[i])
+		}
 	}
 }

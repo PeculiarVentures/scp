@@ -452,13 +452,40 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 }
 
 // Transmit sends a command through the SCP03 secure channel.
+//
+// Layering follows the GP/yubikit canonical order: wrap the LOGICAL
+// APDU once at the SCP layer (one MAC chain advance per logical
+// command), then split the wrapped bytes at the transport layer
+// using ISO 7816-4 §5.1.1 command chaining when the wrapped APDU
+// exceeds short-form Lc (255 bytes).
+//
+// The earlier inversion — chain at the application layer, wrap each
+// chunk independently — produced a different wire shape for long
+// commands: each chunk MAC'd as a standalone APDU, the host-side
+// MAC chain advancing per chunk while the card sees one logical
+// STORE DATA. Worse, the YubiKey returns bare 9000 (no R-MAC) on
+// intermediate chained chunks, which the host's R-MAC unwrap then
+// rejected and used as a signal to terminate the session — leaving
+// the NEXT command's Wrap to deref a nil channel.
+//
+// Wrap-then-chain matches yubikit-python's ScpProcessor +
+// CommandChainingProcessor stack and what real cards expect. The
+// MAC is computed over the extended-format header (Lc encoded as
+// 3 bytes when > 255), so the card-side MAC math agrees regardless
+// of how the wire is split.
 func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	wrapped, err := s.channel.Wrap(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("wrap command: %w", err)
 	}
 
-	resp, err := s.transport.Transmit(ctx, wrapped)
+	// Transport-layer chaining. transport.TransmitWithChaining splits
+	// wrapped.Data into ISO 7816-4 §5.1.1 chunks if it exceeds the
+	// short-Lc bound, sends each, and returns only the final chunk's
+	// response. Intermediate chunks return bare 9000 with no R-MAC;
+	// that's correct because the SCP wrap (and its MAC chain advance)
+	// happened ONCE above for the whole logical command.
+	resp, err := transport.TransmitWithChaining(ctx, s.transport, wrapped)
 	if err != nil {
 		return nil, fmt.Errorf("transmit: %w", err)
 	}

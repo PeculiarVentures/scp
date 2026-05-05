@@ -498,123 +498,38 @@ func (s *Session) requireDEK() error {
 	return nil
 }
 
-// transmitWithChaining sends a logical APDU using ISO 7816-4 §5.1.1
-// command chaining (CLA bit b5 = 0x10) when the data field exceeds a
-// single short APDU's capacity. For payloads that fit in a single APDU,
-// transmits unchanged. For larger payloads, splits into chained APDUs
-// whose wrapped on-wire form stays within short-Lc (≤ 255 bytes):
-//
-//   - When authenticated through SCP, each chunk is sized to
-//     secureWrapSafeBlock (223) so that AES-CBC padding + MAC still
-//     fits in a short APDU after channel.Wrap.
-//   - When unauthenticated, each chunk is sized to 255 bytes; nothing
-//     inflates the wire size.
-//
-// STORE DATA is included here (no carve-out): retail YubiKey 5.7.4
-// rejects GP §11.11 application-level block chaining with SW=6A86
-// and requires the same ISO transport-layer chaining used by yubikit-
-// python's SmartCardProtocol.
-func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
-	chunkBudget := 255
-	if s.authenticated && s.scpSession != nil {
-		chunkBudget = secureWrapSafeBlock
-	}
+// Application-level command chaining used to live here. The
+// canonical layering is now wrap-then-chain: scp03.Session.Transmit
+// performs Wrap once over the whole logical APDU (extended-format
+// MAC when Lc > 255) and the wrapped bytes are split at the
+// transport layer in scp03.Session.sendPossiblyChained. The
+// application layer never sees more than one logical APDU per
+// command, so a transmitWithChaining helper here is no longer
+// needed and would re-introduce the layering bug it was added to
+// solve (per-chunk SCP wrapping desyncing the host MAC chain
+// against a card that sees one logical command).
 
-	if len(cmd.Data) <= chunkBudget {
-		return s.transmit(ctx, cmd)
-	}
-
-	cmds := chainCommandsAt(cmd, chunkBudget)
-	var lastResp *apdu.Response
-	for i, c := range cmds {
-		resp, err := s.transmit(ctx, c)
-		if err != nil {
-			return nil, err
-		}
-		if i < len(cmds)-1 && !resp.IsSuccess() {
-			return resp, resp.Error()
-		}
-		lastResp = resp
-	}
-	return lastResp, nil
-}
-
-// chainCommandsAt splits cmd.Data into ISO 7816-4 chained APDUs whose
-// data fields are at most chunkSize bytes. Intermediate APDUs have
-// CLA bit 5 set; the final APDU keeps the original CLA and Le.
-func chainCommandsAt(cmd *apdu.Command, chunkSize int) []*apdu.Command {
-	if chunkSize <= 0 {
-		chunkSize = 255
-	}
-	if len(cmd.Data) <= chunkSize {
-		return []*apdu.Command{cmd}
-	}
-	var cmds []*apdu.Command
-	data := cmd.Data
-	for len(data) > chunkSize {
-		cmds = append(cmds, &apdu.Command{
-			CLA:  cmd.CLA | 0x10, // chaining bit
-			INS:  cmd.INS,
-			P1:   cmd.P1,
-			P2:   cmd.P2,
-			Data: data[:chunkSize],
-			Le:   -1,
-		})
-		data = data[chunkSize:]
-	}
-	cmds = append(cmds, &apdu.Command{
-		CLA:  cmd.CLA,
-		INS:  cmd.INS,
-		P1:   cmd.P1,
-		P2:   cmd.P2,
-		Data: data,
-		Le:   cmd.Le,
-	})
-	return cmds
-}
-
-// secureWrapSafeBlock is the largest plaintext payload that, after
-// AES-CBC encryption with ISO/IEC 9797-1 method-2 padding plus a
-// 16-byte C-MAC, still fits in a short-form APDU (Lc ≤ 255):
+// transmitStoreData sends a STORE DATA APDU as a single LOGICAL
+// command. When the payload exceeds a short-form APDU's capacity,
+// transport-layer chaining inside scp03.Session.Transmit splits it
+// into ISO 7816-4 §5.1.1 chained chunks; the application layer
+// here always sees one logical APDU.
 //
-//	max wire bytes = ceil((N + 1) / 16) * 16 + macSize ≤ 255
+// The wire shape is the same one yubikit-python emits and the one
+// retail YubiKey 5.7.4 accepts: single P1=0x90 P2=0x00 APDU at the
+// SCP layer, with the SCP wrap (encrypt + MAC over extended-format
+// header) computed once over the whole logical command, and the
+// wrapped bytes split at the transport. GP §11.11's application-
+// level block chaining (P2 = block number, P1 b8 cleared on non-
+// final blocks) is OPTIONAL and the YubiKey doesn't implement it;
+// we don't use it.
 //
-// For macSize = 16 (S16, the worst case), the largest N that satisfies
-// the inequality is 223: padded(223) = 224, plus 16-byte MAC = 240,
-// which fits. For macSize = 8 the safe value is 239; we pick the
-// universal-safe value so the chunk size is independent of the
-// negotiated SCP mode and the on-wire APDU stays short even under
-// full secure messaging.
-//
-// Cards without extended-length APDU support (e.g. older YubiKey
-// firmware) accept short APDUs only, so honoring this bound is what
-// keeps chained management commands portable across hardware.
-const secureWrapSafeBlock = 223
-
-// transmitStoreDataChained sends a STORE DATA payload as a single
-// LOGICAL command, splitting at the transport layer with ISO 7816-4
-// §5.1.1 command chaining (CLA bit b5 = 0x10) when the payload
-// exceeds a single short APDU.
-//
-// Earlier this function used GP §11.11 application-level block
-// chaining (P2 = block number, P1 b8 = 0 on non-final blocks).
-// That's spec-correct for cards that implement it, but retail
-// YubiKey 5.7.4 rejects multi-block STORE DATA with SW=6A86
-// ("incorrect P1-P2"). yubikit-python's store_data is a single
-// send_apdu call with P1=0x90 P2=0x00 and relies on its
-// SmartCardProtocol to do ISO CLA chaining when data > 255 bytes,
-// the same wire shape PSO uses (see scp11/scp11.go
-// psoSendCertChained for the parallel fix). Mirroring that here
-// closes the SW=6A86 path and matches what the YubiKey accepts.
-//
-// Logical APDU: P1=0x90 (b8=last/only block, b5=BER-TLV format),
-// P2=0x00. transmitWithChaining splits this into N short APDUs
-// with CLA progression 0x84 → 0x84+0x10 → ... → 0x84 (the SCP-
-// wrapped CLA path) or 0x80 → 0x80|0x10 → ... → 0x80 if not
-// authenticated. Each chained chunk reuses INS/P1/P2 unchanged.
-func (s *Session) transmitStoreDataChained(ctx context.Context, payload []byte) (*apdu.Response, error) {
-	cmd := storeDataCmd(payload)
-	resp, err := s.transmitWithChaining(ctx, cmd)
+// For unauthenticated sessions, scp03 isn't in the path and the
+// transport sees the bare STORE DATA APDU. STORE DATA is OCE-
+// gated on the YubiKey, so the only call sites that reach here
+// in practice already require an authenticated session.
+func (s *Session) transmitStoreData(ctx context.Context, payload []byte) (*apdu.Response, error) {
+	resp, err := s.transmit(ctx, storeDataCmd(payload))
 	if err != nil {
 		return nil, fmt.Errorf("STORE DATA: %w", err)
 	}
@@ -949,7 +864,7 @@ func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs
 	}
 
 	payload := storeCertificatesData(ref, derCerts)
-	resp, err := s.transmitStoreDataChained(ctx, payload)
+	resp, err := s.transmitStoreData(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store certificates: %w", err)
 	}
@@ -1002,7 +917,7 @@ func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byt
 	}
 
 	payload := storeCaIssuerData(ref, ski)
-	resp, err := s.transmitStoreDataChained(ctx, payload)
+	resp, err := s.transmitStoreData(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store CA issuer: %w", err)
 	}
@@ -1046,7 +961,7 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 		return err
 	}
 
-	resp, err := s.transmitStoreDataChained(ctx, payload)
+	resp, err := s.transmitStoreData(ctx, payload)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store allowlist: %w", err)
 	}
@@ -1084,7 +999,7 @@ func (s *Session) StoreData(ctx context.Context, data []byte) error {
 	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
-	resp, err := s.transmitStoreDataChained(ctx, data)
+	resp, err := s.transmitStoreData(ctx, data)
 	if err != nil {
 		return fmt.Errorf("securitydomain: store data: %w", err)
 	}
