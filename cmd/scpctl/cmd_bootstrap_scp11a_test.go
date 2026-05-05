@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/transport/trace"
 )
 
 // TestBootstrapSCP11a_DryRun confirms that without --confirm-write
@@ -334,4 +336,136 @@ func TestBootstrapSCP11a_ImportMode_FreshKeyOnHost(t *testing.T) {
 		}
 	}
 	assertSPKIPemIsP256(t, outPath)
+}
+
+// TestBootstrapSCP11a_APDUTrace exercises the --apdu-trace flag.
+// Pins:
+//
+//   - the file is created at the supplied path
+//   - it is non-empty and parses as the expected JSON shape
+//   - it contains AT LEAST one PUT KEY (INS=0xD8) exchange — the
+//     CA-KLOC install — because that's the wire shape the trace
+//     was added to investigate (PSO SW=6A80 root cause)
+//   - the recorded bytes match what the mock saw on the wire
+//     (the recorder is below SCP03 wrapping at the transport layer,
+//     so trace bytes are the post-wrapping bytes the mock received)
+//
+// This is the exact diagnostic surface we'd run against retail
+// hardware to byte-diff against ykman+pcsc-spy. If the test stops
+// passing, the trace flag has regressed and the on-hardware
+// investigation is blocked.
+func TestBootstrapSCP11a_APDUTrace(t *testing.T) {
+	_, certPath := writeOCEFixturePEMs(t)
+	mc := scp03.NewMockCard(scp03.DefaultKeys)
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mc.Transport(), nil
+		},
+	}
+
+	dir := t.TempDir()
+	tracePath := filepath.Join(dir, "scpctl-bootstrap.json")
+	outPath := filepath.Join(dir, "sd-pub.pem")
+	if err := cmdBootstrapSCP11a(context.Background(), env, []string{
+		"--reader", "fake",
+		"--oce-cert", certPath,
+		"--sd-key-out", outPath,
+		"--confirm-write",
+		"--apdu-trace", tracePath,
+	}); err != nil {
+		t.Fatalf("bootstrap with --apdu-trace: %v\n--- output ---\n%s", err, buf.String())
+	}
+
+	st, err := os.Stat(tracePath)
+	if err != nil {
+		t.Fatalf("trace file not created at %s: %v", tracePath, err)
+	}
+	if st.Size() == 0 {
+		t.Fatalf("trace file %s is empty", tracePath)
+	}
+
+	raw, err := os.ReadFile(tracePath) //nolint:gosec // operator-supplied test path
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+
+	// Parse as the trace.File shape and assert structural
+	// invariants.
+	var f trace.File
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("trace JSON does not parse as trace.File: %v\n--- raw ---\n%s", err, string(raw))
+	}
+	if f.Profile != "scpctl bootstrap-scp11a" {
+		t.Errorf("trace.Profile = %q; want %q", f.Profile, "scpctl bootstrap-scp11a")
+	}
+	if f.Reader != "fake" {
+		t.Errorf("trace.Reader = %q; want %q", f.Reader, "fake")
+	}
+	if len(f.Exchanges) == 0 {
+		t.Fatal("trace recorded zero exchanges; the recorder should sit on the wire path")
+	}
+
+	// Find a PUT KEY exchange. The recorder records POST-SCP03-
+	// wrapping bytes, so the CLA byte of the wrapped APDU has the
+	// secure-messaging bit set (0x84). The INS byte stays the
+	// SAME between unwrapped and wrapped (SCP03 wraps the data
+	// field, not the header). So INS=0xD8 in the recorded
+	// command bytes is the fingerprint we look for.
+	var sawPutKey bool
+	for _, ex := range f.Exchanges {
+		if len(ex.INS) == 1 && ex.INS[0] == 0xD8 {
+			sawPutKey = true
+			break
+		}
+	}
+	if !sawPutKey {
+		t.Errorf("trace contained no PUT KEY (INS=0xD8) exchange; "+
+			"%d exchanges recorded", len(f.Exchanges))
+	}
+
+	// Postamble check: stderr line announcing where the trace
+	// was written, so an operator running on hardware sees a
+	// pointer to the file without having to know the flag's
+	// behavior in advance.
+	if !strings.Contains(buf.String(), "APDU trace written to "+tracePath) {
+		t.Errorf("expected stderr line announcing trace path %q\n--- output ---\n%s",
+			tracePath, buf.String())
+	}
+}
+
+// TestBootstrapSCP11a_APDUTrace_DryRunNoFile pins that the trace
+// flag does NOT create a file when the command runs in dry-run
+// (no --confirm-write). The dry-run path returns before reaching
+// the connect call, so the recorder is never wired up; that's
+// the contract.
+func TestBootstrapSCP11a_APDUTrace_DryRunNoFile(t *testing.T) {
+	_, certPath := writeOCEFixturePEMs(t)
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			t.Fatal("dry-run should not connect")
+			return nil, nil
+		},
+	}
+
+	dir := t.TempDir()
+	tracePath := filepath.Join(dir, "should-not-exist.json")
+	outPath := filepath.Join(dir, "sd-pub.pem")
+	if err := cmdBootstrapSCP11a(context.Background(), env, []string{
+		"--reader", "fake",
+		"--oce-cert", certPath,
+		"--sd-key-out", outPath,
+		"--apdu-trace", tracePath,
+		// no --confirm-write → dry-run
+	}); err != nil {
+		t.Fatalf("dry-run with --apdu-trace: %v\n--- output ---\n%s", err, buf.String())
+	}
+	if _, err := os.Stat(tracePath); err == nil {
+		t.Errorf("trace file %s exists after dry-run; should not have been created", tracePath)
+	}
 }

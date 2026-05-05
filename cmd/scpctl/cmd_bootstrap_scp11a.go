@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/PeculiarVentures/scp/securitydomain"
+	"github.com/PeculiarVentures/scp/transport/trace"
 )
 
 type bootstrapSCP11aData struct {
@@ -107,6 +108,14 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 	// Shared.
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, bootstrap-scp11a runs in dry-run mode.")
+	apduTrace := fs.String("apdu-trace", "",
+		"If set, write every wire-level APDU exchange to this path as a JSON "+
+			"trace. Used for byte-level diff against an externally-captured "+
+			"yubikit/ykman trace (pcsc-spy on macOS, pcsc-tools on Linux) to "+
+			"localize wire-shape bugs. The recorder sits at the transport "+
+			"layer, so it captures POST-SCP03-wrapping bytes — exactly what "+
+			"the external capture sees from the OS side. No effect in "+
+			"dry-run mode (no APDUs are sent).")
 	scp03Keys := registerSCP03KeyFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -224,6 +233,38 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 		return err
 	}
 	defer t.Close()
+
+	// Wire-level APDU trace: wrap the transport with the recorder so
+	// every Transmit/TransmitRaw is captured. Sits at the transport
+	// layer, BELOW the SCP03 secure channel — the bytes recorded are
+	// what hits the wire, including SCP03 C-MAC and (when configured)
+	// C-DECRYPTION. This is apples-to-apples with what `pcsc-spy`
+	// captures from the macOS PC/SC side, so a byte-diff between an
+	// scpctl trace and an externally-captured ykman trace is a
+	// localizes-the-bug operation: identical wire bytes prove the
+	// scpctl path matches yubikit; any diff is the bug surface.
+	if *apduTrace != "" {
+		rec := trace.NewRecorder(t, trace.RecorderConfig{
+			Profile: "scpctl bootstrap-scp11a",
+			Reader:  *reader,
+			Notes: "Captured for byte-diff against ykman/yubikit during the " +
+				"SCP11a PSO SW=6A80 investigation. Recorded bytes are wire-level: " +
+				"SCP03 wrapping has already been applied at this layer. " +
+				"See https://github.com/PeculiarVentures/scp issue tracker.",
+		})
+		// The defer captures the loop-time pointer; on return we
+		// flush whatever exchanges accumulated, regardless of how
+		// the function exits. Flush errors are reported but do not
+		// override a failing primary error.
+		defer func() {
+			if ferr := rec.FlushFile(*apduTrace); ferr != nil {
+				fmt.Fprintf(env.errOut, "scpctl: --apdu-trace flush: %v\n", ferr)
+			} else {
+				fmt.Fprintf(env.errOut, "scpctl: APDU trace written to %s\n", *apduTrace)
+			}
+		}()
+		t = rec
+	}
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
 	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
