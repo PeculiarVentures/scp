@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1" //nolint:gosec // RFC 5280 §4.2.1.2 method 1 known-answer
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
@@ -333,5 +334,100 @@ func TestOCEGen_RequiresOutDir(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--out-dir") {
 		t.Errorf("error should mention --out-dir: %v", err)
+	}
+}
+
+// TestComputeSKI_Method1 pins RFC 5280 §4.2.1.2 method 1 SKI
+// computation: SHA-1 of the BIT STRING value of subjectPublicKey
+// (the SEC1 uncompressed point for an EC key), NOT SHA-1 of the
+// full SubjectPublicKeyInfo.
+//
+// The earlier revision hashed the full SPKI, which produced
+// values that didn't match what cards and standards-compliant
+// tooling expect. The bug was subtle because EVERY chain
+// produced by a single tool would have a self-consistent
+// (wrong) SKI, only revealing the discrepancy when comparing
+// against extension SKIs from other generators.
+//
+// This test pins the contract by:
+//
+//  1. Generating an EC key with a known seed.
+//  2. Computing computeSKI(pub).
+//  3. Independently extracting the SEC1 uncompressed point and
+//     hashing it via stdlib.
+//  4. Asserting equality.
+//
+// If a future change makes computeSKI hash something other than
+// the SEC1 point, this test fails.
+func TestComputeSKI_Method1(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	got := computeSKI(&priv.PublicKey)
+
+	// Independently compute via crypto/ecdh, which yields the
+	// same SEC1 uncompressed encoding (0x04 || X || Y) without
+	// going through ASN.1.
+	ecdhPub, err := priv.PublicKey.ECDH()
+	if err != nil {
+		t.Fatalf("ECDH conv: %v", err)
+	}
+	point := ecdhPub.Bytes()
+	if len(point) != 65 || point[0] != 0x04 {
+		t.Fatalf("expected 65-byte uncompressed point starting with 0x04; got len=%d, first=0x%02X",
+			len(point), point[0])
+	}
+	wantSum := sha1.Sum(point) //nolint:gosec // RFC 5280 method 1
+	if !bytes.Equal(got, wantSum[:]) {
+		t.Errorf("computeSKI mismatch:\n  got:  %X\n  want: %X (sha1 of SEC1 uncompressed point)",
+			got, wantSum[:])
+	}
+
+	// Also assert it does NOT equal SHA-1 of the full SPKI,
+	// which is the wrong-answer that an earlier revision
+	// produced. This pin makes regressions loud.
+	spki, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal SPKI: %v", err)
+	}
+	wrongSum := sha1.Sum(spki) //nolint:gosec
+	if bytes.Equal(got, wrongSum[:]) {
+		t.Errorf("computeSKI matches SHA-1(SPKI) — that is the WRONG implementation per RFC 5280 method 1")
+	}
+}
+
+// TestOCEVerify_SKIExtensionMatchesComputed_ForGeneratedChain is
+// the real-world cousin of TestComputeSKI_Method1: chains produced
+// by 'scpctl oce gen' should have their extension SKI EQUAL to the
+// RFC 5280 method 1 computation, because that's what computeSKI
+// puts in the cert template. Verify must report them as matching.
+//
+// This is the regression that catches the prior bug where verify
+// would say "extension SKI does not match computed" on chains we
+// produced ourselves.
+func TestOCEVerify_SKIExtensionMatchesComputed_ForGeneratedChain(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	env := &runEnv{out: &buf, errOut: &buf}
+	if err := cmdOCEGen(context.Background(), env, []string{
+		"--out-dir", dir, "--valid-days", "30",
+	}); err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+
+	var verifyBuf bytes.Buffer
+	verifyEnv := &runEnv{out: &verifyBuf, errOut: &verifyBuf}
+	if err := cmdOCEVerify(context.Background(), verifyEnv, []string{
+		"--chain", filepath.Join(dir, "oce-chain-leaf-last.pem"),
+	}); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	out := verifyBuf.String()
+	// The "extension vs computed" line is a SKIP that only
+	// appears when the two values disagree. Generated chains
+	// must NOT produce it.
+	if strings.Contains(out, "extension SKI does not match RFC 5280 method 1") {
+		t.Errorf("generated chain should have extension SKI == RFC 5280 method 1 SKI;\n--- output ---\n%s", out)
 	}
 }

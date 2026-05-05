@@ -176,15 +176,69 @@ func cmdOCEVerify(ctx context.Context, env *runEnv, args []string) error {
 			fmt.Sprintf("%X (%d bytes)", root.SubjectKeyId, len(root.SubjectKeyId)))
 	} else {
 		report.Skip("chain[0] SKI (extension)",
-			"not present; scpctl will compute SHA-1(SPKI) per RFC 5280 §4.2.1.2")
+			"not present; scpctl will compute SHA-1 of the subjectPublicKey BIT STRING per RFC 5280 §4.2.1.2 method 1")
 	}
-	if len(root.RawSubjectPublicKeyInfo) > 0 {
-		h := sha1.Sum(root.RawSubjectPublicKeyInfo) //nolint:gosec // RFC 5280 §4.2.1.2 specifies SHA-1
-		report.Pass("chain[0] SKI (computed SHA-1(SPKI))",
-			fmt.Sprintf("%X (%d bytes)", h[:], len(h)))
+	// RFC 5280 §4.2.1.2 method 1: the SubjectKeyIdentifier is "the
+	// 160-bit SHA-1 hash of the value of the BIT STRING
+	// subjectPublicKey (excluding the tag, length, and number of
+	// unused bits)." For an ECDSA public key that's the SEC1
+	// uncompressed point (0x04 || X || Y).
+	if rootKey, ok := root.PublicKey.(*ecdsa.PublicKey); ok {
+		ecdhKey, err := rootKey.ECDH()
+		if err != nil {
+			report.Fail("chain[0] SKI (computed)",
+				fmt.Sprintf("convert ECDSA→ECDH for BIT STRING extraction: %v", err))
+		} else {
+			h := sha1.Sum(ecdhKey.Bytes()) //nolint:gosec // RFC 5280 §4.2.1.2 method 1
+			report.Pass("chain[0] SKI (computed RFC 5280 method 1)",
+				fmt.Sprintf("%X (%d bytes)", h[:], len(h)))
+			if len(root.SubjectKeyId) > 0 && !bytesEqual(root.SubjectKeyId, h[:]) {
+				// Surface, but don't fail — the card uses the extension
+				// value when present. RFC 5280 explicitly permits other
+				// SKI computation methods (§4.2.1.2: "Other methods of
+				// generating unique numbers are also acceptable.").
+				report.Skip("chain[0] SKI (extension vs computed)",
+					"extension SKI does not match RFC 5280 method 1; this is "+
+						"permitted by RFC 5280 (other methods are acceptable). "+
+						"scpctl bootstrap registers the EXTENSION value.")
+			}
+		}
 	} else {
-		report.Fail("chain[0] SKI computation",
-			"RawSubjectPublicKeyInfo is empty; cannot compute fallback SKI")
+		report.Skip("chain[0] SKI (computed)",
+			"chain[0] is not ECDSA; method-1 computation needs the EC point")
+	}
+
+	// CA-cert profile reporting. Per GP Amendment F §6 the SD only
+	// verifies the leaf signature against PK.CA-KLOC; "all other
+	// fields of the certificate may be ignored." But Yubico's
+	// implementation may be stricter than the GP minimum, so
+	// surface what's actually present so we can correlate with
+	// hardware behavior.
+	if root.BasicConstraintsValid {
+		if root.IsCA {
+			report.Pass("chain[0] BasicConstraints",
+				fmt.Sprintf("CA:TRUE (PathLen=%d, PathLenSet=%t)",
+					root.MaxPathLen, root.MaxPathLenZero || root.MaxPathLen > 0))
+		} else {
+			report.Fail("chain[0] BasicConstraints",
+				"CA:FALSE — chain[0] is NOT marked as a CA. Some implementations refuse "+
+					"to use a non-CA cert as a trust anchor.")
+		}
+	} else {
+		report.Skip("chain[0] BasicConstraints",
+			"extension not present. Strict implementations may require BasicConstraints CA:TRUE.")
+	}
+	rootKU := keyUsageNames(root.KeyUsage)
+	if len(rootKU) == 0 {
+		report.Skip("chain[0] KeyUsage",
+			"no KeyUsage extension. Strict implementations may require keyCertSign for a CA.")
+	} else {
+		hasCertSign := root.KeyUsage&x509.KeyUsageCertSign != 0
+		detail := strings.Join(rootKU, ", ")
+		if !hasCertSign {
+			detail += " (note: no keyCertSign — some implementations require it for CA certs)"
+		}
+		report.Pass("chain[0] KeyUsage", detail)
 	}
 
 	// Leaf details. The leaf is what gets sent to the card via
@@ -230,18 +284,35 @@ func cmdOCEVerify(ctx context.Context, env *runEnv, args []string) error {
 			report.Skip("leaf AuthorityKeyIdentifier",
 				"no AKI extension; well-formed OCE chains usually have it")
 		} else {
-			rootSKI := root.SubjectKeyId
-			if len(rootSKI) == 0 {
-				h := sha1.Sum(root.RawSubjectPublicKeyInfo) //nolint:gosec
-				rootSKI = h[:]
+			// Compute the RFC 5280 method 1 SKI of chain[0] for
+			// comparison alongside the extension value. The leaf's AKI
+			// might match either: extension SKI is what scpctl
+			// registers on-card, but AKI generation tools sometimes
+			// recompute method 1 from the issuer pubkey rather than
+			// echoing the SKI extension verbatim.
+			rootSKIExt := root.SubjectKeyId
+			var rootSKIComputed []byte
+			if rootKey, ok := root.PublicKey.(*ecdsa.PublicKey); ok {
+				if ecdhKey, err := rootKey.ECDH(); err == nil {
+					h := sha1.Sum(ecdhKey.Bytes()) //nolint:gosec // RFC 5280 §4.2.1.2 method 1
+					rootSKIComputed = h[:]
+				}
 			}
-			if bytesEqual(leaf.AuthorityKeyId, rootSKI) {
+			switch {
+			case len(rootSKIExt) > 0 && bytesEqual(leaf.AuthorityKeyId, rootSKIExt):
 				report.Pass("leaf AuthorityKeyIdentifier",
-					fmt.Sprintf("%X — matches chain[0] SKI", leaf.AuthorityKeyId))
-			} else {
-				report.Fail("leaf AuthorityKeyIdentifier",
-					fmt.Sprintf("AKI=%X does not match chain[0] SKI=%X — "+
-						"chain is internally inconsistent", leaf.AuthorityKeyId, rootSKI))
+					fmt.Sprintf("%X — matches chain[0] SKI extension", leaf.AuthorityKeyId))
+			case len(rootSKIComputed) > 0 && bytesEqual(leaf.AuthorityKeyId, rootSKIComputed):
+				report.Pass("leaf AuthorityKeyIdentifier",
+					fmt.Sprintf("%X — matches chain[0] computed RFC 5280 method 1 SKI", leaf.AuthorityKeyId))
+			default:
+				detail := fmt.Sprintf("AKI=%X does not match chain[0] SKI extension=%X",
+					leaf.AuthorityKeyId, rootSKIExt)
+				if len(rootSKIComputed) > 0 {
+					detail += fmt.Sprintf(" or computed=%X", rootSKIComputed)
+				}
+				detail += " — chain is internally inconsistent"
+				report.Fail("leaf AuthorityKeyIdentifier", detail)
 			}
 		}
 	}
@@ -468,15 +539,26 @@ func cmdOCEGen(ctx context.Context, env *runEnv, args []string) error {
 	return report.Emit(env.out, *jsonMode)
 }
 
-// computeSKI returns SHA-1 of the SubjectPublicKeyInfo for an
-// ECDSA public key. Uses x509.MarshalPKIXPublicKey to produce the
-// SPKI byte sequence. RFC 5280 §4.2.1.2 method 1.
+// computeSKI returns the SubjectKeyIdentifier of an ECDSA public
+// key per RFC 5280 §4.2.1.2 method 1: SHA-1 of the value of the
+// BIT STRING subjectPublicKey, excluding the tag, length, and
+// number of unused bits.
+//
+// For an EC key, the BIT STRING value is the SEC1 uncompressed
+// point (0x04 || X || Y). crypto/ecdh's PublicKey.Bytes()
+// produces exactly that.
+//
+// Earlier revisions hashed the full SubjectPublicKeyInfo
+// (algorithm + BIT STRING) which produces a different value.
+// That was wrong: cards and tooling compute method 1 against the
+// BIT STRING value alone, so a "computed" SKI that hashed SPKI
+// would never match the extension SKI of a properly-formed cert.
 func computeSKI(pub *ecdsa.PublicKey) []byte {
-	spki, err := x509.MarshalPKIXPublicKey(pub)
+	ecdhKey, err := pub.ECDH()
 	if err != nil {
 		return nil
 	}
-	h := sha1.Sum(spki) //nolint:gosec // RFC 5280 §4.2.1.2 specifies SHA-1
+	h := sha1.Sum(ecdhKey.Bytes()) //nolint:gosec // RFC 5280 §4.2.1.2 method 1
 	return h[:]
 }
 
