@@ -16,10 +16,10 @@ import (
 	"github.com/PeculiarVentures/scp/transport"
 )
 
-// TestPIVReset_DryRun confirms --confirm-write is required. The
+// TestPIVReset_DryRun confirms --confirm-reset-piv is required. The
 // destructive guard is on the CLI side as well as the card side
 // (card-side: PIN+PUK must both be blocked); the CLI guard means
-// the command must not even open a transport without --confirm-write.
+// the command must not even open a transport without --confirm-reset-piv.
 func TestPIVReset_DryRun(t *testing.T) {
 	connectCalled := false
 	var buf bytes.Buffer
@@ -40,6 +40,45 @@ func TestPIVReset_DryRun(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "dry-run") {
 		t.Errorf("output should mention dry-run; got:\n%s", buf.String())
+	}
+}
+
+// TestPIVReset_LegacyConfirmWriteDoesNotMutate confirms the
+// --confirm-write → --confirm-reset-piv flag rename is safe for
+// stale scripts: passing --confirm-write alone (without
+// --confirm-reset-piv) does NOT trigger the destructive path.
+// Instead, the run is treated as dry-run with a deprecation SKIP
+// in the output. The spec is explicit that overloading
+// --confirm-write across applet and SD scopes is a foot-gun, and
+// silently accepting the old flag would defeat the rename.
+func TestPIVReset_LegacyConfirmWriteDoesNotMutate(t *testing.T) {
+	connectCalled := false
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			connectCalled = true
+			return nil, errors.New("legacy --confirm-write should not connect")
+		},
+	}
+	if err := cmdPIVReset(context.Background(), env, []string{
+		"--reader", "fake",
+		"--confirm-write", // the old flag, without the new one
+	}); err != nil {
+		t.Fatalf("legacy --confirm-write cmdPIVReset: %v\n--- output ---\n%s", err, buf.String())
+	}
+	if connectCalled {
+		t.Error("legacy --confirm-write alone should not have connected; the rename is meant to be safe")
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"--confirm-write (deprecated)",
+		"--confirm-reset-piv",
+		"dry-run",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
 	}
 }
 
@@ -72,7 +111,7 @@ func TestPIVReset_HappyPath_Smoke(t *testing.T) {
 	err = cmdPIVReset(context.Background(), env, []string{
 		"--reader", "fake",
 		"--lab-skip-scp11-trust",
-		"--confirm-write",
+		"--confirm-reset-piv",
 	})
 	if err != nil {
 		t.Fatalf("cmdPIVReset: %v\n--- output ---\n%s", err, buf.String())
@@ -144,7 +183,7 @@ func TestPIVReset_ProvisionAfterReset_Works(t *testing.T) {
 		}
 		if err := cmdPIVReset(context.Background(), env, []string{
 			"--reader", "f",
-			"--lab-skip-scp11-trust", "--confirm-write",
+			"--lab-skip-scp11-trust", "--confirm-reset-piv",
 		}); err != nil {
 			t.Fatalf("reset: %v\n%s", err, b.String())
 		}
@@ -226,7 +265,7 @@ func TestPIVReset_MaxBlockAttempts_RangeCheck(t *testing.T) {
 			err := cmdPIVReset(context.Background(), env, []string{
 				"--reader", "f",
 				"--lab-skip-scp11-trust",
-				"--confirm-write",
+				"--confirm-reset-piv",
 				"--max-block-attempts", tc.val,
 			})
 			if err == nil {
@@ -258,7 +297,7 @@ func TestPIVReset_MaxBlockAttempts_HighValueAccepted(t *testing.T) {
 	}
 	err = cmdPIVReset(context.Background(), env, []string{
 		"--reader", "f",
-		"--lab-skip-scp11-trust", "--confirm-write",
+		"--lab-skip-scp11-trust", "--confirm-reset-piv",
 		"--max-block-attempts", "100",
 	})
 	if err != nil {
