@@ -9,6 +9,7 @@ import (
 	"crypto/sha1" //nolint:gosec // RFC 5280 §4.2.1.2 method 1 known-answer
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -49,6 +50,12 @@ func mkOCEFixtureValid(t *testing.T) (*x509.Certificate, *x509.Certificate, *ecd
 		KeyUsage:       x509.KeyUsageKeyAgreement,
 		SubjectKeyId:   leafSKI,
 		AuthorityKeyId: rootSKI,
+		// Explicit BasicConstraints cA=FALSE — required by YubiKey 5.7+
+		// SCP11 firmware. The happy-path fixture should pass strict
+		// verification; cert profiles missing this extension belong in
+		// negative tests below.
+		IsCA:                  false,
+		BasicConstraintsValid: true,
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, root, &leafKey.PublicKey, rootKey)
 	if err != nil {
@@ -429,5 +436,126 @@ func TestOCEVerify_SKIExtensionMatchesComputed_ForGeneratedChain(t *testing.T) {
 	// must NOT produce it.
 	if strings.Contains(out, "extension SKI does not match RFC 5280 method 1") {
 		t.Errorf("generated chain should have extension SKI == RFC 5280 method 1 SKI;\n--- output ---\n%s", out)
+	}
+}
+
+// TestOCEVerify_LeafMissingBasicConstraints_FailsLoudly is the
+// regression pin for the SCP11a PSO SW=6A80 root cause we tracked
+// down on retail YubiKey 5.7.4: leaf OCE certs without an explicit
+// BasicConstraints extension are rejected by the card's PSO
+// ['Verify Certificate'] verifier. RFC 5280 makes the extension
+// OPTIONAL on end-entity certs, so naive openssl chains and earlier
+// scpctl gen output don't include it; the YubiKey is stricter.
+//
+// The verify command must FAIL (not SKIP) on a leaf without
+// BasicConstraints, with an error message that names the symptom
+// (PSO SW=6A80) and the fix (regenerate the chain), so an operator
+// running 'scpctl oce verify' before bootstrap-scp11a sees the
+// problem and the fix in one place.
+func TestOCEVerify_LeafMissingBasicConstraints_FailsLoudly(t *testing.T) {
+	// Build a chain with a leaf that has the legacy "minimal" profile:
+	// KeyUsage + SKI + AKI but NO BasicConstraints. This is what
+	// scpctl emitted before the fix in this commit, and what
+	// hand-rolled openssl 'minimal' profiles produce.
+	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rootSKI := computeSKI(&rootKey.PublicKey)
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(11),
+		Subject:               pkix.Name{CommonName: "test root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		SubjectKeyId:          rootSKI,
+	}
+	rootDER, _ := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	root, _ := x509.ParseCertificate(rootDER)
+
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafSKI := computeSKI(&leafKey.PublicKey)
+	leafTmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(22),
+		Subject:        pkix.Name{CommonName: "test leaf"},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(time.Hour),
+		KeyUsage:       x509.KeyUsageKeyAgreement,
+		SubjectKeyId:   leafSKI,
+		AuthorityKeyId: rootSKI,
+		// Deliberately NO BasicConstraintsValid: this is the bug
+		// shape we're testing the verifier surfaces.
+	}
+	leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, root, &leafKey.PublicKey, rootKey)
+	leaf, _ := x509.ParseCertificate(leafDER)
+
+	chainPath := writeChainPEM(t, root, leaf)
+
+	var buf bytes.Buffer
+	env := &runEnv{out: &buf, errOut: &buf}
+	err := cmdOCEVerify(context.Background(), env, []string{"--chain", chainPath})
+	if err == nil {
+		t.Fatalf("verify on leaf-without-BasicConstraints should error\n--- output ---\n%s",
+			buf.String())
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "leaf BasicConstraints") {
+		t.Errorf("expected a 'leaf BasicConstraints' line\n--- output ---\n%s", out)
+	}
+	if !strings.Contains(out, "FAIL") {
+		t.Errorf("expected FAIL on the BasicConstraints check\n--- output ---\n%s", out)
+	}
+	// Pin the diagnostic content so the operator-facing message
+	// can't quietly drift away from the actionable fix.
+	for _, want := range []string{
+		"6A80",                  // names the on-card symptom
+		"YubiKey 5.7+",          // names the affected firmware class
+		"Regenerate the chain",  // names the fix
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("BasicConstraints diagnostic missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}
+
+// TestOCEGen_LeafHasBasicConstraintsCAFalse is the positive twin:
+// 'scpctl oce gen' must produce a chain whose leaf includes
+// BasicConstraints cA=FALSE. If a future refactor drops this
+// extension, hardware bootstrap → scp11a-sd-read silently
+// regresses to PSO SW=6A80; this test catches it in CI.
+func TestOCEGen_LeafHasBasicConstraintsCAFalse(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	env := &runEnv{out: &buf, errOut: &buf}
+	if err := cmdOCEGen(context.Background(), env, []string{
+		"--out-dir", dir,
+		"--root-cn", "test root",
+		"--leaf-cn", "test leaf",
+		"--valid-days", "30",
+	}); err != nil {
+		t.Fatalf("gen: %v\n--- output ---\n%s", err, buf.String())
+	}
+
+	leafPEM, err := os.ReadFile(filepath.Join(dir, "oce-leaf.cert.pem"))
+	if err != nil {
+		t.Fatalf("read leaf: %v", err)
+	}
+	block, _ := pem.Decode(leafPEM)
+	if block == nil {
+		t.Fatal("no PEM block in oce-leaf.cert.pem")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+
+	if !leaf.BasicConstraintsValid {
+		t.Fatal("leaf must have BasicConstraints extension; YubiKey 5.7+ SCP11 " +
+			"firmware rejects PSO ['Verify Certificate'] with SW=6A80 on chains " +
+			"that omit it. Do not remove this without re-validating against retail " +
+			"hardware.")
+	}
+	if leaf.IsCA {
+		t.Error("leaf BasicConstraints cA must be FALSE")
 	}
 }

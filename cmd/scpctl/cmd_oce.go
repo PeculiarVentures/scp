@@ -277,6 +277,33 @@ func cmdOCEVerify(ctx context.Context, env *runEnv, args []string) error {
 			report.Pass("leaf KeyUsage", strings.Join(ku, ", "))
 		}
 
+		// BasicConstraints presence on the leaf. RFC 5280 makes this
+		// extension OPTIONAL on end-entity certs, but YubiKey 5.7+
+		// SCP11 firmware rejects PSO ['Verify Certificate'] with
+		// SW=6A80 when the OCE leaf cert lacks BasicConstraints
+		// entirely. The verifier wants an explicit cA=FALSE assertion
+		// before it accepts the cert as the chain terminus. Yubico's
+		// reference OCE test certs include this extension; chains
+		// generated without it (older scpctl, naive openssl 'minimal'
+		// profiles, hand-rolled chains) consistently fail PSO against
+		// retail 5.7.x firmware. Surface this as a FAIL, not a SKIP,
+		// because in this position it is the most common cause of
+		// PSO 6A80 we have seen on retail YubiKey 5.7.x.
+		if !leaf.BasicConstraintsValid {
+			report.Fail("leaf BasicConstraints",
+				"no BasicConstraints extension on the leaf. RFC 5280 makes this "+
+					"optional on end-entity certs, but YubiKey 5.7+ SCP11 firmware "+
+					"rejects PSO ['Verify Certificate'] with SW=6A80 on chains that "+
+					"omit it. Regenerate the chain (scpctl oce gen ≥ this commit "+
+					"emits cA=FALSE explicitly) or add the extension manually.")
+		} else if leaf.IsCA {
+			report.Fail("leaf BasicConstraints",
+				"BasicConstraints cA=TRUE on the leaf. The leaf is the chain "+
+					"terminus; it must declare cA=FALSE.")
+		} else {
+			report.Pass("leaf BasicConstraints", "cA=FALSE")
+		}
+
 		// Authority key identifier — should match chain[0] SKI for a
 		// well-formed chain. Mismatch is not fatal per GP spec but
 		// is a strong signal that the chain was assembled wrong.
@@ -500,6 +527,20 @@ func cmdOCEGen(ctx context.Context, env *runEnv, args []string) error {
 		KeyUsage:       x509.KeyUsageKeyAgreement,
 		SubjectKeyId:   leafSKI,
 		AuthorityKeyId: rootSKI, // chains AKI to root SKI per RFC 5280
+		// IsCA=false (zero value) + BasicConstraintsValid=true emits an
+		// explicit BasicConstraints extension with cA=FALSE. RFC 5280
+		// makes this OPTIONAL on end-entity certs, but YubiKey 5.7+
+		// SCP11 firmware rejects PSO ['Verify Certificate'] with
+		// SW=6A80 when the OCE leaf cert lacks BasicConstraints
+		// entirely — the verifier wants an explicit "this is not a
+		// CA" assertion before it accepts a cert as the chain
+		// terminus. Yubico's reference OCE test certs include this
+		// extension; chains generated without it (older scpctl, naive
+		// openssl 'minimal' profiles, hand-rolled chains) fail PSO
+		// against retail 5.7.x firmware. Generating it here closes
+		// the most common gen→bootstrap→PSO failure mode.
+		IsCA:                  false,
+		BasicConstraintsValid: true,
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, rootCert, &leafKey.PublicKey, rootKey)
 	if err != nil {
