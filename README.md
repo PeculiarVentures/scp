@@ -8,7 +8,7 @@ Reach for it when you're building PKI or device-management tooling against YubiK
 
 What's different here: byte-exact verification against three independent references (Yubico .NET SDK, Samsung OpenSCP-Java, GlobalPlatformPro), not only against this library's own mock card; a deliberately narrow public API where session-key material is unreachable from the generic `Session` interface and every escape hatch is named `Insecure*`; transport as an interface, so the same code drives a local USB reader, an in-memory mock for tests, or a remote card over the gRPC CardRelay transport.
 
-Unfamiliar terms in any of the docs are defined in [`docs/glossary.md`](docs/glossary.md).
+Unfamiliar terms in any of the docs are defined in [`docs/glossary.md`](docs/glossary.md). Wire-level reference traces from real hardware sessions live in [`docs/traces/`](docs/traces/) — useful when debugging a new card or firmware against a known-good capture, or when you want to see the actual byte sequence behind a protocol description rather than just the spec text.
 
 The library is standards-oriented and compatibility-expanding. It is structured so consumers can match their integration to validated material rather than to a single vendor. Support is documented across three explicit categories: **verified profiles** (validated against hardware *and* independent reference implementations), **implemented GlobalPlatform capabilities** (standards-compatible behavior implemented against the GP specs, exercisable today against any GP-conformant card), and **expansion targets** (in-scope work waiting on additional cards or reference material to validate against).
 
