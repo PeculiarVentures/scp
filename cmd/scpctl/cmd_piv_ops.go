@@ -1089,12 +1089,37 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer sess.Close()
 
+	// YubiKey requires PIN and PUK to both be blocked before the
+	// PIV applet accepts RESET. Without that precondition the card
+	// returns SW=6985 ("conditions of use not satisfied"). The
+	// smoke piv-reset command already does this via raw scp11
+	// helpers; the group command goes through piv/session, which
+	// exposes BlockPIN / BlockPUK for the same sequence at the
+	// session abstraction level. Both commands emit identical
+	// PASS steps so an operator looking at one report can map
+	// step-for-step onto the other.
+	pinAttempts, err := sess.BlockPIN(ctx, 16)
+	if err != nil {
+		report.Fail("block PIN", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("block PIN: %w", err)
+	}
+	report.Pass("block PIN", fmt.Sprintf("blocked after %d wrong attempts", pinAttempts))
+
+	pukAttempts, err := sess.BlockPUK(ctx, 16)
+	if err != nil {
+		report.Fail("block PUK", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("block PUK: %w", err)
+	}
+	report.Pass("block PUK", fmt.Sprintf("blocked after %d wrong attempts", pukAttempts))
+
 	if err := sess.Reset(ctx, session.ResetOptions{}); err != nil {
-		report.Fail("reset", err.Error())
+		report.Fail("PIV reset", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return err
 	}
-	report.Pass("reset", "PIV applet reset to factory state")
+	report.Pass("PIV reset", "applet returned to factory state (PIN=123456, PUK=12345678)")
 	return report.Emit(env.out, *jsonMode)
 }
 

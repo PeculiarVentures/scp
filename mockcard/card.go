@@ -61,6 +61,19 @@ type Card struct {
 	// 0=SCP11b (default), 1=SCP11a, 2=SCP11c.
 	Variant int
 
+	// MockYubiKeyVersion is the 3-byte firmware version returned
+	// for INS=0xFD CLA=0x00 (YubiKey GET VERSION). Set to e.g.
+	// {0x05, 0x07, 0x02} to make the piv/profile probe identify
+	// the mock as YubiKey 5.7.2 and select YubiKeyProfile (which
+	// advertises Reset, attestation, ATTEST, etc.). Default nil
+	// makes the mock advertise as standard PIV — appropriate for
+	// tests that don't depend on YubiKey-specific profile bits.
+	//
+	// Independent of the legacy INS=0xFD echo behavior: the
+	// echo path stays active when CLA=0x80 (or when this field
+	// is nil), preserving every existing test fixture.
+	MockYubiKeyVersion []byte
+
 	// LegacySCP11bNoReceipt models pre-Amendment-F-v1.4 SCP11b cards
 	// that did not return a receipt in tag 0x86. Default false:
 	// modern behavior (matches YubiKey 5.7.2+ and yubikit). Set true
@@ -268,7 +281,21 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		}
 		return c.doPerformSecurityOp(cmd)
 
-	case 0xFD: // Echo (test-only — no security implication)
+	case 0xFD:
+		// INS=0xFD is overloaded:
+		//   - CLA=0x00 + empty data: YubiKey-specific GET VERSION
+		//     (firmware version triplet, 3 bytes). Used by the
+		//     piv/profile probe to detect "this card is a YubiKey"
+		//     and promote it from StandardPIVProfile to YubiKeyProfile.
+		//     We respond when MockYubiKeyVersion is set; nil leaves
+		//     the card looking like a non-YubiKey PIV implementation
+		//     (standard-piv profile).
+		//   - CLA=0x80 (or any non-zero CLA): legacy test echo. The
+		//     mock has used INS=0xFD as an "echo back arbitrary data"
+		//     loopback for years; existing tests rely on that.
+		if cmd.CLA == 0x00 && len(cmd.Data) == 0 && c.MockYubiKeyVersion != nil {
+			return &apdu.Response{Data: c.MockYubiKeyVersion, SW1: 0x90, SW2: 0x00}, nil
+		}
 		return &apdu.Response{Data: cmd.Data, SW1: 0x90, SW2: 0x00}, nil
 
 	case 0x47: // PIV GENERATE KEY
