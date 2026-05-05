@@ -48,7 +48,7 @@ func TestBootstrapSCP11a_DryRun(t *testing.T) {
 		t.Error("dry-run should not have written the public key file")
 	}
 	output := buf.String()
-	for _, want := range []string{"dry-run", "install OCE public key", "install SCP11a SD key"} {
+	for _, want := range []string{"dry-run", "install OCE CA public key", "install SCP11a SD key"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, output)
 		}
@@ -214,7 +214,7 @@ func TestBootstrapSCP11a_OnCardMode(t *testing.T) {
 	output := buf.String()
 	for _, want := range []string{
 		"open SCP03 SD",
-		"install OCE public key",
+		"install OCE CA public key",
 		"KID=0x10 KVN=0x03",
 		"install SCP11a SD key (on-card)",
 		"KID=0x11 KVN=0x01",
@@ -325,7 +325,7 @@ func TestBootstrapSCP11a_ImportMode_FreshKeyOnHost(t *testing.T) {
 	for _, want := range []string{
 		"generate SD keypair",
 		"open SCP03 SD",
-		"install OCE public key",
+		"install OCE CA public key",
 		"install SCP11a SD key (import)",
 		"write SD public key",
 	} {

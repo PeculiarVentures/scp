@@ -89,7 +89,7 @@ func TestBootstrapOCE_WithConfirm(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"open SCP03 SD",
-		"install OCE public key",
+		"install OCE CA public key",
 		"PASS",
 	} {
 		if !strings.Contains(out, want) {

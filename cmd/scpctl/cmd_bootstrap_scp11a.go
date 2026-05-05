@@ -151,21 +151,24 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 	}
 	report.Pass("load OCE cert chain", fmt.Sprintf("%d cert(s), leaf last", len(chain)))
 
-	leaf := chain[len(chain)-1]
-	leafEC, err := extractECDSAPublicKey(leaf)
+	caCert, caPubKey, computedSKI, err := oceCAFromChain(chain)
 	if err != nil {
-		report.Fail("OCE leaf public key", err.Error())
+		report.Fail("OCE CA public key", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("OCE leaf public key: %w", err)
+		return fmt.Errorf("OCE CA public key: %w", err)
 	}
-	report.Pass("OCE leaf public key", "P-256 ECDSA")
+	report.Pass("OCE CA public key",
+		fmt.Sprintf("P-256 ECDSA, CN=%q (chain[0])", caCert.Subject.CommonName))
 
-	var caSKI []byte
+	caSKI := computedSKI
+	skiOrigin := "computed from chain[0]"
 	if *caSKIHex != "" {
-		caSKI, err = hex.DecodeString(strings.ReplaceAll(*caSKIHex, ":", ""))
+		override, err := hex.DecodeString(strings.ReplaceAll(*caSKIHex, ":", ""))
 		if err != nil {
 			return &usageError{msg: fmt.Sprintf("--ca-ski: %v", err)}
 		}
+		caSKI = override
+		skiOrigin = "from --ca-ski override"
 	}
 
 	var importedPriv *ecdsa.PrivateKey
@@ -194,12 +197,10 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	if !*confirm {
-		report.Skip("install OCE public key", "dry-run; pass --confirm-write to actually call PUT KEY")
+		report.Skip("install OCE CA public key", "dry-run; pass --confirm-write to actually call PUT KEY")
+		report.Skip("register CA SKI", fmt.Sprintf("dry-run (%s)", skiOrigin))
 		if *storeChain {
 			report.Skip("store OCE cert chain", "dry-run")
-		}
-		if caSKI != nil {
-			report.Skip("register CA SKI", "dry-run")
 		}
 		switch *sdKeyMode {
 		case "oncard":
@@ -235,18 +236,26 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 	data.Protocol = sd.Protocol()
 	report.Pass("open SCP03 SD", "")
 
-	// 2a) OCE-side writes. Order mirrors bootstrap-oce: install the
-	// OCE public key first, then optionally store the chain and
-	// register the CA SKI.
+	// 2a) OCE-side writes: install the CA public key, register its
+	// SKI as CA-IDENTIFIER, then optionally store the chain.
 	oceRef := securitydomain.KeyReference{ID: byte(*oceKID), Version: byte(*oceKVN)}
-	if err := sd.PutECPublicKey(ctx, oceRef, leafEC, byte(*oceReplaceKVN)); err != nil {
-		report.Fail("install OCE public key", err.Error())
+	if err := sd.PutECPublicKey(ctx, oceRef, caPubKey, byte(*oceReplaceKVN)); err != nil {
+		report.Fail("install OCE CA public key", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("install OCE public key: %w", err)
+		return fmt.Errorf("install OCE CA public key: %w", err)
 	}
 	data.OCEKeyInstalled = true
-	report.Pass("install OCE public key",
-		fmt.Sprintf("KID=0x%02X KVN=0x%02X", byte(*oceKID), byte(*oceKVN)))
+	report.Pass("install OCE CA public key",
+		fmt.Sprintf("KID=0x%02X KVN=0x%02X (CN=%q)",
+			byte(*oceKID), byte(*oceKVN), caCert.Subject.CommonName))
+
+	if err := sd.StoreCaIssuer(ctx, oceRef, caSKI); err != nil {
+		report.Fail("register CA SKI", err.Error())
+	} else {
+		data.CACertSKIRegistered = true
+		report.Pass("register CA SKI",
+			fmt.Sprintf("%X (%s)", caSKI, skiOrigin))
+	}
 
 	if *storeChain {
 		if err := sd.StoreCertificates(ctx, oceRef, chain); err != nil {
@@ -258,18 +267,6 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 	} else {
 		data.CertChainSkipped = true
 		report.Skip("store OCE cert chain", "--store-chain not set")
-	}
-
-	if caSKI != nil {
-		if err := sd.StoreCaIssuer(ctx, oceRef, caSKI); err != nil {
-			report.Fail("register CA SKI", err.Error())
-		} else {
-			data.CACertSKIRegistered = true
-			report.Pass("register CA SKI", fmt.Sprintf("%X", caSKI))
-		}
-	} else {
-		data.CACertSKISkipped = true
-		report.Skip("register CA SKI", "--ca-ski not set")
 	}
 
 	// 2b) SCP11a SD-side writes. Same SCP03 session — no
