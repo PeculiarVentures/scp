@@ -1,8 +1,8 @@
 # scpctl
 
-Administrative CLI for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. Three command groups:
+Administrative CLI for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. `scpctl` supersedes the earlier `scp-smoke` tool; the smoke group below preserves those subcommands verbatim. Three command groups:
 
-- `smoke` runs the original hardware smoke harness, preserved verbatim. The two questions it answers, against a real card, are still: does the SCP library produce wire bytes that an actual card accepts (`scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`), and does the wire layer survive being wrapped around a higher-level applet protocol (`scp11b-piv-verify`).
+- `smoke` runs the original hardware smoke harness, preserved verbatim from `scp-smoke`. The two questions it answers, against a real card, are still: does the SCP library produce wire bytes that an actual card accepts (`scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`), and does the wire layer survive being wrapped around a higher-level applet protocol (`scp11b-piv-verify`).
 - `piv` is the user-facing PIV operation surface backed by `piv/session`. The full surface is wired: `info`, `pin verify|change|unblock`, `puk change`, `mgmt auth|change-key`, `key generate|attest`, `cert get|put|delete`, `object get|put`, and `reset`. Destructive and credential-bearing commands require an explicit channel-mode choice (`--scp11b` or `--raw-local-ok`) and either `--confirm-write` or, for `reset`, both `--confirm-write` and `--confirm-reset-piv`.
 - `sd` is the Security Domain operation surface. `info` is wired today (parses Card Recognition Data and the Key Information Template over an unauthenticated session); the SCP-secured read paths still live under `smoke` until they migrate.
 

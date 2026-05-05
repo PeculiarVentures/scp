@@ -1,4 +1,4 @@
-// Package piv implements PIV (NIST SP 800-73-4) command builders for
+// Package pivapdu implements PIV (NIST SP 800-73-4) command builders for
 // the provisioning operations that run over an established SCP11
 // secure channel. These are the commands a remote provisioning server
 // sends after the handshake completes.
