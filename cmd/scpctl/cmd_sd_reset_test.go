@@ -63,15 +63,15 @@ func TestSDReset_RequiresSpecificFlag(t *testing.T) {
 			return mc.Transport(), nil
 		},
 	}
-	// Pass --confirm-write but NOT --confirm-reset-sd.
-	if err := cmdSDReset(context.Background(), env, []string{
+	// Pass --confirm-write but NOT --confirm-reset-sd. Either
+	// outcome is acceptable: the command may reject --confirm-write
+	// as an unknown flag, or it may run dry-run silently. What is
+	// NOT acceptable is destructive completion. We assert on output
+	// below rather than the error so both shapes pass.
+	_ = cmdSDReset(context.Background(), env, []string{
 		"--reader", "fake",
 		"--confirm-write",
-	}); err == nil {
-		// Fine if the command rejects --confirm-write as unknown
-		// (it isn't registered for this command). What's NOT okay
-		// is silent success with mutation. Either error or SKIP.
-	}
+	})
 	out := buf.String()
 	if strings.Contains(out, "factory SCP03 keys restored") {
 		t.Errorf("--confirm-write alone should not trigger destructive reset\n--- output ---\n%s", out)
