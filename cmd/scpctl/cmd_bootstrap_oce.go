@@ -104,30 +104,40 @@ func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
 	}
 	report.Pass("load OCE cert chain", fmt.Sprintf("%d cert(s), leaf last", len(chain)))
 
-	leaf := chain[len(chain)-1]
-	leafEC, err := extractECDSAPublicKey(leaf)
+	// chain[0] is the OCE CA — the trust anchor for OCE certs the
+	// card validates during SCP11a/c PSO. NOT chain[len-1] (the
+	// leaf), which is what previous versions of this command
+	// installed. See oceCAFromChain for the full rationale and the
+	// Yubico .NET / yubikit Python references that document this.
+	caCert, caPubKey, computedSKI, err := oceCAFromChain(chain)
 	if err != nil {
-		report.Fail("OCE leaf public key", err.Error())
+		report.Fail("OCE CA public key", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("OCE leaf public key: %w", err)
+		return fmt.Errorf("OCE CA public key: %w", err)
 	}
-	report.Pass("OCE leaf public key", "P-256 ECDSA")
+	report.Pass("OCE CA public key",
+		fmt.Sprintf("P-256 ECDSA, CN=%q (chain[0])", caCert.Subject.CommonName))
 
-	var caSKI []byte
+	// SKI: if --ca-ski was supplied, that value wins (caller may want
+	// to register a SKI different from chain[0]'s for explicit auditing).
+	// Otherwise auto-compute from chain[0] — either the SKI extension
+	// if present, or the RFC 5280 §4.2.1.2 SHA-1(SPKI) fallback.
+	caSKI := computedSKI
+	skiOrigin := "computed from chain[0]"
 	if *caSKIHex != "" {
-		caSKI, err = hex.DecodeString(strings.ReplaceAll(*caSKIHex, ":", ""))
+		override, err := hex.DecodeString(strings.ReplaceAll(*caSKIHex, ":", ""))
 		if err != nil {
 			return &usageError{msg: fmt.Sprintf("--ca-ski: %v", err)}
 		}
+		caSKI = override
+		skiOrigin = "from --ca-ski override"
 	}
 
 	if !*confirm {
-		report.Skip("install OCE public key", "dry-run; pass --confirm-write to actually write")
+		report.Skip("install OCE CA public key", "dry-run; pass --confirm-write to actually write")
+		report.Skip("register CA SKI", fmt.Sprintf("dry-run (%s)", skiOrigin))
 		if *storeChain {
 			report.Skip("store OCE cert chain", "dry-run")
-		}
-		if caSKI != nil {
-			report.Skip("register CA SKI", "dry-run")
 		}
 		_ = report.Emit(env.out, *jsonMode)
 		return nil
@@ -153,14 +163,26 @@ func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
 
 	ref := securitydomain.KeyReference{ID: byte(*oceKID), Version: byte(*oceKVN)}
 
-	if err := sd.PutECPublicKey(ctx, ref, leafEC, byte(*replaceKVN)); err != nil {
-		report.Fail("install OCE public key", err.Error())
+	if err := sd.PutECPublicKey(ctx, ref, caPubKey, byte(*replaceKVN)); err != nil {
+		report.Fail("install OCE CA public key", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("install OCE public key: %w", err)
+		return fmt.Errorf("install OCE CA public key: %w", err)
 	}
 	data.OCEKeyInstalled = true
-	report.Pass("install OCE public key",
-		fmt.Sprintf("KID=0x%02X KVN=0x%02X", byte(*oceKID), byte(*oceKVN)))
+	report.Pass("install OCE CA public key",
+		fmt.Sprintf("KID=0x%02X KVN=0x%02X (CN=%q)", byte(*oceKID), byte(*oceKVN), caCert.Subject.CommonName))
+
+	// STORE CA-IDENTIFIER unconditionally now (it was opt-in before
+	// and that's what made retail YubiKey 5.7+ reject the OCE chain
+	// during SCP11a PSO with SW=6A80 — the card had no SKI to look
+	// up the CA against).
+	if err := sd.StoreCaIssuer(ctx, ref, caSKI); err != nil {
+		report.Fail("register CA SKI", err.Error())
+	} else {
+		data.CACertSKIRegistered = true
+		report.Pass("register CA SKI",
+			fmt.Sprintf("%X (%s)", caSKI, skiOrigin))
+	}
 
 	if *storeChain {
 		if err := sd.StoreCertificates(ctx, ref, chain); err != nil {
@@ -172,18 +194,6 @@ func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
 	} else {
 		data.CertChainSkipped = true
 		report.Skip("store OCE cert chain", "--store-chain not set")
-	}
-
-	if caSKI != nil {
-		if err := sd.StoreCaIssuer(ctx, ref, caSKI); err != nil {
-			report.Fail("register CA SKI", err.Error())
-		} else {
-			data.CACertSKIRegistered = true
-			report.Pass("register CA SKI", fmt.Sprintf("%X", caSKI))
-		}
-	} else {
-		data.CACertSKISkipped = true
-		report.Skip("register CA SKI", "--ca-ski not set")
 	}
 
 	if err := report.Emit(env.out, *jsonMode); err != nil {

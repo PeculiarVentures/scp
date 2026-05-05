@@ -1,0 +1,67 @@
+package main
+
+import (
+	"crypto/ecdsa"
+	"crypto/sha1" //nolint:gosec // SHA-1 is the RFC 5280 §4.2.1.2 SKI fallback
+	"crypto/x509"
+	"errors"
+	"fmt"
+)
+
+// oceCAFromChain returns the OCE CA — the trust anchor against which
+// the card validates OCE certs presented during SCP11a/c PSO. By
+// convention the chain is loaded "leaf last", so chain[0] is the
+// CA (root or top-of-chain trust anchor) and chain[len-1] is the
+// leaf used for the SCP11 ECKA handshake.
+//
+// PK.CA-KLOC.ECDSA per GP Amendment F §7.1.1 — the CA's public key
+// goes at KID=0x10, and the CA's SKI is registered via
+// STORE CA-IDENTIFIER so the card can look up which CA validates
+// which OCE leaf.
+//
+// Returns:
+//   - cert: chain[0], the CA certificate
+//   - pubKey: cert's public key as *ecdsa.PublicKey
+//   - ski: cert's SubjectKeyIdentifier extension value if present;
+//     otherwise SHA-1 of RawSubjectPublicKeyInfo per RFC 5280
+//     §4.2.1.2 (method 1 — the standard fallback computation).
+//
+// Returns an error if the chain is empty, the CA's public key isn't
+// ECDSA P-256, or the cert doesn't have an extractable SPKI.
+func oceCAFromChain(chain []*x509.Certificate) (cert *x509.Certificate, pubKey *ecdsa.PublicKey, ski []byte, err error) {
+	if len(chain) == 0 {
+		return nil, nil, nil, errors.New("OCE chain is empty")
+	}
+	cert = chain[0]
+	pubKey, err = extractECDSAPublicKey(cert)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("OCE CA cert (chain[0], CN=%q): %w",
+			cert.Subject.CommonName, err)
+	}
+	ski = oceCASKI(cert)
+	if len(ski) == 0 {
+		return nil, nil, nil, fmt.Errorf("OCE CA cert (CN=%q): no SubjectKeyIdentifier and SPKI is empty",
+			cert.Subject.CommonName)
+	}
+	return cert, pubKey, ski, nil
+}
+
+// oceCASKI returns the cert's SKI if it's set as an extension,
+// otherwise computes SHA-1 of the SubjectPublicKeyInfo per RFC 5280
+// §4.2.1.2 (method 1). Yubico's tooling uses the extension value
+// when present, which lets the same SKI bytes flow through fleet-
+// management systems unchanged. The hash fallback exists so cert
+// generators that omit the extension still produce a usable
+// installation.
+func oceCASKI(cert *x509.Certificate) []byte {
+	if len(cert.SubjectKeyId) > 0 {
+		out := make([]byte, len(cert.SubjectKeyId))
+		copy(out, cert.SubjectKeyId)
+		return out
+	}
+	if len(cert.RawSubjectPublicKeyInfo) == 0 {
+		return nil
+	}
+	h := sha1.Sum(cert.RawSubjectPublicKeyInfo) //nolint:gosec // RFC 5280 specifies SHA-1 here
+	return h[:]
+}
