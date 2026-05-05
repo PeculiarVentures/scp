@@ -1,11 +1,12 @@
-// Package transport defines the interface between the SCP11 protocol
-// engine and the physical card communication layer. This follows the
-// architecture: decouple the fixed,
-// spec-driven SCP session logic from the transport implementation
-// (PC/SC, NFC, gRPC relay, USB HID, SPI, etc.).
+// Package transport defines the interface between the SCP protocol
+// engine (SCP03 and SCP11) and the physical card communication layer.
+// The seam exists so the spec-driven session logic can stay independent
+// of the underlying transport (PC/SC, NFC, gRPC relay, USB HID, SPI,
+// in-memory mock, etc.).
 //
 // Implementers provide a concrete Transport for their environment.
-// The SCP11 session wraps it with secure messaging transparently.
+// The session layer wraps it with secure messaging transparently
+// once the handshake completes.
 package transport
 
 import (

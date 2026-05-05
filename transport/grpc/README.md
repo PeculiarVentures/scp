@@ -1,6 +1,6 @@
 # transport/grpc — CardRelay
 
-Network transport for the [scp](../..) protocol engine. Server side wraps an existing `transport.Transport` (typically a real PC/SC card via [`transport/pcsc`](../pcsc)) and exposes it over gRPC. Client side implements `transport.Transport`, so any code that takes a transport — `scp03.Open`, `scp11.Open`, `securitydomain.OpenSCP11`, `cmd/scp-smoke` — runs against a remote card with no source changes.
+Network transport for the [scp](../..) protocol engine. Server side wraps an existing `transport.Transport` (typically a real PC/SC card via [`transport/pcsc`](../pcsc)) and exposes it over gRPC. Client side implements `transport.Transport`, so any code that takes a transport — `scp03.Open`, `scp11.Open`, `securitydomain.OpenSCP11`, `cmd/scpctl` — runs against a remote card with no source changes.
 
 ## Wire model
 
