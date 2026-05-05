@@ -864,21 +864,49 @@ func isSCP03KeyID(kid byte) bool {
 	return kid == 0x01 || kid == 0x02 || kid == 0x03
 }
 
-// Reset performs a factory reset of the Security Domain by blocking
-// all installed keys through repeated invalid authentication attempts.
+// Reset triggers a Security Domain factory reset by blocking every
+// installed key with deliberately-wrong credentials. After all keys
+// are blocked, the card auto-restores factory state: default SCP03
+// keys at KVN=0xFF, freshly-generated SCP11b key at KID=0x13/KVN=0x01,
+// and any custom OCE/SCP11a/SCP11c material wiped.
 //
-// This removes all keys and associated data, restores default SCP03
-// keys, and generates a new SCP11b key.
+// Reset is allowed from:
+//   - Unauthenticated sessions (typical recovery path — see
+//     ResetSecurityDomain top-level helper).
+//   - OCE-authenticated sessions (SCP03 or SCP11a/c).
 //
-// WARNING: destructive operation. All custom material is permanently deleted.
+// Reset is rejected host-side from SCP11b sessions because SCP11b is
+// one-way auth: the card authenticates to the host but the host
+// doesn't authenticate to the card. The reset attempts would
+// technically still work (they bypass the SM channel via
+// transmitRaw), but doing so from inside an open SCP11b session is
+// a confused user — the right shape is to close the SCP11b session
+// and use ResetSecurityDomain (which opens an unauthenticated SD).
 //
-// The session is invalid after Reset returns — close it and open a new
-// one with default keys.
+// The actual reset attempts go through transmitRaw, bypassing any
+// secure channel. This matters for the recovery case: a card that's
+// been provisioned with custom keys whose factory SCP03 is gone,
+// where no authentication is possible until reset completes.
+//
+// The session is invalid after Reset returns — close it; the next
+// call should open a new session against the now-factory card.
 //
 // Ref: Python SecurityDomainSession.reset(), C# SecurityDomainSession.Reset().
 func (s *Session) Reset(ctx context.Context) error {
-	if err := s.requireOCEAuth(); err != nil {
-		return err
+	// Defense-in-depth gate: reject if authenticated but NOT
+	// OCE-authenticated. Unauthenticated sessions are explicitly
+	// allowed (the recovery path); OCE-authenticated sessions are
+	// allowed (SCP03 and SCP11a/c). Only SCP11b mid-session callers
+	// are rejected — they have an SM channel that doesn't authorize
+	// management ops, and this is the same surprising-failure-mode
+	// guard that requireOCEAuth provides for PUT KEY, DELETE KEY,
+	// STORE CERTIFICATES, etc.
+	if s.authenticated && !s.oceAuthenticated {
+		return fmt.Errorf("%w: SD reset requires OCE authentication or an unauthenticated session; "+
+			"calling Reset from inside an SCP11b session is not allowed because SCP11b authenticates "+
+			"the card to the host but not the host to the card. Close the session and call "+
+			"securitydomain.ResetSecurityDomain (which opens an unauthenticated SD) instead",
+			ErrNotAuthenticated)
 	}
 
 	// Get all installed keys.
