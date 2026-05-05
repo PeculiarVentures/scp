@@ -175,12 +175,8 @@ type scp11bChannelFlags struct {
 // requiring --scp11b) is deliberate: SCP11b is the right answer for
 // any environment that is not the operator's own machine in front of
 // their own card, and an operator who hasn't thought about which
-// they're in should not get raw mode by accident. The smoke harness
-// in scp-smoke piv-provision (the predecessor of this surface) used
-// SCP11b unconditionally; this fail-closed-with-explicit-opt-out
-// keeps the migration honest without forcing trust-roots setup on
-// the local-USB case that was the entire reason raw mode exists in
-// the new surface.
+// they're in should not get raw mode by accident. Forcing a positive
+// assertion either way prevents a silent downgrade.
 func registerSCP11bChannelFlags(fs *flag.FlagSet) *scp11bChannelFlags {
 	return &scp11bChannelFlags{
 		scp11b: fs.Bool("scp11b", false,
@@ -220,15 +216,12 @@ func (f *scp11bChannelFlags) validate() error {
 // or credential-bearing scpctl piv handler uses. The channel mode is
 // chosen by the flag pair (--scp11b, --raw-local-ok); exactly one
 // must be set. The fail-closed default (neither set is a usage
-// error) is what closes the gap to the smoke harness this surface
-// supersedes: scp-smoke piv-provision and scp-smoke piv-reset both
-// ran SCP11b unconditionally, and an operator migrating to the
-// scpctl piv surface should never silently get a downgrade to raw
-// just because they did not type --scp11b.
+// error) prevents a silent downgrade from secure-channel to raw
+// transport when an operator forgets to type a flag.
 //
 // When --scp11b is set without a trust posture (no --trust-roots
 // and no --lab-skip-scp11-trust), the report gets a SKIP entry
-// (consistent with applyTrust for the smoke commands) and the
+// (consistent with applyTrust elsewhere in the binary) and the
 // function returns (nil, false, nil); the caller emits the report
 // and returns without a transmit attempt.
 //
@@ -1006,11 +999,9 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 }
 
 // cmdPIVGroupReset resets the PIV applet to factory state. YubiKey-only;
-// refused under StandardPIV. The card-side precondition (PIN and PUK
-// both blocked) is the operator's responsibility because forcing
-// blocks here would be an opinionated choice that doesn't belong in
-// a session method. The smoke piv-reset subcommand has the
-// block-then-reset flow for hardware harnesses.
+// refused under StandardPIV. YubiKey requires PIN and PUK to both be
+// blocked before the applet accepts RESET; this command performs the
+// block-then-reset sequence via piv/session.
 //
 // Reset is the most-destructive PIV operation: every slot keypair
 // is erased, every certificate is dropped, PIN/PUK/management-key
@@ -1091,13 +1082,10 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 
 	// YubiKey requires PIN and PUK to both be blocked before the
 	// PIV applet accepts RESET. Without that precondition the card
-	// returns SW=6985 ("conditions of use not satisfied"). The
-	// smoke piv-reset command already does this via raw scp11
-	// helpers; the group command goes through piv/session, which
-	// exposes BlockPIN / BlockPUK for the same sequence at the
-	// session abstraction level. Both commands emit identical
-	// PASS steps so an operator looking at one report can map
-	// step-for-step onto the other.
+	// returns SW=6985 ("conditions of use not satisfied"). This
+	// command goes through piv/session, which exposes BlockPIN /
+	// BlockPUK for the same sequence at the session abstraction
+	// level.
 	pinAttempts, err := sess.BlockPIN(ctx, 16)
 	if err != nil {
 		report.Fail("block PIN", err.Error())

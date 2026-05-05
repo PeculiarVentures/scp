@@ -33,7 +33,7 @@ type scp03SDReadData struct {
 //   - Yubico .NET SDK: SecurityDomainSession.GetCardRecognitionData,
 //     GetKeyInformation; default SCP03 key set is publicly known.
 func cmdSCP03SDRead(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("scp03-sd-read", env)
+	fs := newSubcommandFlagSet("test scp03-sd-read", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs)
@@ -52,7 +52,7 @@ func cmdSCP03SDRead(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	report := &Report{Subcommand: "scp03-sd-read", Reader: *reader}
+	report := &Report{Subcommand: "test scp03-sd-read", Reader: *reader}
 	data := &scp03SDReadData{}
 	report.Data = data
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(cfg))

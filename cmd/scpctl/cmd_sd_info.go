@@ -20,10 +20,8 @@ import (
 // the PIV applet. Both commands are non-destructive, unauthenticated,
 // and the right thing to run before deciding what to authenticate as.
 //
-// 'sd info' shares its core implementation with the legacy 'scpctl
-// probe' (and 'scpctl smoke probe') subcommand, with the additional
-// KIT fetch turned on. The legacy command stays for backward
-// compatibility with existing scripts that called 'scp-smoke probe'.
+// 'sd info' shares its core implementation with the top-level
+// 'scpctl probe' subcommand, with the additional KIT fetch turned on.
 func cmdSDInfo(ctx context.Context, env *runEnv, args []string) error {
 	return runProbe(ctx, env, args, probeOptions{
 		flagSetName:  "sd info",

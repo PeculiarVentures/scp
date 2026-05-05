@@ -76,10 +76,10 @@ func preflightSCP11aSDKey(ctx context.Context, t transport.Transport, sdKID, sdK
 		fmt.Sprintf("requested SD key KID=0x%02X KVN=0x%02X not installed; "+
 			"card has: %v. On a fresh card (factory SCP03 still present), install both the "+
 			"OCE public key and the SCP11a SD key in one session: "+
-			"`scpctl smoke bootstrap-scp11a --reader \"...\" --oce-cert <chain.pem> "+
+			"`scpctl sd bootstrap-scp11a --reader \"...\" --oce-cert <chain.pem> "+
 			"--sd-key-out /tmp/sd-pub.pem --confirm-write`. If you've already run bootstrap-oce "+
 			"and need to install only the SD key (against a card with custom SCP03 keys), use "+
-			"`scpctl smoke bootstrap-scp11a-sd` instead.",
+			"`scpctl sd bootstrap-scp11a-sd` instead.",
 			sdKID, sdKVN, listed))
 	return true
 }

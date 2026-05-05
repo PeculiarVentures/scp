@@ -202,11 +202,9 @@ func TestPIVReset_GateSemantics(t *testing.T) {
 // must specify either --scp11b or --raw-local-ok; absence of both
 // is rejected with a clear error before any APDU goes on the wire.
 //
-// This guards against a silent downgrade for operators migrating
-// from scp-smoke piv-provision (which used SCP11b unconditionally)
-// to the new scpctl piv surface. An operator who copies the smoke
-// command line without --scp11b should get a usage error, not a
-// raw-mode session.
+// This guards against a silent downgrade: a scpctl piv command run
+// without --scp11b should produce a usage error, not silently fall
+// through to a raw-mode session.
 func TestPIVMgmtAuth_RequiresChannelChoice(t *testing.T) {
 	card, err := mockcard.New()
 	if err != nil {

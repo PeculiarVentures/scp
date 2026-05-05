@@ -62,7 +62,7 @@ type pivProvisionData struct {
 // Destructive: writes a freshly generated keypair into the named
 // slot, replacing whatever was there. Gated by --confirm-write.
 func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("piv-provision", env)
+	fs := newSubcommandFlagSet("piv provision", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	trust := registerTrustFlags(fs)
@@ -108,7 +108,7 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 		}
 	}
 
-	report := &Report{Subcommand: "piv-provision", Reader: *reader}
+	report := &Report{Subcommand: "piv provision", Reader: *reader}
 	data := &pivProvisionData{
 		Slot:      fmt.Sprintf("0x%02X", slot),
 		Algorithm: algoName,

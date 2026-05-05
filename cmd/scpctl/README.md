@@ -1,10 +1,11 @@
 # scpctl
 
-Administrative CLI for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. `scpctl` supersedes the earlier `scp-smoke` tool; the smoke group below preserves those subcommands verbatim. Three command groups:
+Administrative CLI for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. Four command groups:
 
-- `smoke` runs the original hardware smoke harness, preserved verbatim from `scp-smoke`. The two questions it answers, against a real card, are still: does the SCP library produce wire bytes that an actual card accepts (`scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`), and does the wire layer survive being wrapped around a higher-level applet protocol (`scp11b-piv-verify`).
-- `piv` is the user-facing PIV operation surface backed by `piv/session`. The full surface is wired: `info`, `pin verify|change|unblock`, `puk change`, `mgmt auth|change-key`, `key generate|attest`, `cert get|put|delete`, `object get|put`, and `reset`. Destructive and credential-bearing commands require an explicit channel-mode choice (`--scp11b` or `--raw-local-ok`) and either `--confirm-write` or, for `reset`, both `--confirm-write` and `--confirm-reset-piv`.
-- `sd` is the Security Domain operation surface. `info` is wired today (parses Card Recognition Data and the Key Information Template over an unauthenticated session); the SCP-secured read paths still live under `smoke` until they migrate.
+- `test` runs the hardware regression checks: against a real card, validate that the SCP library produces wire bytes the card accepts (`scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`), and that the wire layer survives being wrapped around a higher-level applet protocol (`scp11b-piv-verify`). Read-only against the card. Renamed from the earlier `smoke` group; same checks, clearer name.
+- `piv` is the user-facing PIV operation surface backed by `piv/session`. The full surface is wired: `info`, `pin verify|change|unblock`, `puk change`, `mgmt auth|change-key`, `key generate|attest`, `cert get|put|delete`, `object get|put`, `reset`, and `provision`. Destructive and credential-bearing commands require an explicit channel-mode choice (`--scp11b` or `--raw-local-ok`) and either `--confirm-write` or, for `reset`, both `--confirm-write` and `--confirm-reset-piv`.
+- `sd` is the Security Domain operation surface. Wired today: `info`, `reset`, `bootstrap-oce`, `bootstrap-scp11a`, `bootstrap-scp11a-sd`. Bootstrap commands are state-changing day-1 provisioning flows gated by `--confirm-write`.
+- `oce` is host-only OCE certificate diagnostics: `verify` validates a chain off-card, `gen` produces a fresh known-good chain. Does not touch a card.
 
 Plus two top-level utilities, `readers` and `probe`, for the things operators reach for outside any group.
 
@@ -12,26 +13,26 @@ This binary is hardware-targeting: most subcommands need an actual reader and ca
 
 ## What this is for
 
-The smoke group answers two questions against a real card:
+The `test` group answers two questions against a real card:
 
 1. **Does the SCP library produce wire bytes that an actual card accepts?** — `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`
 2. **Does the wire layer survive being wrapped around a higher-level applet protocol?** — `scp11b-piv-verify`
 
-Plus a `probe` step that tells you what the card claims to be before you authenticate to it, and a `test` aggregator that runs the lot.
+Plus a top-level `probe` that tells you what the card claims to be before you authenticate to it, and a `test all` aggregator that runs the lot.
 
-The `piv` group is the operator-facing surface for PIV administration: PIN/PUK lifecycle, management-key authentication and rotation, slot key generation, certificate install/read/delete, raw object I/O, attestation, and full applet reset. These commands write to the card; safety is documented in the next section.
+The `piv` group is the operator-facing surface for PIV administration: PIN/PUK lifecycle, management-key authentication and rotation, slot key generation, certificate install/read/delete, raw object I/O, attestation, full applet reset, and the SCP11b-secured `provision` flow. These commands write to the card; safety is documented in the next section.
 
-The `sd` group exposes Security Domain identity. Today: `sd info` (read-only). Future: SCP-secured read and bootstrap flows currently in `smoke` will migrate here once they have hardware coverage parity.
+The `sd` group exposes Security Domain identity and bootstrap. `info` reads CRD and the key-info template over an unauthenticated session. `reset` factory-resets SD key material. `bootstrap-oce` / `bootstrap-scp11a` / `bootstrap-scp11a-sd` are the day-1 provisioning flows that install OCE material and the SCP11a SD ECDH key on fresh cards.
 
 ## Safety
 
-The smoke group is read-only and behaves as it always did: no key rotation, no authentication lockouts, no SD writes over SCP11b, no card reset as a recovery mechanism.
+The `test` group is read-only and behaves as it always did: no key rotation, no authentication lockouts, no SD writes over SCP11b, no card reset as a recovery mechanism.
 
 The `piv` group writes to the card. The safety model rests on four explicit gates:
 
 - **`--confirm-write`** is required for every destructive PIV operation (`key generate`, `cert put`, `cert delete`, `object put`, `mgmt change-key`, `reset`). The flag exists so destructive commands can never run without an explicit operator decision.
 - **`--confirm-reset-piv`** is required *in addition* for `piv reset`, because a full applet wipe is qualitatively different from a single-slot operation. The two-flag pattern prevents an operator who pastes a stale slot-rotation command line from accidentally turning it into a full reset.
-- **`--scp11b` or `--raw-local-ok`** must be specified explicitly on every destructive or credential-bearing PIV command. Specifying neither is a usage error; specifying both is a usage error. This fail-closed default closes the silent-downgrade gap that existed when raw was implicit (the predecessor smoke harness used SCP11b unconditionally; an operator migrating to the new surface would have lost the secure-channel posture by forgetting to type a flag).
+- **`--scp11b` or `--raw-local-ok`** must be specified explicitly on every destructive or credential-bearing PIV command. Specifying neither is a usage error; specifying both is a usage error. This fail-closed default ensures a missed channel-mode flag cannot silently downgrade an SCP11b-secured operation to raw transport.
 - **Cert-to-public-key binding is on by default.** `piv cert put` requires `--expected-pubkey <path>` unless `--no-pubkey-binding` is explicitly passed; the safe default rejects installing a certificate whose public key does not match the slot's generated key.
 
 Profile gating is host-side: operations the active card profile does not claim are refused with `piv.ErrUnsupportedByProfile` before any APDU goes on the wire (Ed25519 under Standard PIV, attestation under Standard PIV, reset under Standard PIV, etc.). The active profile is selected by probing the card; YubiKey-specific assumptions are not made unprobed.
@@ -62,7 +63,7 @@ scpctl <group> <subcommand> [flags]
 scpctl <utility> [flags]
 ```
 
-Run `scpctl help`, `scpctl smoke help`, or `scpctl <group> <cmd> -h` for full flag lists.
+Run `scpctl help`, `scpctl test help`, or `scpctl <group> <cmd> -h` for full flag lists.
 
 The `readers` and `probe` utilities are also reachable directly:
 
@@ -71,16 +72,14 @@ scpctl readers
 scpctl probe --reader "YubiKey"
 ```
 
-The same commands run under the smoke group with identical behavior; the rest of this document uses the smoke-group form because it matches the historical examples.
-
 ### List PC/SC readers
 
 ```bash
-scpctl smoke readers
+scpctl readers
 ```
 
 ```bash
-scpctl smoke readers --json
+scpctl readers --json
 ```
 
 ### Probe a card
@@ -88,13 +87,13 @@ scpctl smoke readers --json
 Opens an unauthenticated Security Domain session, fetches Card Recognition Data via `GET DATA` tag `0x66`, parses, and prints the card's claimed capabilities.
 
 ```bash
-scpctl smoke probe --reader "YubiKey"
+scpctl probe --reader "YubiKey"
 ```
 
 Sample output:
 
 ```
-scpctl smoke probe
+scpctl probe
   reader: YubiKey
   select ISD                       PASS
   GET DATA tag 0x66                PASS — 76 bytes
@@ -110,7 +109,7 @@ CRD is **discovery input, not authorization**. A card that lies about its CRD is
 Opens an SCP03 session against the ISD using YubiKey factory credentials (KVN `0xFF`, key `404142434445464748494A4B4C4D4E4F` for ENC/MAC/DEK), then verifies that `GetKeyInformation` and `GetCardRecognitionData` succeed under secure messaging.
 
 ```bash
-scpctl smoke scp03-sd-read --reader "YubiKey"
+scpctl test scp03-sd-read --reader "YubiKey"
 ```
 
 This is expected to fail on a YubiKey that has had its SCP03 keys rotated to a custom KVN — that's an informative failure, not a bug. Custom-key flag support (`--kvn`, `--enc`, `--mac`, `--dek`) is a follow-up; it isn't in this version because the threshold for "is the wire working at all?" doesn't need it.
@@ -118,10 +117,10 @@ This is expected to fail on a YubiKey that has had its SCP03 keys rotated to a c
 ### SCP11b Security Domain read
 
 ```bash
-scpctl smoke scp11b-sd-read --reader "YubiKey" --lab-skip-scp11-trust
+scpctl test scp11b-sd-read --reader "YubiKey" --lab-skip-scp11-trust
 ```
 
-SCP11b authenticates the card to the host but **not** the host to the card. The smoke check verifies this by asserting `Session.OCEAuthenticated()` is `false`. After that it issues `GetKeyInformation` to exercise the wire layer.
+SCP11b authenticates the card to the host but **not** the host to the card. The test verifies this by asserting `Session.OCEAuthenticated()` is `false`. After that it issues `GetKeyInformation` to exercise the wire layer.
 
 `--lab-skip-scp11-trust` skips the SCP11 card-certificate validation step. This is for separating "the wire-protocol is broken" from "the trust bootstrap isn't configured." When the flag is omitted and no trust roots are configured, this command **skips** rather than fails — the rationale is that an unconfigured trust state is not a wire-protocol failure.
 
@@ -130,7 +129,7 @@ SCP11b authenticates the card to the host but **not** the host to the card. The 
 Opens an SCP11b session targeting the PIV applet (NOT the ISD; SCP is applet-scoped on YubiKey) and verifies the PIN over the secure channel.
 
 ```bash
-scpctl smoke scp11b-piv-verify --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
+scpctl test scp11b-piv-verify --reader "YubiKey" --pin 123456 --lab-skip-scp11-trust
 ```
 
 A successful `VERIFY PIN` proves three things at once: SCP11b can target a non-SD applet, the PIV APDU builders survive secure-messaging wrap, and the card accepts the PIN through the wrapped channel.
@@ -142,7 +141,7 @@ If the card returns a `63Cx` SW (PIN wrong, x retries), the failure surfaces wit
 SCP11a is mutual auth: the host validates the card AND the card validates the host's OCE certificate chain against an OCE root that was previously installed on the card. After a successful open, the session is OCE-authenticated and capable of driving SD writes (key rotation, certificate store, allowlist updates).
 
 ```bash
-scpctl smoke scp11a-sd-read \
+scpctl test scp11a-sd-read \
   --reader "YubiKey" \
   --oce-key /path/to/oce.key.pem \
   --oce-cert /path/to/oce-chain.pem \
@@ -155,7 +154,7 @@ Pre-conditions for this to succeed against real hardware:
 2. The OCE private key file corresponds to the leaf certificate in the chain.
 3. The chain leaf is signed by the OCE root the card has installed.
 
-The smoke command asserts the SCP11a-specific invariant `Session.OCEAuthenticated() == true` — a regression that silently downgraded to SCP11b-shape session keys would be caught here rather than going unnoticed.
+The test asserts the SCP11a-specific invariant `Session.OCEAuthenticated() == true` — a regression that silently downgraded to SCP11b-shape session keys would be caught here rather than going unnoticed.
 
 PEM key formats accepted: PKCS#8 (`PRIVATE KEY`, modern `openssl genpkey` default) and SEC1 (`EC PRIVATE KEY`, what older `openssl ecparam -genkey` produces and what Yubico fixtures use). Curve must be P-256 — the loader rejects other curves explicitly.
 
@@ -164,7 +163,7 @@ PEM key formats accepted: PKCS#8 (`PRIVATE KEY`, modern `openssl genpkey` defaul
 Installs an OCE public key onto a card via SCP03 with factory keys (and optionally registers a CA Subject Key Identifier), so subsequent SCP11a sessions can complete mutual auth. This is the step that has to happen *before* `scp11a-sd-read` works against a fresh card.
 
 ```bash
-scpctl smoke bootstrap-oce \
+scpctl sd bootstrap-oce \
   --reader "YubiKey" \
   --oce-cert /path/to/oce-chain.pem \
   --ca-ski 0123456789ABCDEF0123456789ABCDEF01234567 \
@@ -182,7 +181,7 @@ The OCE certificate chain is **NOT stored on the card**. It travels on the wire 
 Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other PIV state you want to undo without physically swapping the hardware. Erases ALL 24 PIV slot keypairs and certificates, returns PIN to `123456` and PUK to `12345678`, and resets the management key (to the well-known 3DES default on pre-5.7 firmware, or a randomly regenerated AES-192 key in protected metadata on 5.7+). Does NOT touch installed OCE roots or the Issuer Security Domain — those live outside the PIV applet.
 
 ```bash
-scpctl smoke piv-reset \
+scpctl piv reset \
   --reader "YubiKey" \
   --lab-skip-scp11-trust \
   --confirm-write
@@ -206,7 +205,7 @@ The `--max-block-attempts` flag (default 16) caps the wrong-PIN/wrong-PUK loop. 
 Provisions a PIV slot through an SCP11b-secured channel: `VERIFY PIN` → `GENERATE KEY` → optional `PUT CERTIFICATE` → optional `ATTESTATION`. Same `--confirm-write` dry-run gating as `bootstrap-oce`.
 
 ```bash
-scpctl smoke piv-provision \
+scpctl piv provision \
   --reader "YubiKey" \
   --pin 123456 \
   --slot 9a \
@@ -227,13 +226,13 @@ The check runs against the parsed public key for the relevant algorithm: RSA (mo
 
 ```bash
 # YubiKey with the historic pre-5.7 factory 3DES default
-scpctl smoke piv-provision \
+scpctl piv provision \
   --reader "YubiKey" --pin 123456 --slot 9a \
   --mgmt-key default --mgmt-key-algorithm 3des \
   --lab-skip-scp11-trust --confirm-write
 
 # YubiKey 5.7+ with a rotated AES-192 management key
-scpctl smoke piv-provision \
+scpctl piv provision \
   --reader "YubiKey" --pin 123456 --slot 9a \
   --mgmt-key A1B2C3...  --mgmt-key-algorithm aes192 \
   --lab-skip-scp11-trust --confirm-write
@@ -245,10 +244,10 @@ The mock implements crypto-correct mutual auth when `PIVMgmtKey` and `PIVMgmtKey
 
 ### `test` aggregator
 
-Runs `probe` + the SCP smoke checks in sequence and prints a single PASS/FAIL/SKIP summary at the end.
+Runs `probe` + the SCP read tests in sequence and prints a single PASS/FAIL/SKIP summary at the end.
 
 ```bash
-scpctl smoke test \
+scpctl test all \
   --reader "YubiKey" \
   --pin 123456 \
   --oce-key /path/to/oce.key.pem \
@@ -258,20 +257,17 @@ scpctl smoke test \
 
 Process exit code is 1 if any check failed; 0 otherwise (including SKIP results). The SCP11a check is skipped automatically if `--oce-key`/`--oce-cert` are not supplied.
 
-## Which group is canonical?
+## Group structure
 
-Three command groups exist and they have non-overlapping purposes:
+Four command groups, non-overlapping purposes:
 
-`scpctl piv` is the **canonical operator surface for PIV operations going forward**. PIN/PUK management, key generation, certificate install/read/delete, attestation, object I/O, and reset all live here, wired through `piv/session`. Profile gating is host-side: operations the active profile does not claim are refused before any APDU goes on the wire. Destructive and credential-bearing commands require an explicit channel-mode choice: either `--scp11b` for an authenticated channel against an untrusted host path, or `--raw-local-ok` to assert the host is in the operator's trust boundary (the typical local-USB administration case). Specifying neither is a usage error; this fail-closed behavior matches `scp-smoke piv-provision`'s SCP11b-only default and prevents silent downgrades on migration. Standard PIV is spec-implemented but not yet hardware-verified; see `docs/piv-compatibility.md`.
+`scpctl test` is the **hardware regression and validation harness**. Read-only against real cards; validates the SCP library produces wire bytes the card accepts and that the wire layer carries through the higher-level applet protocols. Used in CI to catch regressions before they ship. Renamed from the earlier `smoke` group; the checks themselves are unchanged.
 
-`scpctl sd` is the canonical operator surface for **Security Domain operations**. Today only `sd info` is wired (an unauthenticated SD session reporting CRD and key-info template). The remaining flows (SCP03, SCP11a, SCP11b reads; OCE bootstrap) still live under `smoke` until they migrate.
+`scpctl piv` is the **operator surface for PIV operations**. PIN/PUK management, key generation, certificate install/read/delete, attestation, object I/O, reset, and the SCP11b-secured `provision` flow all live here, wired through `piv/session`. Profile gating is host-side: operations the active profile does not claim are refused before any APDU goes on the wire. Destructive and credential-bearing commands require an explicit channel-mode choice: either `--scp11b` for an authenticated channel against an untrusted host path, or `--raw-local-ok` to assert the host is in the operator's trust boundary (the typical local-USB administration case). Specifying neither is a usage error. Standard PIV is spec-implemented but not yet hardware-verified; see `docs/piv-compatibility.md`.
 
-`scpctl smoke` is the **hardware regression and validation harness**. Every original `scp-smoke` subcommand is preserved verbatim under `scpctl smoke <name>` so existing CI scripts translate by changing the binary name. New code should not target `smoke` for routine provisioning; new code should use `scpctl piv` (and `scpctl sd` once it grows). The smoke commands stay because they exercise hardware paths the new surface does not yet cover end to end:
+`scpctl sd` is the **operator surface for Security Domain operations**. `info` reads CRD and key-info template over an unauthenticated session. `reset` factory-resets SD key material. `bootstrap-oce`, `bootstrap-scp11a`, and `bootstrap-scp11a-sd` are the day-1 provisioning flows that install OCE material and the SCP11a SD ECDH key on fresh cards. All bootstraps are state-changing and gated by `--confirm-write`.
 
-- `scpctl smoke piv-provision` runs the SCP11b-secured provisioning flow against real YubiKey hardware. The new `scpctl piv key generate` + `scpctl piv cert put` two-step flow can do the same operations but has not been hardware-validated as a complete provisioning path. Until that validation lands, `smoke piv-provision` is the path to use for production provisioning.
-- `scpctl smoke piv-reset` runs the block-PIN-and-PUK-then-reset sequence required to reset a YubiKey. The new `scpctl piv reset` issues the bare RESET APDU and additionally requires `--confirm-reset-piv` on top of `--confirm-write` because a full applet wipe is qualitatively different from a slot rotation; the operator is responsible for the card-side preconditions (both PIN and PUK retry counters exhausted). Both forms work; the smoke variant has the harness wrapping that the bare variant deliberately does not.
-
-When the new `scpctl piv` flows have been driven through real hardware end to end, the smoke duplicates will be deprecated and eventually removed. Until then both exist and both are supported. New downstream automation should target `scpctl piv` so the deprecation has a clean cutover.
+`scpctl oce` is **off-card OCE certificate diagnostics**. `verify` validates a chain off-card; `gen` produces a fresh known-good chain. Host-only — does not touch a card.
 
 ## `piv info` and `sd info`
 
@@ -324,13 +320,13 @@ Neither flag set produces a `trust mode SKIP` and the command exits without open
 
 ```bash
 # Production: validate the card cert against a pinned Yubico SD root
-scpctl smoke scp11b-piv-verify \
+scpctl test scp11b-piv-verify \
   --reader "YubiKey" \
   --pin 123456 \
   --trust-roots /etc/scp/yubikey-roots.pem
 
-# Lab: skip validation for wire-only smoke
-scpctl smoke scp11b-piv-verify \
+# Lab: skip validation for wire-only test
+scpctl test scp11b-piv-verify \
   --reader "YubiKey" \
   --pin 123456 \
   --lab-skip-scp11-trust
@@ -354,10 +350,10 @@ The four custom-key flags must all be supplied together — partial specificatio
 
 ```bash
 # Factory (implicit)
-scpctl smoke scp03-sd-read --reader "YubiKey"
+scpctl test scp03-sd-read --reader "YubiKey"
 
 # Rotated to a custom AES-128 set
-scpctl smoke bootstrap-oce \
+scpctl sd bootstrap-oce \
   --reader "YubiKey" \
   --oce-cert /path/to/oce-chain.pem \
   --scp03-kvn 01 \

@@ -147,7 +147,7 @@ func TestDispatch_GroupHelp(t *testing.T) {
 		group       string
 		wantInUsage string
 	}{
-		{"smoke", "smoke subcommand"},
+		{"test", "test subcommand"},
 		{"piv", "piv subcommand"},
 		{"sd", "sd subcommand"},
 	}
@@ -184,7 +184,7 @@ func TestDispatch_UnknownSubcommand(t *testing.T) {
 		group string
 		sub   string
 	}{
-		{"smoke", "no-such-sub"},
+		{"test", "no-such-sub"},
 		{"piv", "no-such-sub"},
 		{"sd", "no-such-sub"},
 	}

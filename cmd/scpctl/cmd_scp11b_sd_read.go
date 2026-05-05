@@ -49,7 +49,7 @@ type scp11bSDReadData struct {
 //     extended APDU support over NFC.
 //   - GP Card Spec v2.3.1 Amendment F (SCP11 specification).
 func cmdSCP11bSDRead(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("scp11b-sd-read", env)
+	fs := newSubcommandFlagSet("test scp11b-sd-read", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	dumpBF21 := fs.Bool("dump-bf21", false,
@@ -68,7 +68,7 @@ func cmdSCP11bSDRead(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	report := &Report{Subcommand: "scp11b-sd-read", Reader: *reader}
+	report := &Report{Subcommand: "test scp11b-sd-read", Reader: *reader}
 	data := &scp11bSDReadData{}
 	report.Data = data
 

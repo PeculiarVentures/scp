@@ -1,13 +1,16 @@
 // Command scpctl is the unified administrative CLI for the
-// PeculiarVentures/scp library. It groups three layers of
+// PeculiarVentures/scp library. It groups four layers of
 // functionality:
 //
-//   - smoke   hardware validation and regression checks (the
-//             original scp-smoke surface, preserved unchanged
-//             behaviorally)
-//   - piv     user-facing PIV operations (PIN, key, cert, attest,
-//             reset) over the piv/session library
-//   - sd      Security Domain read and bootstrap operations
+//   - test    hardware regression checks (read-only smoke against
+//             real cards: scp03/scp11a/scp11b reads + PIN-verify)
+//   - piv     user-facing PIV operations (info, PIN, PUK, mgmt,
+//             key, cert, object, reset, provision) over the
+//             piv/session library
+//   - sd      Security Domain operations (info, reset, OCE/SCP11a
+//             bootstraps)
+//   - oce     off-card OCE certificate diagnostics (host-only;
+//             does not touch a card)
 //
 // plus a small set of top-level utilities (readers, probe, version,
 // help) that do not belong to any group.
@@ -18,16 +21,17 @@
 // validation is on by default; --lab-skip-scp11-trust opts out and
 // is visible in JSON output. Security Domain writes are never
 // attempted over SCP11b. Authentication lockouts are never used as
-// a recovery mechanism except by the explicit `smoke piv-reset`
-// command and only behind --confirm-write.
+// a recovery mechanism except by the explicit `piv reset` command
+// and only behind --confirm-write and --confirm-reset-piv.
 //
 // # Subcommands
 //
 //	scpctl readers
 //	scpctl probe
-//	scpctl smoke <subcommand>
-//	scpctl piv <subcommand>
-//	scpctl sd  <subcommand>
+//	scpctl test <subcommand>
+//	scpctl piv  <subcommand>
+//	scpctl sd   <subcommand>
+//	scpctl oce  <subcommand>
 //	scpctl version
 //	scpctl help
 //
@@ -41,7 +45,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 )
 
@@ -49,58 +52,51 @@ import (
 var version = "dev"
 
 // pivCommands maps the piv-group subcommand names to handlers.
-// These commands operate on the PIV applet via the piv/session
-// library, not via the SCP-wrapped paths in 'scpctl smoke
-// piv-provision' which establish a full SCP11b channel first.
-//
-// The split is intentional: 'piv' is for raw-transport operator
-// flows (probe a card, read its applet info), 'smoke' covers the
-// existing SCP-secured provisioning paths until they migrate over.
+// Most operate on the PIV applet via the piv/session library; the
+// 'provision' subcommand is the SCP11b-secured channel-then-key-gen
+// flow.
 var pivCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
-	"info":   cmdPIVInfo,
-	"pin":    cmdPIVPin,
-	"puk":    cmdPIVPuk,
-	"mgmt":   cmdPIVMgmt,
-	"key":    cmdPIVKey,
-	"cert":   cmdPIVCert,
-	"object": cmdPIVObject,
-	"reset":  cmdPIVGroupReset,
+	"info":      cmdPIVInfo,
+	"pin":       cmdPIVPin,
+	"puk":       cmdPIVPuk,
+	"mgmt":      cmdPIVMgmt,
+	"key":       cmdPIVKey,
+	"cert":      cmdPIVCert,
+	"object":    cmdPIVObject,
+	"reset":     cmdPIVGroupReset,
+	"provision": cmdPIVProvision,
 }
 
-// sdCommands maps the sd-group subcommand names. Today 'info' and
-// 'reset' are wired; the remaining flows (scp03-read, scp11b-read,
-// scp11a-read, bootstrap-oce) still live under 'scpctl smoke' and
-// will move when their dependencies on the smoke-specific report
-// shape are decoupled.
+// sdCommands maps the sd-group subcommand names. info and reset are
+// the read paths; the bootstrap-* entries are day-1 provisioning
+// flows that install the OCE public key and the SCP11a SD ECDH key
+// onto fresh cards. All bootstrap entries are state-changing and
+// gated by --confirm-write.
 var sdCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
-	"info":  cmdSDInfo,
-	"reset": cmdSDReset,
+	"info":                cmdSDInfo,
+	"reset":               cmdSDReset,
+	"bootstrap-oce":       cmdBootstrapOCE,
+	"bootstrap-scp11a":    cmdBootstrapSCP11a,
+	"bootstrap-scp11a-sd": cmdBootstrapSCP11aSD,
 }
 
-// smokeCommands maps the smoke-group subcommand names to handlers.
-// These are the original scp-smoke commands; the names are preserved
-// verbatim (including hyphens like scp03-sd-read) so existing
-// scripts that called `scp-smoke scp03-sd-read` translate to
-// `scpctl smoke scp03-sd-read` with no other changes.
-var smokeCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
-	"readers":           cmdReaders,
-	"probe":             cmdProbe,
+// testCommands maps the test-group subcommand names. These are
+// regression checks against real hardware: open a session, perform
+// a known read, validate the wire bytes the library produces are
+// accepted by the card. None of them mutate card state. Renamed
+// from the original 'smoke' group; the read smokes stayed but the
+// destructive bootstraps and PIV provisioning moved to sd / piv.
+var testCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
 	"scp03-sd-read":     cmdSCP03SDRead,
 	"scp11b-sd-read":    cmdSCP11bSDRead,
 	"scp11a-sd-read":    cmdSCP11aSDRead,
 	"scp11b-piv-verify": cmdSCP11bPIVVerify,
-	"bootstrap-oce":         cmdBootstrapOCE,
-	"bootstrap-scp11a-sd":   cmdBootstrapSCP11aSD,
-	"bootstrap-scp11a":      cmdBootstrapSCP11a,
-	"piv-provision":         cmdPIVProvision,
-	"piv-reset":         cmdPIVReset,
-	"test":              cmdTest,
+	"all":               cmdTest,
 }
 
-// topLevelCommands maps top-level utility subcommands. readers and
-// probe are also reachable under `scpctl smoke` because they were
-// originally part of the smoke harness; exposing them at the top
-// level mirrors how operators reach for them.
+// topLevelCommands maps top-level utility subcommands. These are
+// reader-discovery and unauthenticated-probe operations that don't
+// belong to any of the protocol or applet groups.
 var topLevelCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
 	"readers": cmdReaders,
 	"probe":   cmdProbe,
@@ -132,8 +128,8 @@ func main() {
 
 	group := os.Args[1]
 	switch group {
-	case "smoke":
-		runGroup(ctx, env, "smoke", smokeCommands, os.Args[2:], smokeUsage)
+	case "test":
+		runGroup(ctx, env, "test", testCommands, os.Args[2:], testUsage)
 		return
 	case "piv":
 		runGroup(ctx, env, "piv", pivCommands, os.Args[2:], pivUsage)
@@ -217,15 +213,20 @@ Usage:
   scpctl <utility> [flags]
 
 Groups:
-  smoke       Hardware smoke tests and regression checks
-              (originally the 'scp-smoke' binary; preserved verbatim).
+  test        Hardware regression checks. Read-only against real
+              cards; validates the wire bytes the library produces
+              are accepted. Renamed from the legacy 'smoke' group.
 
   piv         User-facing PIV operations over piv/session.
-              Wired: info, pin, puk, mgmt, key, cert, object, reset.
+              Wired: info, pin, puk, mgmt, key, cert, object,
+              reset, provision.
 
   sd          Security Domain operations.
-              Wired: info. SCP-secured read paths still under
-              'scpctl smoke' until they migrate.
+              Wired: info, reset, bootstrap-oce, bootstrap-scp11a,
+              bootstrap-scp11a-sd.
+
+  oce         Off-card OCE certificate diagnostics. Host-only;
+              does not touch a card. Wired: verify, gen.
 
 Top-level utilities:
   readers     List PC/SC readers visible to the OS.
@@ -233,18 +234,6 @@ Top-level utilities:
               capabilities.
   version     Print the binary version.
   help        Print this message.
-
-Smoke subcommands:
-  scpctl smoke readers
-  scpctl smoke probe
-  scpctl smoke scp03-sd-read
-  scpctl smoke scp11b-sd-read
-  scpctl smoke scp11a-sd-read
-  scpctl smoke scp11b-piv-verify
-  scpctl smoke bootstrap-oce
-  scpctl smoke piv-provision
-  scpctl smoke piv-reset
-  scpctl smoke test
 
 Common flags (all subcommands that touch hardware):
   --reader NAME              PC/SC reader name (substring match).
@@ -262,16 +251,13 @@ for per-command details and safety notes.
 `)
 }
 
-func smokeUsage(w io.Writer) {
-	fmt.Fprint(w, `scpctl smoke - hardware smoke tests and regression checks
+func testUsage(w io.Writer) {
+	fmt.Fprint(w, `scpctl test - hardware regression checks
 
 Usage:
-  scpctl smoke <subcommand> [flags]
+  scpctl test <subcommand> [flags]
 
 Subcommands:
-  readers              List PC/SC readers visible to the OS.
-  probe                Open an unauthenticated SD session, read CRD,
-                       parse, and print the card's claimed capabilities.
   scp03-sd-read        Open an SCP03 SD session and verify a read works.
                        Defaults to YubiKey factory credentials.
   scp11b-sd-read       Open an SCP11b SD session and verify a read works.
@@ -280,38 +266,15 @@ Subcommands:
                        and a card with OCE provisioned.
   scp11b-piv-verify    Open an SCP11b session against the PIV applet
                        and verify the PIN.
-  bootstrap-oce        Install an OCE public key (and optionally cert
-                       chain + CA SKI) onto a card via SCP03. Day-1
-                       provisioning step that enables scp11a-sd-read.
-                       Destructive; gated by --confirm-write.
-  bootstrap-scp11a-sd  Install the card-side SCP11a SD ECDH key
-                       (SK.SD.ECKA, KID=0x11/KVN=0x01 by default)
-                       via SCP03. Two modes: 'oncard' uses Yubico's
-                       GENERATE KEY extension so the private key
-                       never leaves the SE; 'import' uses GP PUT KEY
-                       to install a host-generated or supplied
-                       keypair. Destructive; gated by --confirm-write.
-  bootstrap-scp11a     Combined SCP11a-on-fresh-card flow. Opens ONE
-                       SCP03 factory session and does both the OCE
-                       public key install and the SCP11a SD key
-                       install. Required on cards (e.g. retail
-                       YubiKey 5.7.4) where the first PUT KEY under
-                       factory SCP03 invalidates the factory keys —
-                       running bootstrap-oce and bootstrap-scp11a-sd
-                       as separate commands fails the second one.
-                       Destructive; gated by --confirm-write.
-  piv-provision        Generate a PIV slot keypair and optionally install
-                       a certificate / fetch attestation, all over an
-                       SCP11b session targeting the PIV applet.
-                       Destructive; gated by --confirm-write.
-  piv-reset            Reset the YubiKey PIV applet to factory state by
-                       deliberately blocking PIN and PUK, then sending
-                       INS=0xFB. Erases ALL slot keys and certs.
-                       Destructive; gated by --confirm-write.
-  test                 Run probe + the three smoke tests; emit a
+  all                  Run probe + the four read smokes; emit a
                        PASS/FAIL/SKIP summary.
 
-Use "scpctl smoke <subcommand> -h" for per-command flags.
+These subcommands are read-only against the card. Destructive
+provisioning flows that used to live under 'smoke' (bootstrap-oce,
+bootstrap-scp11a, bootstrap-scp11a-sd, piv-provision) are now in
+their proper groups under 'sd' and 'piv'.
+
+Use "scpctl test <subcommand> -h" for per-command flags.
 `)
 }
 
@@ -326,20 +289,12 @@ func (u *usageError) Error() string { return u.msg }
 // usage errors and uses ContinueOnError so errors propagate up rather
 // than calling os.Exit inside the flag library.
 //
-// The name argument is the full subcommand path that should appear
-// in usage messages. Callers in the smoke group still pass the bare
-// subcommand and get the "scpctl smoke <sub>" prefix automatically;
-// callers in other groups pass the full "scpctl piv key generate"
-// form to keep the usage line accurate.
+// The name argument is the full subcommand path (without the "scpctl"
+// prefix) that should appear in usage messages: "test scp03-sd-read",
+// "piv key generate", "sd bootstrap-oce". Each handler is responsible
+// for passing the right form so its usage line is accurate.
 func newSubcommandFlagSet(name string, env *runEnv) *flag.FlagSet {
-	prefix := "scpctl"
-	// Heuristic: if name does not already start with a known group
-	// prefix, treat it as a smoke subcommand for back-compat with
-	// the original scp-smoke help shape.
-	if !strings.HasPrefix(name, "piv ") && !strings.HasPrefix(name, "sd ") && !strings.HasPrefix(name, "smoke ") {
-		prefix = "scpctl smoke"
-	}
-	fs := flag.NewFlagSet(prefix+" "+name, flag.ContinueOnError)
+	fs := flag.NewFlagSet("scpctl "+name, flag.ContinueOnError)
 	fs.SetOutput(env.errOut)
 	return fs
 }
@@ -377,11 +332,14 @@ Subcommands:
   reset                 Reset the PIV applet to factory state. Erases
                         all slots, certificates, and credentials.
                         YubiKey-only. Destructive. Requires both
-                        --confirm-write and --confirm-reset-piv.
-                        The card-side precondition (PIN and PUK
-                        both blocked) is the operator's
-                        responsibility; for the block-then-reset
-                        harness flow, see 'scpctl smoke piv-reset'.
+                        --confirm-write and --confirm-reset-piv. The
+                        card-side precondition (PIN and PUK both
+                        blocked) is the operator's responsibility.
+
+  provision             Generate a PIV slot keypair and optionally
+                        install a certificate / fetch attestation,
+                        all over an SCP11b session targeting the PIV
+                        applet. Destructive; gated by --confirm-write.
 
 Destructive subcommands all require --confirm-write. 'reset' takes
 the additional --confirm-reset-piv flag because a full applet wipe
@@ -395,9 +353,8 @@ goes on the wire, with piv.ErrUnsupportedByProfile.
 Channel mode (destructive and credential-bearing subcommands):
   Exactly one of --scp11b or --raw-local-ok must be set. Absence
   of both is a usage error: scpctl piv refuses to silently default
-  to raw, because operators migrating from 'scp-smoke piv-provision'
-  (which used SCP11b unconditionally) should not be downgraded by
-  forgetting to type a flag.
+  to raw, because a missed channel-mode flag should not silently
+  downgrade an SCP11b-secured operation to raw transport.
 
   --scp11b                  Run the operation over an SCP11b-on-PIV
                             secure channel. Required for any host
@@ -450,23 +407,36 @@ Usage:
   scpctl sd <subcommand> [flags]
 
 Subcommands:
-  info     Open an unauthenticated SD session and report Card
-           Recognition Data. Equivalent to 'scpctl probe' /
-           'scpctl smoke probe'. Read-only.
-  reset    Factory-reset Security Domain key material. Restores
-           the factory SCP03 key set, regenerates the SCP11b key,
-           and removes any custom OCE / SCP11a / SCP11c keys.
-           Dry-run by default; pass --confirm-reset-sd to mutate.
-           Does NOT touch PIV applet state — for that, see
-           'scpctl smoke piv-reset'.
-
-Forthcoming subcommands (still reachable under 'scpctl smoke' for now):
-  scp03-read           SCP03 SD session read.
-  scp11b-read          SCP11b SD session read.
-  scp11a-read          SCP11a (mutual auth) SD session read.
-  bootstrap-oce        Install OCE public key onto a card via SCP03.
-  bootstrap-scp11a-sd  Install card-side SCP11a SD ECDH key via SCP03.
-  bootstrap-scp11a     Combined SCP11a-on-fresh-card bootstrap.
+  info                 Open an unauthenticated SD session and report
+                       Card Recognition Data. Equivalent to 'scpctl
+                       probe'. Read-only.
+  reset                Factory-reset Security Domain key material.
+                       Restores the factory SCP03 key set, regenerates
+                       the SCP11b key, and removes any custom OCE /
+                       SCP11a / SCP11c keys. Dry-run by default; pass
+                       --confirm-reset-sd to mutate. Does NOT touch
+                       PIV applet state — for that, see 'scpctl piv
+                       reset'.
+  bootstrap-oce        Install an OCE public key (and optionally cert
+                       chain + CA SKI) onto a card via SCP03. Day-1
+                       provisioning step that enables SCP11a sessions.
+                       Destructive; gated by --confirm-write.
+  bootstrap-scp11a     Combined SCP11a-on-fresh-card flow. Opens ONE
+                       SCP03 factory session and does both the OCE
+                       public key install and the SCP11a SD key
+                       install. Required on cards (e.g. retail
+                       YubiKey 5.7.4) where the first PUT KEY under
+                       factory SCP03 invalidates the factory keys —
+                       running bootstrap-oce and bootstrap-scp11a-sd
+                       as separate commands fails the second one.
+                       Destructive; gated by --confirm-write.
+  bootstrap-scp11a-sd  Install the card-side SCP11a SD ECDH key
+                       (SK.SD.ECKA, KID=0x11/KVN=0x01 by default)
+                       via SCP03. Two modes: 'oncard' uses Yubico's
+                       GENERATE KEY extension so the private key
+                       never leaves the SE; 'import' uses GP PUT KEY
+                       to install a host-generated or supplied
+                       keypair. Destructive; gated by --confirm-write.
 
 Use "scpctl sd <subcommand> -h" for per-command flags.
 `)
