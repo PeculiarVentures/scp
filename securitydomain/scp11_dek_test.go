@@ -32,6 +32,28 @@ func TestOpenSCP11_PopulatesSessionDEK(t *testing.T) {
 	}
 	card.Variant = 1 // SCP11a
 
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "Test OCE CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+
 	oceKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate OCE key: %v", err)
@@ -43,7 +65,7 @@ func TestOpenSCP11_PopulatesSessionDEK(t *testing.T) {
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageKeyAgreement,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &oceKey.PublicKey, oceKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &oceKey.PublicKey, caKey)
 	if err != nil {
 		t.Fatalf("create cert: %v", err)
 	}
@@ -55,7 +77,7 @@ func TestOpenSCP11_PopulatesSessionDEK(t *testing.T) {
 	cfg := scp11.YubiKeyDefaultSCP11aConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	cfg.OCEPrivateKey = oceKey
-	cfg.OCECertificates = []*x509.Certificate{oceCert}
+	cfg.OCECertificates = []*x509.Certificate{caCert, oceCert}
 	cfg.OCEKeyReference = scp11.KeyRef{KID: 0x10, KVN: 0x03}
 
 	sd, err := OpenSCP11(context.Background(), card.Transport(), cfg)

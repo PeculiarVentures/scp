@@ -27,6 +27,7 @@
 package scp11
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
@@ -905,6 +906,23 @@ func (s *Session) validateCardCertChain(data []byte) error {
 //     (i.e. all but the LEAF cert) and cleared for the final cert.
 //   - The chain is sent in leaf-LAST order.
 //
+// Trust anchors are NOT sent. The OCE CA is installed on the card
+// out-of-band (PUT KEY at the OCE CA reference, with the CA's SKI
+// registered via STORE CA-IDENTIFIER) before SCP11a is opened. PSO
+// uploads only the path *below* the trust anchor — typically just
+// the leaf, sometimes leaf+intermediates, but never the trust
+// anchor itself. Re-uploading the trust anchor is what the card
+// rejects with SW=6A80 ("incorrect parameters in data field"); it
+// already has that cert and treats the duplicate as a malformed
+// path. Confirmed against retail YubiKey 5.7.4 on 2026-05-04.
+//
+// To make the API forgiving — callers commonly pass the same PEM
+// file used during bootstrap (which DOES include the CA at chain[0])
+// — sendOCECertificate strips self-signed certs from the start of
+// the chain before transmission. The "trust anchor at chain[0]"
+// convention is so universal that auto-detect-and-skip is the
+// principle of least surprise.
+//
 // Earlier this code chunked a single certificate into 255-byte pieces
 // using GP command-chaining bits on CLA. That's a different protocol
 // shape — what GP §7.5 calls "command chaining" applies when a SINGLE
@@ -916,7 +934,17 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 		return errors.New("OCE certificate chain required for SCP11a/c (mutual-auth variants)")
 	}
 
-	chain := s.config.OCECertificates
+	// Filter out any self-signed certs at the start of the chain.
+	// These are trust anchors and must not be re-uploaded — the
+	// card already has the OCE CA installed at the OCE CA key
+	// reference. See doc comment above for the SW=6A80 backstory.
+	chain := stripLeadingTrustAnchors(s.config.OCECertificates)
+	if len(chain) == 0 {
+		return errors.New(
+			"OCE certificate chain consists entirely of self-signed certs; " +
+				"PSO uploads the path BELOW the trust anchor, so the chain " +
+				"must contain at least one non-self-signed cert (the leaf)")
+	}
 	lastIdx := len(chain) - 1
 
 	for i, cert := range chain {
@@ -1165,5 +1193,38 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 		copy(s.sessionKeys.MACChain, receipt)
 	}
 
+	return nil
+}
+
+// stripLeadingTrustAnchors removes self-signed certs from the start
+// of an OCE chain. Per the SCP11a/c provisioning model, the trust
+// anchor (OCE CA) lives on the card — installed via PUT KEY at the
+// OCE CA reference and registered via STORE CA-IDENTIFIER. The
+// chain uploaded over PSO is the path *below* the trust anchor:
+// typically just the leaf, optionally with intermediates, but
+// never the anchor itself.
+//
+// Cards reject the trust-anchor cert during PSO with SW=6A80 because
+// they already have it and treat the duplicate as an ill-formed
+// path. The previous behavior — sending every cert in the chain —
+// was the proximate cause of "PSO cert 1/N: SW=6A80" against retail
+// YubiKey 5.7.4 in scpctl smoke runs (2026-05-04).
+//
+// Self-signed = Issuer DN equals Subject DN. The check is purely on
+// the DN bytes; it does NOT verify the self-signature, because (a)
+// validating signatures here would couple PSO to crypto we don't
+// need, and (b) a non-self-signed cert with matching subject/issuer
+// would itself be malformed. The strip is a heuristic to be
+// forgiving about the common case of "user passed the bootstrap
+// PEM file (CA + leaf) to scp11a-sd-read."
+//
+// Multiple leading self-signed certs (rare but possible — e.g. cross
+// signed roots in a transitional rollout) all get stripped.
+func stripLeadingTrustAnchors(chain []*x509.Certificate) []*x509.Certificate {
+	for i, cert := range chain {
+		if !bytes.Equal(cert.RawIssuer, cert.RawSubject) {
+			return chain[i:]
+		}
+	}
 	return nil
 }

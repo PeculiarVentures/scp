@@ -53,12 +53,17 @@ func TestSCP11a_SecurityDomain_OverRelay_EndToEnd(t *testing.T) {
 	defer cancel()
 
 	// --- Set up a real OCE keypair + cert chain ---
-	oceKey, leafDER := makeOCELeafCert(t)
-	leafCert, err := x509.ParseCertificate(leafDER)
+	// makeOCELeafCert returns (priv, caDER||leafDER) — concatenated.
+	oceKey, chainDER := makeOCELeafCert(t)
+	chain, err := x509.ParseCertificates(chainDER)
 	if err != nil {
-		t.Fatalf("parse leaf cert: %v", err)
+		t.Fatalf("parse cert chain: %v", err)
 	}
-	chain := []*x509.Certificate{leafCert}
+	if len(chain) < 2 {
+		t.Fatalf("expected CA + leaf chain; got %d cert(s)", len(chain))
+	}
+	leafCert := chain[len(chain)-1]
+	_ = leafCert
 
 	// --- Stand up the mock card on the endpoint side ---
 	card, err := mockcard.New()
@@ -247,27 +252,62 @@ func TestSCP11a_SecurityDomain_OverRelay_EndToEnd(t *testing.T) {
 	}
 }
 
-// makeOCELeafCert generates a P-256 OCE keypair and a self-signed
-// X.509 certificate suitable for handing to mockcard via PSO. mockcard
-// parses the leaf cert, extracts the public key, and uses it as the
-// OCE static key for SCP11a's ECDH(SK.SD, PK.OCE) leg.
+// makeOCELeafCert generates a P-256 CA keypair, a P-256 OCE leaf
+// keypair, and an X.509 chain (CA, leaf-signed-by-CA) suitable for
+// SCP11a fixtures. Returns (oceLeafPrivKey, [caCertDER, leafCertDER]).
+//
+// Returns the chain in leaf-LAST order to match the convention used
+// elsewhere in the codebase. The host-side test then passes both
+// certs to scp11.Open, which strips the self-signed CA at the start
+// before transmission (mirroring real-world behavior where the CA
+// is installed on the card via PUT KEY at the OCE CA reference and
+// only the path-below-the-anchor goes over PSO).
 func makeOCELeafCert(t *testing.T) (*ecdsa.PrivateKey, []byte) {
 	t.Helper()
+	caPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey ca: %v", err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "OCE-Integration-Test-CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate ca: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse ca cert: %v", err)
+	}
+
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("ecdsa.GenerateKey: %v", err)
+		t.Fatalf("ecdsa.GenerateKey leaf: %v", err)
 	}
-	tmpl := &x509.Certificate{
+	leafTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "OCE-Integration-Test"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageKeyAgreement,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &priv.PublicKey, caPriv)
 	if err != nil {
-		t.Fatalf("x509.CreateCertificate: %v", err)
+		t.Fatalf("x509.CreateCertificate leaf: %v", err)
 	}
-	return priv, der
+	// Return concatenated CA + leaf so the caller's chain — which
+	// expects only one DER blob in the existing call sites — gets
+	// both. Tests that need to split them do so via x509.ParseCertificate
+	// in a loop. Today's only caller (TestSCP11a_SecurityDomain_OverRelay)
+	// passes the result through ParseCertificate which only consumes
+	// the leaf's bytes; we update that caller to handle the chain.
+	return priv, append(append([]byte{}, caDER...), leafDER...)
 }
 
 // integrationRelayTransport is the same shape as the relay transport
