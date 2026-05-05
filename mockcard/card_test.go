@@ -288,12 +288,36 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 	}
 	card.Variant = 1 // SCP11a
 
-	// For SCP11a, we need an OCE private key and certificate.
+	// For SCP11a, we need an OCE chain: a CA at chain[0] (which the
+	// real card has at the OCE CA reference) plus a leaf signed by
+	// the CA. The host sends the leaf over PSO; the card validates
+	// it against the trust anchor it already has.
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(98),
+		Subject:               pkix.Name{CommonName: "Test OCE CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+
 	oceKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate OCE key: %v", err)
 	}
-
 	oceCertTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(99),
 		Subject:      pkix.Name{CommonName: "Test OCE"},
@@ -301,7 +325,7 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageKeyAgreement,
 	}
-	oceCertDER, err := x509.CreateCertificate(rand.Reader, oceCertTmpl, oceCertTmpl, &oceKey.PublicKey, oceKey)
+	oceCertDER, err := x509.CreateCertificate(rand.Reader, oceCertTmpl, caCert, &oceKey.PublicKey, caKey)
 	if err != nil {
 		t.Fatalf("create OCE cert: %v", err)
 	}
@@ -318,7 +342,7 @@ func TestEndToEnd_SCP11a_WithReceipt(t *testing.T) {
 		KeyID:                          0x11, // SCP11a KID
 		KeyVersion:                     0x01,
 		OCEPrivateKey:                  oceKey,
-		OCECertificates:                []*x509.Certificate{oceCert},
+		OCECertificates:                []*x509.Certificate{caCert, oceCert},
 		OCEKeyReference:                scp11.KeyRef{KID: 0x10, KVN: 0x03}, // YubiKey default
 		InsecureSkipCardAuthentication: true,
 	})

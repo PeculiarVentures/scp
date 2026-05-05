@@ -219,41 +219,68 @@ func TestSCP11_InsecureTestOnlyEphemeralKey_RejectsNonP256(t *testing.T) {
 //   - P2 = OCEKeyReference.KID, with bit 0x80 set on every cert
 //     EXCEPT the last (leaf).
 //   - Data = the cert's DER bytes.
+//   - Trust anchors (self-signed certs at the start of the chain)
+//     are NOT transmitted — they live on the card.
 //
 // Earlier this code chunked a single cert into 255-byte pieces with
 // GP CLA-chaining (0x90/0x80). This test documents the corrected
-// behavior and would have caught the regression.
+// behavior and would have caught the regression. It also covers the
+// "trust anchor at chain[0] doesn't go on the wire" invariant fixed
+// in the SCP11a-PSO-skip-trust-anchor PR (2026-05-04).
 func TestSCP11a_PSO_WireFormat(t *testing.T) {
-	// Build a synthetic 3-cert chain for the test. Real OCE certs
-	// would be intermediates + OCE leaf; the wire format work doesn't
-	// depend on them being real-issued, so we use generated certs.
-	mkCert := func(t *testing.T, n int) *x509.Certificate {
+	// Build a 4-cert input [root, intermediate1, intermediate2, leaf]
+	// where root is self-signed and the rest form a real chain.
+	// The strip helper removes root before transmission; we expect
+	// 3 PSO APDUs.
+	rootKey, _ := ecdsaP256(t)
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(0),
+		Subject:               pkixName("OCE-Root"),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	rootDER, _ := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	root, _ := x509.ParseCertificate(rootDER)
+
+	// Intermediates form a chain off root.
+	mkInter := func(t *testing.T, n int, signer *x509.Certificate, signerKey *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey) {
 		t.Helper()
 		k, _ := ecdsaP256(t)
 		tmpl := &x509.Certificate{
-			SerialNumber: big.NewInt(int64(n)),
-			Subject:      pkixName(fmt.Sprintf("OCE-%d", n)),
-			NotBefore:    time.Now().Add(-time.Hour),
-			NotAfter:     time.Now().Add(time.Hour),
+			SerialNumber:          big.NewInt(int64(n)),
+			Subject:               pkixName(fmt.Sprintf("OCE-Inter-%d", n)),
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(time.Hour),
+			IsCA:                  true,
+			BasicConstraintsValid: true,
+			KeyUsage:              x509.KeyUsageCertSign,
 		}
-		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+		der, _ := x509.CreateCertificate(rand.Reader, tmpl, signer, &k.PublicKey, signerKey)
 		c, _ := x509.ParseCertificate(der)
-		return c
+		return c, k
 	}
+	inter1, inter1Key := mkInter(t, 1, root, rootKey)
+	inter2, inter2Key := mkInter(t, 2, inter1, inter1Key)
+
 	leafKey, _ := ecdsaP256(t)
 	leafTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(99),
 		Subject:      pkixName("OCE-Leaf"),
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageKeyAgreement,
 	}
-	leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, leafTmpl, &leafKey.PublicKey, leafKey)
+	leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, inter2, &leafKey.PublicKey, inter2Key)
 	leaf, _ := x509.ParseCertificate(leafDER)
 
 	chain := []*x509.Certificate{
-		mkCert(t, 1), // intermediate 1
-		mkCert(t, 2), // intermediate 2
-		leaf,         // leaf — must come last
+		root,   // <-- self-signed; should be STRIPPED
+		inter1, // intermediate 1, transmitted with chain bit
+		inter2, // intermediate 2, transmitted with chain bit
+		leaf,   // leaf — last cert, transmitted WITHOUT chain bit
 	}
 
 	card, err := New()
@@ -288,8 +315,9 @@ func TestSCP11a_PSO_WireFormat(t *testing.T) {
 			pso = append(pso, capdu)
 		}
 	}
+	// Root must NOT be transmitted; we expect inter1, inter2, leaf.
 	if len(pso) != 3 {
-		t.Fatalf("expected 3 PSO APDUs (one per cert), got %d", len(pso))
+		t.Fatalf("expected 3 PSO APDUs (root stripped, inter1+inter2+leaf transmitted); got %d", len(pso))
 	}
 
 	// Per-APDU header checks.

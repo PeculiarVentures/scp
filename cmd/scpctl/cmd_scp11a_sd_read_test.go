@@ -37,7 +37,34 @@ import (
 //   - "GetKeyInformation over SCP11a" — confirms reads work over
 //     the resulting SM channel.
 func TestSCP11aSDRead_Smoke(t *testing.T) {
-	// Generate OCE key + self-signed cert.
+	// Build a proper CA + leaf chain. The strip helper in scp11
+	// removes self-signed certs at the start of the chain (the
+	// trust anchor lives on the card), so a self-signed leaf
+	// alone would be entirely stripped — leaving nothing to send
+	// over PSO. Generate a CA, then a leaf signed by the CA;
+	// write the chain (CA, leaf — leaf last) to the PEM file.
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen CA key: %v", err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(0xCA),
+		Subject:               pkix.Name{CommonName: "scp-smoke test OCE CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+
 	oceKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("gen OCE key: %v", err)
@@ -49,7 +76,7 @@ func TestSCP11aSDRead_Smoke(t *testing.T) {
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageKeyAgreement,
 	}
-	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &oceKey.PublicKey, oceKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &oceKey.PublicKey, caKey)
 	if err != nil {
 		t.Fatalf("create OCE cert: %v", err)
 	}
@@ -68,9 +95,10 @@ func TestSCP11aSDRead_Smoke(t *testing.T) {
 	}), 0o600); err != nil {
 		t.Fatalf("write key PEM: %v", err)
 	}
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{
-		Type: "CERTIFICATE", Bytes: certDER,
-	}), 0o644); err != nil {
+	if err := os.WriteFile(certPath, append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})...,
+	), 0o644); err != nil {
 		t.Fatalf("write cert PEM: %v", err)
 	}
 
