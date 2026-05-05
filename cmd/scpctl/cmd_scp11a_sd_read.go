@@ -6,6 +6,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
+	"github.com/PeculiarVentures/scp/transport/trace"
 )
 
 type scp11aSDReadData struct {
@@ -59,6 +60,13 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 		"Card-side SCP11a SD key reference, KID. This is the key the card uses on its end of the channel — distinct from the OCE key reference. Default 0x11 (GP Amendment F §7.1.1 SCP11a slot, used by YubiKey).")
 	sdKVN := fs.Int("sd-kvn", 0x01,
 		"Card-side SCP11a SD key reference, KVN. Default 0x01 matches Yubico factory provisioning. Pass 0x00 to mean 'any version' (GP-spec literal).")
+	apduTrace := fs.String("apdu-trace", "",
+		"If set, write every wire-level APDU exchange to this path as a JSON "+
+			"trace. Recorder sits at the transport layer, so it captures bytes "+
+			"AS THE CARD RECEIVES THEM — including the failing PSO APDU. Used to "+
+			"diagnose SCP11a PSO SW=6A80 failures by inspecting the exact bytes "+
+			"of the rejected certificate APDU. No effect when the chain fails to "+
+			"load or trust evaluation refuses (no APDUs are sent in those cases).")
 	trust := registerTrustFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -99,6 +107,32 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 		return err
 	}
 	defer t.Close()
+
+	// Wire-level APDU trace, parallel to the same flag on
+	// bootstrap-scp11a. Wraps the transport at the layer below
+	// SCP secure messaging — the recorded bytes are exactly what
+	// the card sees on the wire. Most useful here for diagnosing
+	// PSO SW=6A80 by inspecting the exact failing PSO APDU
+	// (CLA/INS/P1/P2/Lc/data field) so we can compare it against
+	// what the GP Amendment F §7.5 spec says the card should
+	// accept.
+	if *apduTrace != "" {
+		rec := trace.NewRecorder(t, trace.RecorderConfig{
+			Profile: "scpctl smoke scp11a-sd-read",
+			Reader:  *reader,
+			Notes: "Captured for diagnosis of SCP11a PSO SW=6A80. Trace " +
+				"includes the failing PSO APDU when the chain is rejected " +
+				"by the card's certificate verifier.",
+		})
+		defer func() {
+			if ferr := rec.FlushFile(*apduTrace); ferr != nil {
+				fmt.Fprintf(env.errOut, "scpctl: --apdu-trace flush: %v\n", ferr)
+			} else {
+				fmt.Fprintf(env.errOut, "scpctl: APDU trace written to %s\n", *apduTrace)
+			}
+		}()
+		t = rec
+	}
 
 	cfg := scp11.YubiKeyDefaultSCP11aConfig()
 	cfg.OCEPrivateKey = oceKey
