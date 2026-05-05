@@ -141,6 +141,9 @@ func main() {
 	case "sd":
 		runGroup(ctx, env, "sd", sdCommands, os.Args[2:], sdUsage)
 		return
+	case "oce":
+		runGroup(ctx, env, "oce", oceCommands, os.Args[2:], oceUsage)
+		return
 	}
 
 	// Top-level utility subcommands.
