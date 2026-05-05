@@ -315,31 +315,54 @@ func TestSCP11a_PSO_WireFormat(t *testing.T) {
 			pso = append(pso, capdu)
 		}
 	}
-	// Root must NOT be transmitted; we expect inter1, inter2, leaf.
-	if len(pso) != 3 {
-		t.Fatalf("expected 3 PSO APDUs (root stripped, inter1+inter2+leaf transmitted); got %d", len(pso))
+	if len(pso) < 3 {
+		t.Fatalf("expected at least 3 PSO APDUs (root stripped, inter1+inter2+leaf transmitted, "+
+			"each potentially chunked); got %d", len(pso))
 	}
 
-	// Per-APDU header checks.
-	for i, capdu := range pso {
-		isLast := i == len(pso)-1
-		wantP2 := byte(0x10)
-		if !isLast {
-			wantP2 |= 0x80
-		}
-		if capdu[0] != 0x80 {
-			t.Errorf("PSO %d: CLA = %02X, want 80", i, capdu[0])
+	// Per-cert assertions on the SEQUENCE of APDUs. Each cert is
+	// either:
+	//   - a single short-encoded APDU (CLA=0x80, cert ≤ 255 bytes), or
+	//   - two or more chained chunks: CLA=0x90 on every chunk except
+	//     the last, CLA=0x80 on the last chunk; same INS/P1/P2
+	//     across all chunks.
+	// P2's chain bit (0x80) reflects "more CERTS coming" and stays
+	// constant within the chunks of a single cert. P2 = 0x10 (just
+	// the OCE KID) on the leaf; 0x90 (KID|0x80) on every preceding
+	// cert. Walk the APDU list from the top, grouping chunks into
+	// certs by detecting the CLA=0x80 transition (= last chunk).
+	var certIdx int
+	for apduIdx, capdu := range pso {
+		isLastChunkOfCert := capdu[0] == 0x80
+		isChainedChunk := capdu[0] == 0x90
+		if !isLastChunkOfCert && !isChainedChunk {
+			t.Errorf("PSO APDU %d: CLA = %02X, want 80 (final chunk) or 90 (chained chunk)",
+				apduIdx, capdu[0])
 		}
 		if capdu[1] != 0x2A {
-			t.Errorf("PSO %d: INS = %02X, want 2A", i, capdu[1])
+			t.Errorf("PSO APDU %d: INS = %02X, want 2A", apduIdx, capdu[1])
 		}
 		if capdu[2] != 0x03 {
-			t.Errorf("PSO %d: P1 = %02X, want 03 (KVN)", i, capdu[2])
+			t.Errorf("PSO APDU %d: P1 = %02X, want 03 (KVN)", apduIdx, capdu[2])
+		}
+		// 3 certs after stripping root: inter1, inter2, leaf.
+		// P2 chain bit is set on certs 0 and 1 (intermediates), clear on cert 2 (leaf).
+		isLeafCert := certIdx == 2
+		wantP2 := byte(0x10)
+		if !isLeafCert {
+			wantP2 |= 0x80
 		}
 		if capdu[3] != wantP2 {
-			t.Errorf("PSO %d: P2 = %02X, want %02X (KID=10, chain-bit %v)",
-				i, capdu[3], wantP2, !isLast)
+			t.Errorf("PSO APDU %d (cert %d): P2 = %02X, want %02X (KID=10, P2-chain-bit %v)",
+				apduIdx, certIdx, capdu[3], wantP2, !isLeafCert)
 		}
+
+		if isLastChunkOfCert {
+			certIdx++
+		}
+	}
+	if certIdx != 3 {
+		t.Errorf("expected to see 3 final-chunk APDUs (one per cert); saw %d", certIdx)
 	}
 }
 

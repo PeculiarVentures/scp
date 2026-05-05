@@ -898,37 +898,45 @@ func (s *Session) validateCardCertChain(data []byte) error {
 // Wire layout follows Yubico's reference implementation, which itself
 // matches the spec:
 //
-//   - Each certificate in the chain is a SEPARATE PSO APDU (not chunks
-//     of one cert across APDUs).
-//   - CLA = 0x80 throughout (no GP command-chaining).
+//   - Each certificate in the chain is a SEPARATE PSO operation, sent
+//     in leaf-LAST order.
 //   - P1 = OCEKeyReference.KVN.
 //   - P2 = OCEKeyReference.KID, with bit 0x80 set for non-final certs
 //     (i.e. all but the LEAF cert) and cleared for the final cert.
-//   - The chain is sent in leaf-LAST order.
+//     This is the "P2 chain bit" from GP §7.5 §7.10 — it tells the
+//     card whether THIS cert is the terminus or whether more certs
+//     are coming after it.
+//
+//   - Each individual cert is sent as ONE OR MORE short APDUs using
+//     ISO 7816-4 §5.1.1 command chaining: bit b5 of CLA (= 0x10) is
+//     set on every chunk except the LAST chunk of that cert. Each
+//     chunk carries up to 255 bytes of cert data. CLA = 0x80 base;
+//     chained chunks therefore use CLA = 0x90 and the final chunk
+//     uses CLA = 0x80.
+//
+// Earlier versions of this loop used ISO 7816-4 extended-length
+// APDU encoding (3-byte Lc, single APDU per cert) when a cert
+// exceeded 255 bytes. That sends a syntactically valid APDU but
+// retail YubiKey 5.7.4 rejects PSO with SW=6A80 ("incorrect
+// parameters in command data field") when the cert arrives in an
+// extended-length wrapper. The card expects ISO command chaining
+// even though it accepts extended-length encoding for OTHER
+// commands. yubikit-python's SmartCardProtocol.send_apdu auto-
+// promotes to ISO chaining for data > 255 bytes; mirroring that
+// here closes the SW=6A80 path on retail hardware.
 //
 // Trust anchors are NOT sent. The OCE CA is installed on the card
 // out-of-band (PUT KEY at the OCE CA reference, with the CA's SKI
 // registered via STORE CA-IDENTIFIER) before SCP11a is opened. PSO
-// uploads only the path *below* the trust anchor — typically just
+// uploads only the path BELOW the trust anchor — typically just
 // the leaf, sometimes leaf+intermediates, but never the trust
 // anchor itself. Re-uploading the trust anchor is what the card
-// rejects with SW=6A80 ("incorrect parameters in data field"); it
-// already has that cert and treats the duplicate as a malformed
-// path. Confirmed against retail YubiKey 5.7.4 on 2026-05-04.
-//
-// To make the API forgiving — callers commonly pass the same PEM
-// file used during bootstrap (which DOES include the CA at chain[0])
-// — sendOCECertificate strips self-signed certs from the start of
-// the chain before transmission. The "trust anchor at chain[0]"
-// convention is so universal that auto-detect-and-skip is the
-// principle of least surprise.
-//
-// Earlier this code chunked a single certificate into 255-byte pieces
-// using GP command-chaining bits on CLA. That's a different protocol
-// shape — what GP §7.5 calls "command chaining" applies when a SINGLE
-// cert exceeds the APDU limit, not when sending multiple certs. Real
-// cards (YubiKey verified through yubikit) expect the chain-of-certs
-// shape, not the chunks-of-one-cert shape.
+// rejects with SW=6A80; it already has that cert and treats the
+// duplicate as a malformed path. To make the API forgiving —
+// callers commonly pass the same PEM file used during bootstrap
+// (which DOES include the CA at chain[0]) — sendOCECertificate
+// strips self-signed certs from the start of the chain before
+// transmission.
 func (s *Session) sendOCECertificate(ctx context.Context) error {
 	if len(s.config.OCECertificates) == 0 {
 		return errors.New("OCE certificate chain required for SCP11a/c (mutual-auth variants)")
@@ -948,38 +956,73 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 	lastIdx := len(chain) - 1
 
 	for i, cert := range chain {
-		// Set chain bit on every cert EXCEPT the last (leaf).
-		// Per yubikit scp.py:
-		//   p2 = oce_ref.kid | (0x80 if i < n else 0)
+		// P2 chain bit: set on every cert EXCEPT the last (leaf).
+		// Per yubikit scp.py: p2 = oce_ref.kid | (0x80 if i < n else 0).
 		p2 := s.config.OCEKeyReference.KID
 		if i < lastIdx {
 			p2 |= 0x80
 		}
-
-		// Real OCE certs are typically >255 bytes; use extended APDU
-		// encoding so the full cert fits in a single PSO command.
-		// This matches Yubico's behavior — yubikit's protocol layer
-		// auto-promotes to extended encoding when data exceeds the
-		// short-APDU limit.
-		cmd := &apdu.Command{
-			CLA:            0x80,
-			INS:            0x2A, // PERFORM SECURITY OPERATION
-			P1:             s.config.OCEKeyReference.KVN,
-			P2:             p2,
-			Data:           cert.Raw,
-			Le:             0,
-			ExtendedLength: len(cert.Raw) > 255,
-		}
-
-		resp, err := s.transport.Transmit(ctx, cmd)
-		if err != nil {
-			return fmt.Errorf("PSO cert %d/%d: %w", i+1, len(chain), err)
-		}
-		if !resp.IsSuccess() {
-			return fmt.Errorf("PSO cert %d/%d: %w", i+1, len(chain), resp.Error())
+		if err := s.psoSendCertChained(ctx, cert.Raw, p2, i+1, len(chain)); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
+// psoSendCertChained sends a single OCE certificate's DER bytes via
+// PERFORM SECURITY OPERATION, using ISO 7816-4 §5.1.1 command
+// chaining when the cert exceeds 255 bytes (most real OCE certs do).
+//
+// CLA scheme:
+//
+//   - Base CLA = 0x80 (GP proprietary class for SCP commands).
+//   - Bit b5 (= 0x10) is the chaining indicator. Set on every chunk
+//     except the LAST chunk of this cert. So intermediate chunks
+//     carry CLA = 0x90 and the final chunk carries CLA = 0x80.
+//
+// Each chunk reuses the same INS/P1/P2; the cert is split at
+// pscChunkSize (=255 bytes) boundaries with no additional framing.
+//
+// p2 already has the P2 chain bit (0x80) baked in by the caller —
+// that bit signals "more CERTS coming", a different concept from
+// CLA's "more CHUNKS coming for this cert".
+//
+// certIdx and certCount are 1-based and used only for error
+// messages so a multi-cert chain failure tells the operator which
+// cert in the chain failed.
+func (s *Session) psoSendCertChained(ctx context.Context, certDER []byte, p2 byte, certIdx, certCount int) error {
+	const pscChunkSize = 255
+	total := len(certDER)
+	for offset := 0; offset < total || total == 0; {
+		end := offset + pscChunkSize
+		if end > total {
+			end = total
+		}
+		isLastChunk := end == total
+		cla := byte(0x80)
+		if !isLastChunk {
+			cla = 0x90 // 0x80 | 0x10 (ISO command chaining)
+		}
+		cmd := &apdu.Command{
+			CLA:  cla,
+			INS:  0x2A, // PERFORM SECURITY OPERATION
+			P1:   s.config.OCEKeyReference.KVN,
+			P2:   p2,
+			Data: certDER[offset:end],
+			Le:   -1, // No response data on intermediate chunks; final chunk also returns no data on PSO.
+		}
+		resp, err := s.transport.Transmit(ctx, cmd)
+		if err != nil {
+			return fmt.Errorf("PSO cert %d/%d: %w", certIdx, certCount, err)
+		}
+		if !resp.IsSuccess() {
+			return fmt.Errorf("PSO cert %d/%d: %w", certIdx, certCount, resp.Error())
+		}
+		offset = end
+		if total == 0 {
+			break // empty cert (degenerate); send one APDU and stop.
+		}
+	}
 	return nil
 }
 

@@ -144,7 +144,11 @@ func TestSCP11a_SamsungTranscript_GPProprietary_CustomValidator(t *testing.T) {
 
 	sx := newScriptedTransport(t, []scriptedExchange{
 		{name: "GET_DATA", matchINS: 0xCA, response: getDataProprietaryRAPDU},
-		{name: "PSO", matchINS: 0x2A, response: mustHex(t, "9000")},
+		// Cert chained into 3 short APDUs; see SCP11a transcript
+		// test for context.
+		{name: "PSO_chunk_1", matchCLA: 0x90, matchINS: 0x2A, response: mustHex(t, "9000")},
+		{name: "PSO_chunk_2", matchCLA: 0x90, matchINS: 0x2A, response: mustHex(t, "9000")},
+		{name: "PSO_chunk_final", matchCLA: 0x80, matchINS: 0x2A, response: mustHex(t, "9000")},
 		{name: "MUTUAL_AUTH", matchINS: 0x82, expectExact: mutualAuthExpectedCAPDU, response: mutualAuthRAPDU},
 		{name: "LIST_PACKAGES", matchCLA: 0x84, matchINS: 0xF2, expectExact: listPackagesExpectedCAPDU, response: listPackagesRAPDU},
 	})
