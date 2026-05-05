@@ -19,8 +19,6 @@ import (
 type bootstrapSCP11aData struct {
 	Protocol            string `json:"protocol,omitempty"`
 	OCEKeyInstalled     bool   `json:"oce_key_installed"`
-	CertChainStored     bool   `json:"cert_chain_stored,omitempty"`
-	CertChainSkipped    bool   `json:"cert_chain_skipped,omitempty"`
 	CACertSKIRegistered bool   `json:"ca_cert_ski_registered,omitempty"`
 	CACertSKISkipped    bool   `json:"ca_cert_ski_skipped,omitempty"`
 	SDKeyMode           string `json:"sd_key_mode,omitempty"`
@@ -75,10 +73,10 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 	// OCE-side flags (mirror bootstrap-oce).
 	oceCertPath := fs.String("oce-cert", "",
 		"Path to OCE certificate chain PEM, leaf last. REQUIRED. "+
-			"Leaf's public key is installed at the OCE KID/KVN; "+
-			"if --store-chain is set, the entire chain is also written.")
-	storeChain := fs.Bool("store-chain", false,
-		"Also call STORE CERTIFICATES with the full chain.")
+			"Leaf's public key is installed at the OCE KID/KVN. "+
+			"The chain itself is NOT stored on the card — it travels "+
+			"on the wire at session-open via PSO and is validated by "+
+			"the card against the registered CA pubkey + SKI.")
 	caSKIHex := fs.String("ca-ski", "",
 		"Hex-encoded CA SKI to register via STORE CA-IDENTIFIER. Optional.")
 	oceKID := fs.Int("oce-kid", 0x10,
@@ -208,9 +206,6 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 	if !*confirm {
 		report.Skip("install OCE CA public key", "dry-run; pass --confirm-write to actually call PUT KEY")
 		report.Skip("register CA SKI", fmt.Sprintf("dry-run (%s)", skiOrigin))
-		if *storeChain {
-			report.Skip("store OCE cert chain", "dry-run")
-		}
 		switch *sdKeyMode {
 		case "oncard":
 			report.Skip("install SCP11a SD key (on-card)",
@@ -298,17 +293,37 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 			fmt.Sprintf("%X (%s)", caSKI, skiOrigin))
 	}
 
-	if *storeChain {
-		if err := sd.StoreCertificates(ctx, oceRef, chain); err != nil {
-			report.Fail("store OCE cert chain", err.Error())
-		} else {
-			data.CertChainStored = true
-			report.Pass("store OCE cert chain", fmt.Sprintf("%d cert(s)", len(chain)))
-		}
-	} else {
-		data.CertChainSkipped = true
-		report.Skip("store OCE cert chain", "--store-chain not set")
-	}
+	// Note on cert chain storage. SCP11a involves two distinct
+	// chains and they live in distinct places:
+	//
+	//   1. OCE chain (the chain that certifies PK.OCE.ECKA).
+	//      Sent on the wire at session-open via PSO (GP §7.5.3).
+	//      Validated by the card against the registered CA pubkey
+	//      at the OCE KID + the SKI registered above. NEVER stored
+	//      on the card. PutECPublicKey + StoreCaIssuer above are
+	//      the complete OCE-side setup.
+	//
+	//   2. SD attestation chain (a chain that certifies PK.SD.ECKA).
+	//      Stored on-card at the SCP11a SD KID (0x11), retrieved by
+	//      the OCE at session-open via GET DATA (TAG_CERTIFICATE_STORE
+	//      = 0xBF21), and validated by the OCE against trusted roots.
+	//      The leaf cert in this chain MUST certify the on-card
+	//      SD pubkey — i.e. the chain is built by signing the SD's
+	//      pubkey with an issuer key chosen by the operator. This is
+	//      orthogonal to the OCE side: the OCE root and the SD
+	//      attestation issuer can be (and in production usually are)
+	//      different entities.
+	//
+	// Earlier versions of this command had a --store-chain flag that
+	// passed the OCE chain to StoreCertificates(oceRef, ...). That was
+	// wrong on two axes: wrong ref (KID=0x10 holds a CA pubkey, not a
+	// chain), and wrong content (the OCE leaf cert doesn't certify the
+	// SD's pubkey, which is what the SD-keyref slot expects). The
+	// YubiKey returned SW=6A80 because the operation has no GP-spec
+	// meaning. The flag is gone; if SD attestation provisioning is
+	// needed it belongs in a separate command that takes an issuer
+	// key + cert and signs the on-card SD pubkey to build a proper
+	// attestation chain before calling StoreCertificates(sdRef, ...).
 
 	// 2b) SCP11a SD-side writes. Same SCP03 session — no
 	// re-authentication needed.

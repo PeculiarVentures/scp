@@ -851,8 +851,30 @@ func (s *Session) Reset(ctx context.Context) error {
 
 // --- Certificate operations ---
 
-// StoreCertificates stores X.509 certificates for the given key reference.
-// Certificates should be in order with the leaf certificate last.
+// StoreCertificates stores an X.509 certificate chain on the card,
+// associated with the given key reference. The chain order is leaf
+// last (matches yubikit-python's get_certificate_bundle return order
+// and store_certificate_bundle input order).
+//
+// Semantically, the chain stored at a key reference is the chain
+// that certifies the PUBLIC KEY held at that reference. For SCP11
+// SD keys (KID=0x11 SCP11a, 0x13 SCP11b, 0x15 SCP11c), this is the
+// SD's attestation chain — the chain the OCE retrieves at session-
+// open via GET DATA (TAG_CERTIFICATE_STORE = 0xBF21) to validate
+// PK.SD.ECKA against trusted roots. The leaf cert in such a chain
+// MUST certify the on-card SD pubkey; the YubiKey rejects with
+// SW=6A80 if the chain content doesn't make sense at the chosen ref.
+//
+// This is NOT the function for storing the OCE's own chain. The
+// OCE chain is sent on the wire at session-open via PSO (GP §7.5.3)
+// and validated by the card against the registered KLOC CA pubkey
+// + SKI (PutECPublicKey + StoreCaIssuer). The OCE chain is never
+// stored on the card; passing the OCE chain here against the OCE
+// CA key reference is a category error and the card will reject it.
+//
+// Requires OCE verification (the underlying SCP session must be
+// SCP03 or an SCP11a/c session — both authenticate the OCE; SCP11b
+// is one-way auth and STORE DATA writes need OCE auth).
 func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs []*x509.Certificate) error {
 	if err := s.requireOCEAuth(); err != nil {
 		return err

@@ -161,13 +161,12 @@ PEM key formats accepted: PKCS#8 (`PRIVATE KEY`, modern `openssl genpkey` defaul
 
 ### bootstrap-oce — Day-1 OCE provisioning
 
-Installs an OCE public key (and optionally a certificate chain + CA Subject Key Identifier) onto a card via SCP03 with factory keys, so subsequent SCP11a sessions can complete mutual auth. This is the step that has to happen *before* `scp11a-sd-read` works against a fresh card.
+Installs an OCE public key onto a card via SCP03 with factory keys (and optionally registers a CA Subject Key Identifier), so subsequent SCP11a sessions can complete mutual auth. This is the step that has to happen *before* `scp11a-sd-read` works against a fresh card.
 
 ```bash
 scpctl smoke bootstrap-oce \
   --reader "YubiKey" \
   --oce-cert /path/to/oce-chain.pem \
-  --store-chain \
   --ca-ski 0123456789ABCDEF0123456789ABCDEF01234567 \
   --confirm-write
 ```
@@ -176,7 +175,7 @@ Without `--confirm-write` the command runs in **dry-run mode**: it loads and val
 
 The CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK). A card whose SCP03 keys have already been rotated will get an authentication error from `OpenSCP03` — custom-keys flags (`--kvn`, `--enc`, `--mac`, `--dek`) are follow-up work; the structural mechanism is straightforward (build an `scp03.Config` from the flags rather than calling `FactoryYubiKeyConfig`).
 
-`--store-chain` calls `STORE CERTIFICATES` so the card has the full OCE chain locally, useful when its trust model validates against the chain rather than just the root. `--ca-ski` registers a CA Subject Key Identifier via `STORE CA-IDENTIFIER`. Either or both can be omitted; the OCE public-key install is the only required step.
+The OCE certificate chain is **NOT stored on the card**. It travels on the wire at SCP11 session-open via PSO (GP §7.5.3), and the card validates it against the registered CA pubkey + SKI. `bootstrap-oce` thus performs two writes: `PUT KEY` to install the OCE CA pubkey at KID=0x10, and `STORE DATA` to register the CA SKI. The leaf cert's pubkey and the chain bytes themselves are never written to card storage — that would be a category error (the card has no slot for OCE chains), and earlier versions that tried to do this got SW=6A80 from retail YubiKeys. If you need to store an *SD* attestation chain (a chain whose leaf certifies the on-card SD pubkey), that's a separate provisioning step against the SD key reference, not part of `bootstrap-oce`.
 
 ### piv-reset — restore the PIV applet to factory state
 
