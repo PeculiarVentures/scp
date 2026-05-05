@@ -634,14 +634,20 @@ func TestStoreDataChained_SingleBlock(t *testing.T) {
 }
 
 // TestStoreDataChained_MultipleBlocks confirms that payloads >255 bytes
-// are split into ≤255-byte blocks with sequential P2 and the last-block
-// bit (b8 of P1) set only on the final block. Each block must be its own
-// APDU — never an APDU-chained fragment of one logical command.
+// are sent as a single LOGICAL STORE DATA split via ISO 7816-4 §5.1.1
+// command chaining at the transport layer (CLA bit b5 = 0x10 on
+// non-final chunks). All chunks share the same INS, P1=0x90 (last/only
+// block + BER-TLV), and P2=0x00 — only the CLA chain bit and the data
+// slice differ. This is the wire shape retail YubiKey 5.7.4 accepts;
+// the alternative GP §11.11 application-level block chaining (P2 =
+// block number, P1 b8 = 0 on non-final blocks) returns SW=6A86 on
+// hardware. yubikit-python's SmartCardProtocol auto-promotes long
+// STORE DATA to ISO chaining; this mirrors that behavior.
 func TestStoreDataChained_MultipleBlocks(t *testing.T) {
 	rt := &recordingTransport{}
 	s := &Session{transport: rt, authenticated: true}
 
-	// 600 bytes -> 3 blocks at the secure-wrap-safe size (223 each):
+	// 600 bytes → 3 chunks at the secure-wrap-safe size (223 each):
 	// 223 + 223 + 154. The chunk size is chosen so the on-wire APDU
 	// stays within short Lc (≤ 255) even after AES-CBC padding plus
 	// a 16-byte MAC inflate the wrapped form.
@@ -661,58 +667,50 @@ func TestStoreDataChained_MultipleBlocks(t *testing.T) {
 		t.Fatalf("expected 3 APDUs, got %d", len(rt.commands))
 	}
 
-	wantSizes := []int{223, 223, 154}
+	// chunkBudget falls to 255 when there's no live scpSession (the
+	// test injects a recordingTransport with authenticated=true but
+	// no SCP session, which is the same code path the unauthenticated
+	// case takes). 600 bytes → 255 + 255 + 90.
+	wantSizes := []int{255, 255, 90}
 	for i, cmd := range rt.commands {
-		if cmd.CLA != clsGP {
-			t.Errorf("block %d: CLA = %02X, want %02X", i, cmd.CLA, clsGP)
+		isLastChunk := i == len(rt.commands)-1
+		// CLA: clsGP on the last chunk, clsGP|0x10 on chained chunks.
+		var wantCLA byte = clsGP
+		if !isLastChunk {
+			wantCLA = clsGP | 0x10
+		}
+		if cmd.CLA != wantCLA {
+			t.Errorf("chunk %d (last=%v): CLA = %02X, want %02X",
+				i, isLastChunk, cmd.CLA, wantCLA)
 		}
 		if cmd.INS != insStoreData {
-			t.Errorf("block %d: INS = %02X, want %02X", i, cmd.INS, insStoreData)
+			t.Errorf("chunk %d: INS = %02X, want %02X", i, cmd.INS, insStoreData)
 		}
-		if cmd.P2 != byte(i) {
-			t.Errorf("block %d: P2 = %02X, want %02X (block number)", i, cmd.P2, byte(i))
+		// P1 and P2 are CONSTANT across chunks — STORE DATA is one
+		// logical APDU at the application layer; only the transport
+		// CLA chain bit varies. No application-level block numbering.
+		if cmd.P1 != storeDataP1Final {
+			t.Errorf("chunk %d: P1 = %02X, want %02X (last/only block + BER-TLV)",
+				i, cmd.P1, storeDataP1Final)
+		}
+		if cmd.P2 != 0x00 {
+			t.Errorf("chunk %d: P2 = %02X, want 00 (no application-level block numbering)",
+				i, cmd.P2)
 		}
 		if len(cmd.Data) != wantSizes[i] {
-			t.Errorf("block %d: data size = %d, want %d", i, len(cmd.Data), wantSizes[i])
-		}
-		isLast := i == len(rt.commands)-1
-		var wantP1 byte = storeDataP1NonFinal
-		if isLast {
-			wantP1 = storeDataP1Final
-		}
-		if cmd.P1 != wantP1 {
-			t.Errorf("block %d (last=%v): P1 = %02X, want %02X", i, isLast, cmd.P1, wantP1)
-		}
-		// Critical: each block APDU must NOT carry the chaining CLA bit
-		// (0x10). That bit signals ISO/IEC 7816 transport-level chaining,
-		// which would conflict with STORE DATA's own application-level
-		// block protocol.
-		if cmd.CLA&0x10 != 0 {
-			t.Errorf("block %d: CLA = %02X has transport-chaining bit set", i, cmd.CLA)
+			t.Errorf("chunk %d: data size = %d, want %d", i, len(cmd.Data), wantSizes[i])
 		}
 	}
 
-	// Verify the concatenated data round-trips.
+	// Verify the concatenated data round-trips back to the original
+	// payload — that's the test that the chaining didn't lose or
+	// duplicate any bytes.
 	var got []byte
 	for _, cmd := range rt.commands {
 		got = append(got, cmd.Data...)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Errorf("payload reassembly mismatch")
-	}
-}
-
-// TestStoreDataChained_RejectsAPDUChainingPath confirms that the generic
-// transmitWithChaining path explicitly refuses STORE DATA — STORE DATA
-// uses its own chaining protocol and must go through transmitStoreDataChained.
-func TestStoreDataChained_RejectsAPDUChainingPath(t *testing.T) {
-	rt := &recordingTransport{}
-	s := &Session{transport: rt, authenticated: true}
-
-	cmd := storeDataCmd(make([]byte, 300)) // >255 to force the chaining branch
-	_, err := s.transmitWithChaining(context.Background(), cmd)
-	if err == nil {
-		t.Fatal("expected error: STORE DATA must not use APDU-level chaining")
 	}
 }
 
