@@ -601,116 +601,79 @@ func (r *recordingTransport) TransmitRaw(_ context.Context, raw []byte) ([]byte,
 
 func (r *recordingTransport) Close() error { return nil }
 
-// TestStoreDataChained_SingleBlock confirms that payloads ≤255 bytes are
-// transmitted as a single APDU with P1 = 0x90 and P2 = 0x00.
-func TestStoreDataChained_SingleBlock(t *testing.T) {
-	rt := &recordingTransport{}
-	s := &Session{transport: rt, authenticated: true}
+// TestStoreData_AlwaysSingleAPDUAtAppLayer is the regression pin
+// for the wrap-then-chain layering. The application layer must
+// emit exactly ONE logical STORE DATA APDU (P1=0x90 P2=0x00,
+// matching yubikit-python's store_data) regardless of payload
+// size. Transport-layer ISO chaining of long wrapped APDUs lives
+// inside scp03.Session.sendPossiblyChained — that's what scp03's
+// own tests exercise; here we only assert the application layer
+// presents a single logical command.
+//
+// History: an earlier version of this code did application-level
+// chaining (one APDU per chunk, per-chunk SCP wrap) and broke on
+// retail YubiKey 5.7.4. The card returned bare 9000 with no R-MAC
+// on intermediate chunks, which the host's R-MAC unwrap rejected
+// and used as a signal to terminate the channel — leaving the
+// next command's Wrap to deref a nil channel. The fix was to
+// move chaining to the transport layer where the SCP MAC chain
+// advances exactly once per logical command.
+func TestStoreData_AlwaysSingleAPDUAtAppLayer(t *testing.T) {
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"small payload", 32},
+		{"single short APDU max", 255},
+		{"crosses short-Lc boundary", 300},
+		{"two-chunk territory", 500},
+		{"three-chunk territory", 700},
+		{"ten-chunk territory", 2400},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &recordingTransport{}
+			s := &Session{transport: rt}
 
-	payload := bytes.Repeat([]byte{0xAB}, 200)
-	resp, err := s.transmitStoreDataChained(context.Background(), payload)
-	if err != nil {
-		t.Fatalf("transmitStoreDataChained: %v", err)
-	}
-	if !resp.IsSuccess() {
-		t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
-	}
-	if len(rt.commands) != 1 {
-		t.Fatalf("expected 1 APDU, got %d", len(rt.commands))
-	}
-	cmd := rt.commands[0]
-	if cmd.INS != insStoreData {
-		t.Errorf("INS = %02X, want %02X", cmd.INS, insStoreData)
-	}
-	if cmd.P1 != storeDataP1Final {
-		t.Errorf("P1 = %02X, want %02X (final block)", cmd.P1, storeDataP1Final)
-	}
-	if cmd.P2 != 0x00 {
-		t.Errorf("P2 = %02X, want 0x00", cmd.P2)
-	}
-	if !bytes.Equal(cmd.Data, payload) {
-		t.Errorf("payload mismatch")
-	}
-}
+			payload := make([]byte, tc.size)
+			for i := range payload {
+				payload[i] = byte(i)
+			}
 
-// TestStoreDataChained_MultipleBlocks confirms that payloads >255 bytes
-// are sent as a single LOGICAL STORE DATA split via ISO 7816-4 §5.1.1
-// command chaining at the transport layer (CLA bit b5 = 0x10 on
-// non-final chunks). All chunks share the same INS, P1=0x90 (last/only
-// block + BER-TLV), and P2=0x00 — only the CLA chain bit and the data
-// slice differ. This is the wire shape retail YubiKey 5.7.4 accepts;
-// the alternative GP §11.11 application-level block chaining (P2 =
-// block number, P1 b8 = 0 on non-final blocks) returns SW=6A86 on
-// hardware. yubikit-python's SmartCardProtocol auto-promotes long
-// STORE DATA to ISO chaining; this mirrors that behavior.
-func TestStoreDataChained_MultipleBlocks(t *testing.T) {
-	rt := &recordingTransport{}
-	s := &Session{transport: rt, authenticated: true}
-
-	// 600 bytes → 3 chunks at the secure-wrap-safe size (223 each):
-	// 223 + 223 + 154. The chunk size is chosen so the on-wire APDU
-	// stays within short Lc (≤ 255) even after AES-CBC padding plus
-	// a 16-byte MAC inflate the wrapped form.
-	payload := make([]byte, 600)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
-
-	resp, err := s.transmitStoreDataChained(context.Background(), payload)
-	if err != nil {
-		t.Fatalf("transmitStoreDataChained: %v", err)
-	}
-	if !resp.IsSuccess() {
-		t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
-	}
-	if len(rt.commands) != 3 {
-		t.Fatalf("expected 3 APDUs, got %d", len(rt.commands))
-	}
-
-	// chunkBudget falls to 255 when there's no live scpSession (the
-	// test injects a recordingTransport with authenticated=true but
-	// no SCP session, which is the same code path the unauthenticated
-	// case takes). 600 bytes → 255 + 255 + 90.
-	wantSizes := []int{255, 255, 90}
-	for i, cmd := range rt.commands {
-		isLastChunk := i == len(rt.commands)-1
-		// CLA: clsGP on the last chunk, clsGP|0x10 on chained chunks.
-		var wantCLA byte = clsGP
-		if !isLastChunk {
-			wantCLA = clsGP | 0x10
-		}
-		if cmd.CLA != wantCLA {
-			t.Errorf("chunk %d (last=%v): CLA = %02X, want %02X",
-				i, isLastChunk, cmd.CLA, wantCLA)
-		}
-		if cmd.INS != insStoreData {
-			t.Errorf("chunk %d: INS = %02X, want %02X", i, cmd.INS, insStoreData)
-		}
-		// P1 and P2 are CONSTANT across chunks — STORE DATA is one
-		// logical APDU at the application layer; only the transport
-		// CLA chain bit varies. No application-level block numbering.
-		if cmd.P1 != storeDataP1Final {
-			t.Errorf("chunk %d: P1 = %02X, want %02X (last/only block + BER-TLV)",
-				i, cmd.P1, storeDataP1Final)
-		}
-		if cmd.P2 != 0x00 {
-			t.Errorf("chunk %d: P2 = %02X, want 00 (no application-level block numbering)",
-				i, cmd.P2)
-		}
-		if len(cmd.Data) != wantSizes[i] {
-			t.Errorf("chunk %d: data size = %d, want %d", i, len(cmd.Data), wantSizes[i])
-		}
-	}
-
-	// Verify the concatenated data round-trips back to the original
-	// payload — that's the test that the chaining didn't lose or
-	// duplicate any bytes.
-	var got []byte
-	for _, cmd := range rt.commands {
-		got = append(got, cmd.Data...)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Errorf("payload reassembly mismatch")
+			resp, err := s.transmitStoreData(context.Background(), payload)
+			if err != nil {
+				t.Fatalf("transmitStoreData: %v", err)
+			}
+			if !resp.IsSuccess() {
+				t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
+			}
+			// Exactly ONE APDU at the application layer: the
+			// recordingTransport sits BELOW any scp wrapping, so
+			// when there's no scpSession the transport sees the
+			// raw STORE DATA APDU. Any chunking would mean the
+			// app layer is doing chaining itself, which is the
+			// exact bug the wrap-then-chain refactor closed.
+			if len(rt.commands) != 1 {
+				t.Fatalf("expected exactly 1 APDU at the app layer, got %d "+
+					"(application-level chaining was reintroduced)", len(rt.commands))
+			}
+			cmd := rt.commands[0]
+			if cmd.INS != insStoreData {
+				t.Errorf("INS = %02X, want %02X", cmd.INS, insStoreData)
+			}
+			if cmd.P1 != storeDataP1Final {
+				t.Errorf("P1 = %02X, want %02X (last/only block + BER-TLV)",
+					cmd.P1, storeDataP1Final)
+			}
+			if cmd.P2 != 0x00 {
+				t.Errorf("P2 = %02X, want 0x00 (no application-level block numbering)", cmd.P2)
+			}
+			if !bytes.Equal(cmd.Data, payload) {
+				t.Errorf("payload mismatch: app layer must hand the full "+
+					"payload to the transport, not split it (got %d bytes, want %d)",
+					len(cmd.Data), len(payload))
+			}
+		})
 	}
 }
 
@@ -848,60 +811,15 @@ func TestOpen_RejectsBadStaticDEKLength(t *testing.T) {
 
 // --- Chained APDU chunk-size invariant ---
 
-// TestChainCommandsAt_ChunkSize confirms chainCommandsAt splits at the
-// requested boundary and sets the chaining bit only on intermediates.
-func TestChainCommandsAt_ChunkSize(t *testing.T) {
-	cmd := &apdu.Command{
-		CLA:  0x80,
-		INS:  0xD8,
-		P1:   0x00,
-		P2:   0x00,
-		Data: make([]byte, 600),
-		Le:   0,
-	}
-	// secureWrapSafeBlock-sized chunks: 600 -> 223 + 223 + 154.
-	cmds := chainCommandsAt(cmd, secureWrapSafeBlock)
-	if len(cmds) != 3 {
-		t.Fatalf("expected 3 chained APDUs, got %d", len(cmds))
-	}
-	wantSizes := []int{secureWrapSafeBlock, secureWrapSafeBlock, 600 - 2*secureWrapSafeBlock}
-	for i, c := range cmds {
-		if len(c.Data) != wantSizes[i] {
-			t.Errorf("APDU %d: data size = %d, want %d", i, len(c.Data), wantSizes[i])
-		}
-		isLast := i == len(cmds)-1
-		hasChainingBit := c.CLA&0x10 != 0
-		if isLast && hasChainingBit {
-			t.Errorf("APDU %d (last): chaining bit must be CLEAR", i)
-		}
-		if !isLast && !hasChainingBit {
-			t.Errorf("APDU %d (intermediate): chaining bit must be SET", i)
-		}
-	}
-}
-
-// TestSecureWrapSafeBlock_FitsShortLc is a documentation test asserting
-// the math behind secureWrapSafeBlock: a plaintext of that size, after
-// AES-CBC encryption with ISO 9797-1 method-2 padding plus the largest
-// MAC truncation we use (16 bytes / S16), still produces a wrapped
-// payload that fits in a short-Lc APDU (≤ 255 bytes).
-func TestSecureWrapSafeBlock_FitsShortLc(t *testing.T) {
-	const macSize = 16 // worst case
-	padded := ((secureWrapSafeBlock + 1 + 15) / 16) * 16
-	wireLen := padded + macSize
-	if wireLen > 255 {
-		t.Errorf("secureWrapSafeBlock=%d: wrapped wire len = %d, exceeds short-Lc 255",
-			secureWrapSafeBlock, wireLen)
-	}
-	// And one more byte should NOT fit — verifying the bound is tight.
-	N := secureWrapSafeBlock + 1
-	padded = ((N + 1 + 15) / 16) * 16
-	wireLen = padded + macSize
-	if wireLen <= 255 {
-		t.Errorf("secureWrapSafeBlock could be larger: N=%d still fits (%d ≤ 255)",
-			N, wireLen)
-	}
-}
+// Application-level chaining helpers (chainCommandsAt,
+// secureWrapSafeBlock) used to live in this package and were
+// tested here. Wrap-then-chain layering moved that logic into
+// scp03.Session.sendPossiblyChained where it belongs (the SCP
+// layer is where MAC chain advance per logical command happens,
+// so chunking the WRAPPED bytes there is the only architecture
+// that keeps host and card MAC chains in sync). The tests for
+// the chunking primitive now live alongside that code in
+// scp03/scp03_test.go.
 
 // TestKeyIDConstants_MatchGPAmendmentF locks in that SCP11 KIDs
 // match GP Amendment F §7.1.1 and Yubico's yubikit reference.

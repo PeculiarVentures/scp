@@ -85,18 +85,21 @@ func getDataCmd(p1p2 uint16, data []byte) *apdu.Command {
 //
 // 0x90 = b8 (last/only block) | b5 (BER-TLV format). YubiKey only
 // accepts STORE DATA as a single LOGICAL APDU; payloads larger
-// than a short APDU are split via ISO 7816-4 §5.1.1 transport-
-// level command chaining (CLA bit b5 = 0x10), not GP §11.11
-// application-level block chaining (which would require P2 to
-// step through block numbers and P1 b8 to clear on non-final
-// blocks). See transmitStoreDataChained in session.go for the
-// hardware-driven rationale.
+// than a short APDU are split at the SCP TRANSPORT layer via
+// ISO 7816-4 §5.1.1 command chaining (CLA bit b5 = 0x10), not
+// GP §11.11 application-level block chaining (which would require
+// P2 to step through block numbers and P1 b8 to clear on non-
+// final blocks). The SCP wrap (encrypt + MAC) is computed once
+// over the whole logical command using the extended-format header
+// for the MAC input when Lc > 255; the wrapped bytes are then
+// chunked at the transport. See scp03.Session.sendPossiblyChained
+// for the chunking and the hardware-driven rationale.
 const storeDataP1Final byte = 0x90
 
-// storeDataCmd builds a single, unfragmented STORE DATA command.
-// transmitStoreDataChained handles the case where Data exceeds a
-// single APDU's capacity by routing through transmitWithChaining
-// for ISO transport-level chaining.
+// storeDataCmd builds a STORE DATA command as a single LOGICAL
+// APDU. Transport-layer chaining inside scp03.Session.Transmit
+// handles payloads that exceed a short-form APDU's capacity; the
+// application layer always emits one logical command.
 func storeDataCmd(data []byte) *apdu.Command {
 	return &apdu.Command{
 		CLA:  clsGP,

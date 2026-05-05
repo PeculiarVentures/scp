@@ -41,6 +41,24 @@ type MockCard struct {
 	// processed under secure messaging. Read-only commands and
 	// pre-handshake commands are not recorded.
 	recorded []RecordedAPDU
+
+	// chainBuffer accumulates data fields from a sequence of ISO
+	// 7816-4 §5.1.1 chained APDUs (CLA bit b5 = 0x10) until the
+	// final chunk arrives. The chained APDUs share INS/P1/P2; we
+	// concatenate the data and process once at the final chunk.
+	// This mirrors what real cards do at the transport layer
+	// before secure messaging is even applied.
+	//
+	// Modeling chaining at the mock is load-bearing for
+	// regression coverage: the bug that motivated the
+	// wrap-then-chain refactor (per-chunk SCP wrapping desyncing
+	// the host MAC chain because the card sees one logical
+	// command) is invisible if the mock dispatches each chained
+	// chunk as if it were independent. With reassembly here, a
+	// host that wraps each chunk separately fails MAC verification
+	// at the assembled-command boundary, exactly like retail
+	// hardware does.
+	chainBuffer []byte
 }
 
 type mockSession struct {
@@ -66,6 +84,55 @@ func (c *MockCard) Transport() *MockTransport {
 }
 
 func (c *MockCard) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
+	// ISO 7816-4 §5.1.1 transport-level command chaining. Real cards
+	// reassemble chained chunks BEFORE applying any application or
+	// secure-messaging logic; we mirror that here. The chaining bit
+	// (CLA b5 = 0x10) on a chunk says "more chunks follow"; clear
+	// means "this is the final (or only) chunk." Intermediate
+	// chunks return 9000 with no data — the card has buffered them
+	// and is waiting for more. The final chunk is dispatched with
+	// CLA bit cleared and the full concatenated data field.
+	//
+	// Modeling chaining at the mock is load-bearing for regression
+	// coverage: the bug that motivated the wrap-then-chain refactor
+	// (per-chunk SCP wrapping desyncing the host MAC chain because
+	// the card sees one logical command) is invisible if the mock
+	// dispatches each chained chunk as if it were independent. With
+	// reassembly here, a host that wraps each chunk separately
+	// fails C-MAC verification at the assembled-command boundary,
+	// exactly like retail hardware does.
+	if cmd.CLA&0x10 != 0 {
+		c.chainBuffer = append(c.chainBuffer, cmd.Data...)
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+	}
+	if len(c.chainBuffer) > 0 {
+		// Final chunk of a chained sequence. Reassemble: drop the
+		// chaining bit (already clear on this chunk), concatenate
+		// data, dispatch as one logical APDU. Reset the buffer
+		// regardless of dispatch outcome — a partial chain
+		// shouldn't bleed into the next command.
+		fullData := append(c.chainBuffer, cmd.Data...) //nolint:gocritic // intentional: assembling chained payload
+		c.chainBuffer = nil
+		reassembled := &apdu.Command{
+			CLA:            cmd.CLA, // chaining bit already clear on the final chunk
+			INS:            cmd.INS,
+			P1:             cmd.P1,
+			P2:             cmd.P2,
+			Data:           fullData,
+			Le:             cmd.Le,
+			ExtendedLength: cmd.ExtendedLength,
+		}
+		return c.dispatchReassembled(reassembled)
+	}
+
+	return c.dispatchReassembled(cmd)
+}
+
+// dispatchReassembled runs the post-reassembly APDU through the
+// EXTERNAL-AUTH / secure-messaging / plain-INS dispatch table. Split
+// out from processAPDU so chained and unchained APDUs go through the
+// same code path once the chaining wrapper is removed.
+func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error) {
 	// EXTERNAL AUTHENTICATE uses CLA=0x84 (secure messaging bit set)
 	// but arrives before the session is fully established. Route it
 	// explicitly before the secure messaging check.
@@ -250,7 +317,22 @@ func (c *MockCard) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 	var macInput []byte
 	macInput = append(macInput, sess.ch.ExportMACChain()...)
 	macInput = append(macInput, cmd.CLA, cmd.INS, cmd.P1, cmd.P2)
-	macInput = append(macInput, byte(len(data)))
+	// Extended-format Lc encoding when the wrapped data exceeds
+	// short-Lc capacity. Mirrors channel.SecureChannel.Wrap on the
+	// host side (channel.go: "Extended APDUs must MAC the extended
+	// length form, not byte(lc)"). After ISO 7816-4 §5.1.1 chain
+	// reassembly the data field can be > 255 bytes even though the
+	// individual on-wire chunks were short-form; the host MAC'd
+	// once over the LOGICAL command using extended-format Lc, and
+	// we have to follow suit here or the MAC won't match.
+	if len(data) > 255 {
+		if len(data) > 65535 {
+			return &apdu.Response{SW1: 0x6A, SW2: 0x80}, nil // wrong length
+		}
+		macInput = append(macInput, 0x00, byte(len(data)>>8), byte(len(data)))
+	} else {
+		macInput = append(macInput, byte(len(data)))
+	}
 	macInput = append(macInput, encData...)
 
 	expectedMAC, err := cmac.AESCMAC(sess.keys.SMAC, macInput)
