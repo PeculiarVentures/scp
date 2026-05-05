@@ -2,6 +2,14 @@
 
 A Go implementation of the GlobalPlatform Secure Channel Protocols **SCP03** and **SCP11** for secure smart-card communication, plus a typed Security Domain management layer for key lifecycle, certificate provisioning, and trust validation.
 
+This library opens an authenticated, encrypted channel to a smart card or secure element using one of GlobalPlatform's standard secure-channel protocols, then lets you drive the card over that channel. SCP03 uses pre-shared AES keys; SCP11 uses ECDH and X.509 certificates. Either way, once the handshake completes, every command you send is encrypted and MACed, and every response is verified before you see it. The `securitydomain` package layers typed administrator-facing operations on top: install or rotate keys, store certificates, reset back to factory state.
+
+Reach for it when you're building PKI or device-management tooling against YubiKeys, YubiHSMs, JCOP cards, or any GlobalPlatform-conformant secure element. Concrete fits: programmatic PIV provisioning over SCP11, fleet-of-cards backends behind a relay, factory initialization with default keys, replacing a vendor SDK with a Go-native dependency that doesn't pull a Java or .NET runtime, and CA-side enrollment flows where the card's identity has to be validated against a pinned root before any operation runs.
+
+What's different here: byte-exact verification against three independent references (Yubico .NET SDK, Samsung OpenSCP-Java, GlobalPlatformPro), not only against this library's own mock card; a deliberately narrow public API where session-key material is unreachable from the generic `Session` interface and every escape hatch is named `Insecure*`; transport as an interface, so the same code drives a local USB reader, an in-memory mock for tests, or a remote card over the gRPC CardRelay transport.
+
+Unfamiliar terms in any of the docs are defined in [`docs/glossary.md`](docs/glossary.md).
+
 The library is standards-oriented and compatibility-expanding. It is structured so consumers can match their integration to validated material rather than to a single vendor. Support is documented across three explicit categories: **verified profiles** (validated against hardware *and* independent reference implementations), **implemented GlobalPlatform capabilities** (standards-compatible behavior implemented against the GP specs, exercisable today against any GP-conformant card), and **expansion targets** (in-scope work waiting on additional cards or reference material to validate against).
 
 ## Table of contents
@@ -15,6 +23,7 @@ The library is standards-oriented and compatibility-expanding. It is structured 
 - [Packages](#packages)
 - [Security Domain Management](#security-domain-management)
 - [Certificate Trust Validation](#certificate-trust-validation)
+- [Choosing between SCP03 and SCP11](#choosing-between-scp03-and-scp11)
 - [SCP03 Usage](#scp03-usage)
 - [SCP11 Usage](#scp11-usage)
 - [CLA encoding and logical channels](#cla-encoding-and-logical-channels)
@@ -271,6 +280,20 @@ A few points worth knowing for this profile specifically:
 
 - **CRD is advisory.** The [`cardrecognition`](./cardrecognition) package will tell you what the card claims about itself before any authentication; this is useful for diagnostics but is not a substitute for cert-chain validation. A card that lies about its CRD is the card's bug, not a CLI bug, and the CRD is not a trust signal.
 
+## Choosing between SCP03 and SCP11
+
+SCP03 uses three pre-shared AES keys (ENC, MAC, DEK) that the host and the card both hold. Reach for it when those keys already exist on both sides: factory initialization with default keys, post-key-ceremony provisioning, local administration where the key custodian and the card are co-located. SCP03 is also supported on a broader range of cards than SCP11, so it's the path of least resistance against legacy hardware.
+
+SCP11 uses ECDH key agreement and X.509 certificates. Reach for it when you don't want to distribute symmetric keys (or can't), when you need the card's identity to be cryptographically pinnable, or when the protocol state runs on a server distinct from the host with physical card access. The CardRelay deployment pattern in [`docs/remote-apdu-transport.md`](docs/remote-apdu-transport.md) only works with SCP11.
+
+Within SCP11, three variants:
+
+- **SCP11a** — mutual authentication; both card and off-card entity present certificates. Required for OCE-gated writes (key rotation, full reset).
+- **SCP11b** — card-to-host authentication only. Read paths and PIN-gated operations work; OCE-gated writes are refused at the host-side gate. Useful when the host's identity is established by other means (a verified PIN, a vetted operator workstation, etc.).
+- **SCP11c** — like SCP11a, with support for pre-computed scripts that can be replayed against a group of cards. Niche; reach for it only if you specifically need the offline scripting variant.
+
+Both protocols return the same `scp.Session` interface, so once the handshake completes, the rest of your code doesn't care which one ran.
+
 ## SCP03 Usage
 
 ```go
@@ -477,9 +500,11 @@ Apache 2.0
 
 ## Related implementations
 
-- [Yubico/Yubico.NET.SDK](https://github.com/Yubico/Yubico.NET.SDK) (Apache 2.0) — Reference .NET SDK with `SecurityDomainSession`. Source of cross-implementation test vectors.
-- [Yubico/yubikey-manager](https://github.com/Yubico/yubikey-manager) (BSD 2-clause) — Python `yubikit.securitydomain` and SCP core. Source of OCE certificate test fixtures.
-- [Samsung/OpenSCP-Java](https://github.com/Samsung/OpenSCP-Java) (Apache 2.0) — Full SCP03 + SCP11 in Java. Source of SCP11 reference test vectors and full SCP03 AES × S8/S16 transcripts.
-- [skythen/scp03](https://github.com/skythen/scp03) — Pure Go SCP03. Similar `Transmitter` interface pattern.
-- [GlobalPlatformPro](https://github.com/martinpaljak/GlobalPlatformPro) — Java library and CLI. SCP01 / 02 / 03 with broad GP card coverage.
-- [ThothTrust/SCP11B](https://github.com/ThothTrustCom/SCP11B) (BSD-3) — Card-side and host-side SCP11b in Java.
+This library is the Go-native option, optimized for verified-against-references discipline, a narrow public API, and pluggable transports. Pick one of these instead if it fits your situation better:
+
+- [Yubico/Yubico.NET.SDK](https://github.com/Yubico/Yubico.NET.SDK) (Apache 2.0) — vendor-supported .NET SDK with `SecurityDomainSession`. Pick this if you're already in the .NET ecosystem and want Yubico's own implementation. Source of cross-implementation test vectors used here.
+- [Yubico/yubikey-manager](https://github.com/Yubico/yubikey-manager) (BSD 2-clause) — Python `yubikit.securitydomain` and SCP core. Pick this for Python projects or if you want the same library that powers `ykman`. Source of OCE certificate test fixtures used here.
+- [Samsung/OpenSCP-Java](https://github.com/Samsung/OpenSCP-Java) (Apache 2.0) — full SCP03 and SCP11 in Java. Pick this for JVM projects, especially if you need the SCP11 variants Samsung covers and we list as expansion targets (Brainpool, P-384, AES-192/256 SCP11). Source of byte-exact SCP03 transcripts and SCP11 vectors used here.
+- [GlobalPlatformPro](https://github.com/martinpaljak/GlobalPlatformPro) — Java library and CLI covering SCP01, SCP02, and SCP03 with broad real-card coverage. Pick this if you need legacy SCP01/SCP02 support, mature Java tooling for applet loading, or the widest range of GP card vendors validated.
+- [skythen/scp03](https://github.com/skythen/scp03) — pure-Go SCP03 with a similar `Transmitter` interface pattern. Pick this if you only need SCP03, no SCP11, and no Security Domain management layer.
+- [ThothTrust/SCP11B](https://github.com/ThothTrustCom/SCP11B) (BSD-3) — Java implementation of both card-side and host-side SCP11b. Pick this if you need a card-side reference for testing or are implementing SCP11b in a JVM environment.
