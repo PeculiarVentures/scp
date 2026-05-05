@@ -55,7 +55,7 @@ type bootstrapOCEData struct {
 // runs in dry-run mode and prints what it would do without actually
 // transmitting any APDU that mutates card state.
 func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("bootstrap-oce", env)
+	fs := newSubcommandFlagSet("sd bootstrap-oce", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	oceCertPath := fs.String("oce-cert", "",
@@ -91,7 +91,7 @@ func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
 		return &usageError{msg: "--oce-kid, --oce-kvn, --replace-kvn must be in 0x00..0xFF"}
 	}
 
-	report := &Report{Subcommand: "bootstrap-oce", Reader: *reader}
+	report := &Report{Subcommand: "sd bootstrap-oce", Reader: *reader}
 	data := &bootstrapOCEData{}
 	report.Data = data
 

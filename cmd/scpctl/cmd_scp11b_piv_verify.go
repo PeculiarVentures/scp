@@ -31,7 +31,7 @@ type pivVerifyData struct {
 //
 // Reference: docs.yubico.com/yesdk on PIV-over-SCP setup.
 func cmdSCP11bPIVVerify(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("scp11b-piv-verify", env)
+	fs := newSubcommandFlagSet("test scp11b-piv-verify", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	trust := registerTrustFlags(fs)
@@ -50,7 +50,7 @@ func cmdSCP11bPIVVerify(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	report := &Report{Subcommand: "scp11b-piv-verify", Reader: *reader}
+	report := &Report{Subcommand: "test scp11b-piv-verify", Reader: *reader}
 	data := &pivVerifyData{}
 	report.Data = data
 

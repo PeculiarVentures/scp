@@ -95,7 +95,7 @@ func TestReport_EmitText(t *testing.T) {
 	out := buf.String()
 
 	for _, want := range []string{
-		"scpctl smoke probe",
+		"scpctl probe",
 		"reader: test-reader",
 		"select ISD",
 		"PASS",
@@ -192,7 +192,7 @@ func TestProbe_Smoke(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"scpctl smoke probe",
+		"scpctl probe",
 		"select ISD",
 		"PASS",
 		"GET DATA tag 0x66",

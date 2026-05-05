@@ -74,7 +74,7 @@ type bootstrapSCP11aSDData struct {
 // the write APDU. Without it the command runs in dry-run mode,
 // validating inputs and reporting planned operations.
 func cmdBootstrapSCP11aSD(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("bootstrap-scp11a-sd", env)
+	fs := newSubcommandFlagSet("sd bootstrap-scp11a-sd", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	mode := fs.String("mode", "oncard",
@@ -119,7 +119,7 @@ func cmdBootstrapSCP11aSD(ctx context.Context, env *runEnv, args []string) error
 		return &usageError{msg: "--sd-kid, --sd-kvn, --replace-kvn must be in 0x00..0xFF"}
 	}
 
-	report := &Report{Subcommand: "bootstrap-scp11a-sd", Reader: *reader}
+	report := &Report{Subcommand: "sd bootstrap-scp11a-sd", Reader: *reader}
 	data := &bootstrapSCP11aSDData{Mode: *mode}
 	report.Data = data
 

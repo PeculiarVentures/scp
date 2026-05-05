@@ -45,7 +45,7 @@ type scp11aSDReadData struct {
 // will reject the chain (SW 6982 or 6985 typically) and the open
 // will fail with a clear error.
 func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("scp11a-sd-read", env)
+	fs := newSubcommandFlagSet("test scp11a-sd-read", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	oceKeyPath := fs.String("oce-key", "",
@@ -82,7 +82,7 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 		return &usageError{msg: "--sd-kid and --sd-kvn must be in 0x00..0xFF"}
 	}
 
-	report := &Report{Subcommand: "scp11a-sd-read", Reader: *reader}
+	report := &Report{Subcommand: "test scp11a-sd-read", Reader: *reader}
 	data := &scp11aSDReadData{}
 	report.Data = data
 
@@ -118,7 +118,7 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 	// accept.
 	if *apduTrace != "" {
 		rec := trace.NewRecorder(t, trace.RecorderConfig{
-			Profile: "scpctl smoke scp11a-sd-read",
+			Profile: "scpctl test scp11a-sd-read",
 			Reader:  *reader,
 			Notes: "Captured for diagnosis of SCP11a PSO SW=6A80. Trace " +
 				"includes the failing PSO APDU when the chain is rejected " +

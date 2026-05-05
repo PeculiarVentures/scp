@@ -289,8 +289,8 @@ func TestConfirmWrite_RequiredOnDestructive(t *testing.T) {
 // --confirm-reset-piv) does NOT trigger the destructive path;
 // instead, the run is treated as dry-run with a deprecation SKIP
 // in the output. This mirrors the same protection added to
-// 'scpctl smoke piv-reset' in PR #87 and the gate semantics from
-// 'scpctl sd reset' in PR #86.
+// 'scpctl piv reset' (which has the same semantics) and the
+// equivalent gate from 'scpctl sd reset'.
 //
 // Silently treating the old flag as the new one would defeat the
 // rename — stale scripts could reset cards their authors didn't

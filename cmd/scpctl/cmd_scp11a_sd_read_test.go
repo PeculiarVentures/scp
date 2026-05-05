@@ -433,8 +433,8 @@ func TestSCP11aSDRead_APDUTrace(t *testing.T) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatalf("trace JSON does not parse: %v\n--- raw ---\n%s", err, string(raw))
 	}
-	if f.Profile != "scpctl smoke scp11a-sd-read" {
-		t.Errorf("trace.Profile = %q; want %q", f.Profile, "scpctl smoke scp11a-sd-read")
+	if f.Profile != "scpctl test scp11a-sd-read" {
+		t.Errorf("trace.Profile = %q; want %q", f.Profile, "scpctl test scp11a-sd-read")
 	}
 	if f.Reader != "fake" {
 		t.Errorf("trace.Reader = %q; want %q", f.Reader, "fake")

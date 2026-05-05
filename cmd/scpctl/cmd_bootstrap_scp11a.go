@@ -66,7 +66,7 @@ type bootstrapSCP11aData struct {
 // it the command runs in dry-run mode, validating inputs and
 // reporting planned operations without transmitting writes.
 func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("bootstrap-scp11a", env)
+	fs := newSubcommandFlagSet("sd bootstrap-scp11a", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 
@@ -143,7 +143,7 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 		}
 	}
 
-	report := &Report{Subcommand: "bootstrap-scp11a", Reader: *reader}
+	report := &Report{Subcommand: "sd bootstrap-scp11a", Reader: *reader}
 	data := &bootstrapSCP11aData{SDKeyMode: *sdKeyMode}
 	report.Data = data
 

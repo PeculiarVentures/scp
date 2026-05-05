@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// cmdTest runs probe + the SCP smoke commands in sequence and emits
+// cmdTest runs probe + the SCP test commands in sequence and emits
 // a final PASS/FAIL/SKIP summary. Each subcommand writes its own
 // detailed output to env.out as it runs; the summary at the end
 // rolls those outcomes into a single line per check.
@@ -23,7 +23,7 @@ import (
 // any consumer doing that lookup is better served by the
 // individual commands.
 func cmdTest(ctx context.Context, env *runEnv, args []string) error {
-	fs := newSubcommandFlagSet("test", env)
+	fs := newSubcommandFlagSet("test all", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	trustRoots := fs.String("trust-roots", "",
 		"Path to PEM bundle of trusted SCP11 card-cert root CAs. Forwarded to "+
