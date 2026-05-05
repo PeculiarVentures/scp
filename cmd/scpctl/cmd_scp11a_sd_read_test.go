@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/transport/trace"
 )
 
 // TestSCP11aSDRead_Smoke runs cmdSCP11aSDRead end-to-end against the
@@ -345,4 +347,117 @@ func writeOCEFixturePEMs(t *testing.T) (keyPath, certPath string) {
 		t.Fatal(err)
 	}
 	return keyPath, certPath
+}
+
+// TestSCP11aSDRead_APDUTrace exercises the --apdu-trace flag on
+// scp11a-sd-read. Same shape as the bootstrap-scp11a trace test
+// (TestBootstrapSCP11a_APDUTrace) — runs the smoke against the
+// SCP11a-mode mock with --apdu-trace, asserts a trace file was
+// written, parses it as trace.File JSON, and confirms it contains
+// the PSO (INS=0x2A) APDU we care about for the SW=6A80 diagnosis.
+//
+// Captures wire-level bytes including the failing PSO. On hardware
+// the recorded PSO APDU is the cert that the card rejected, in the
+// exact bytes the card saw. That's the input to manual byte-diff
+// against yubikit's trace or against the GP Amendment F §7.5 spec.
+func TestSCP11aSDRead_APDUTrace(t *testing.T) {
+	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(0xCA),
+		Subject:               pkix.Name{CommonName: "trace-test OCE CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, _ := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	caCert, _ := x509.ParseCertificate(caDER)
+
+	oceKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(0xFEED),
+		Subject:               pkix.Name{CommonName: "trace-test OCE"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyAgreement,
+		IsCA:                  false,
+		BasicConstraintsValid: true,
+	}
+	certDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &oceKey.PublicKey, caKey)
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "oce.key.pem")
+	certPath := filepath.Join(dir, "oce.cert.pem")
+	keyPKCS8, _ := x509.MarshalPKCS8PrivateKey(oceKey)
+	_ = os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyPKCS8}), 0o600)
+	_ = os.WriteFile(certPath, append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})...,
+	), 0o644)
+
+	mockCard, _ := mockcard.New()
+	mockCard.Variant = 1 // SCP11a
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mockCard.Transport(), nil
+		},
+	}
+
+	tracePath := filepath.Join(dir, "scp11a-sd-read.json")
+	if err := cmdSCP11aSDRead(context.Background(), env, []string{
+		"--reader", "fake",
+		"--oce-key", keyPath,
+		"--oce-cert", certPath,
+		"--lab-skip-scp11-trust",
+		"--sd-kid", "1",
+		"--sd-kvn", "255",
+		"--apdu-trace", tracePath,
+	}); err != nil {
+		t.Fatalf("cmdSCP11aSDRead: %v\n--- output ---\n%s", err, buf.String())
+	}
+
+	st, err := os.Stat(tracePath)
+	if err != nil {
+		t.Fatalf("trace file not created at %s: %v", tracePath, err)
+	}
+	if st.Size() == 0 {
+		t.Fatalf("trace file %s is empty", tracePath)
+	}
+
+	raw, _ := os.ReadFile(tracePath) //nolint:gosec
+	var f trace.File
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("trace JSON does not parse: %v\n--- raw ---\n%s", err, string(raw))
+	}
+	if f.Profile != "scpctl smoke scp11a-sd-read" {
+		t.Errorf("trace.Profile = %q; want %q", f.Profile, "scpctl smoke scp11a-sd-read")
+	}
+	if f.Reader != "fake" {
+		t.Errorf("trace.Reader = %q; want %q", f.Reader, "fake")
+	}
+	if len(f.Exchanges) == 0 {
+		t.Fatal("trace recorded zero exchanges")
+	}
+
+	// PSO is INS=0x2A. The trace MUST contain at least one — that's
+	// the whole point of the flag for this command.
+	var sawPSO bool
+	for _, ex := range f.Exchanges {
+		if len(ex.INS) == 1 && ex.INS[0] == 0x2A {
+			sawPSO = true
+			break
+		}
+	}
+	if !sawPSO {
+		t.Errorf("trace contained no PSO (INS=0x2A) exchange; "+
+			"%d exchanges recorded — diagnostic flag is broken", len(f.Exchanges))
+	}
+
+	if !strings.Contains(buf.String(), "APDU trace written to "+tracePath) {
+		t.Errorf("expected stderr line announcing trace path; output:\n%s", buf.String())
+	}
 }
