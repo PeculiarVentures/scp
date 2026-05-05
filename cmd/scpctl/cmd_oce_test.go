@@ -9,6 +9,7 @@ import (
 	"crypto/sha1" //nolint:gosec // RFC 5280 §4.2.1.2 method 1 known-answer
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -17,6 +18,28 @@ import (
 	"testing"
 	"time"
 )
+
+// yubicoOCEPolicyExtensionForTest returns the certificatePolicies
+// extension scpctl emits on OCE leaves. Test fixtures use it to
+// build chains that pass strict verification (matching what
+// scpctl oce gen produces). Hardware-backed by Samsung's
+// reference cert and Yubico's SD attestation intermediate; see
+// cmd_oce.go for the full backstory.
+func yubicoOCEPolicyExtensionForTest() pkix.Extension {
+	type policyInfo struct {
+		ID asn1.ObjectIdentifier
+	}
+	yubicoOID := asn1.ObjectIdentifier{1, 2, 840, 114283, 100, 0, 10, 2, 1, 0}
+	val, err := asn1.Marshal([]policyInfo{{ID: yubicoOID}})
+	if err != nil {
+		panic(err) // arguments are constants; cannot fail in practice
+	}
+	return pkix.Extension{
+		Id:       asn1.ObjectIdentifier{2, 5, 29, 32},
+		Critical: true,
+		Value:    val,
+	}
+}
 
 // helper: synthetic root + leaf where leaf is signed by root.
 // Returns parsed certs (Raw is set).
@@ -50,12 +73,15 @@ func mkOCEFixtureValid(t *testing.T) (*x509.Certificate, *x509.Certificate, *ecd
 		KeyUsage:       x509.KeyUsageKeyAgreement,
 		SubjectKeyId:   leafSKI,
 		AuthorityKeyId: rootSKI,
-		// Explicit BasicConstraints cA=FALSE — required by YubiKey 5.7+
-		// SCP11 firmware. The happy-path fixture should pass strict
-		// verification; cert profiles missing this extension belong in
-		// negative tests below.
-		IsCA:                  false,
-		BasicConstraintsValid: true,
+		// Yubico OCE certificatePolicies, marked critical. Required
+		// by retail YubiKey 5.7+ SCP11 firmware; the happy-path
+		// fixture exists to assert that a CLEAN chain passes strict
+		// verification, so it must include what the verifier
+		// considers required. Test cases that probe what happens
+		// WITHOUT the extension live in
+		// TestOCEVerify_LeafMissingCertificatePolicies_FailsLoudly
+		// below.
+		ExtraExtensions: []pkix.Extension{yubicoOCEPolicyExtensionForTest()},
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, root, &leafKey.PublicKey, rootKey)
 	if err != nil {
@@ -439,24 +465,30 @@ func TestOCEVerify_SKIExtensionMatchesComputed_ForGeneratedChain(t *testing.T) {
 	}
 }
 
-// TestOCEVerify_LeafMissingBasicConstraints_FailsLoudly is the
-// regression pin for the SCP11a PSO SW=6A80 root cause we tracked
-// down on retail YubiKey 5.7.4: leaf OCE certs without an explicit
-// BasicConstraints extension are rejected by the card's PSO
-// ['Verify Certificate'] verifier. RFC 5280 makes the extension
-// OPTIONAL on end-entity certs, so naive openssl chains and earlier
-// scpctl gen output don't include it; the YubiKey is stricter.
+// TestOCEVerify_LeafMissingCertificatePolicies_FailsLoudly is the
+// regression pin for the actual SCP11a PSO SW=6A80 root cause we
+// tracked down on retail YubiKey 5.7.4: leaf OCE certs without a
+// critical certificatePolicies extension carrying the Yubico-arc
+// OID 1.2.840.114283.100.0.10.2.1.0 are rejected by the card's
+// PSO ['Verify Certificate'] verifier.
+//
+// Earlier we hypothesized BasicConstraints was the missing
+// extension (PR #93); hardware testing falsified that — chains
+// with BasicConstraints cA=FALSE still got SW=6A80. Capturing
+// the failing PSO bytes via PR #94's --apdu-trace and decoding
+// Samsung's reference SCP11a OCE leaf (which is known to
+// authenticate against retail YubiKey 5.7.4) revealed that the
+// Samsung cert has no BasicConstraints at all but does have a
+// critical certificatePolicies extension with the Yubico-arc
+// OID. Yubico's own SD attestation intermediate also has it.
+// Adding it to scpctl-generated leaves was the fix.
 //
 // The verify command must FAIL (not SKIP) on a leaf without
-// BasicConstraints, with an error message that names the symptom
-// (PSO SW=6A80) and the fix (regenerate the chain), so an operator
-// running 'scpctl oce verify' before bootstrap-scp11a sees the
-// problem and the fix in one place.
-func TestOCEVerify_LeafMissingBasicConstraints_FailsLoudly(t *testing.T) {
-	// Build a chain with a leaf that has the legacy "minimal" profile:
-	// KeyUsage + SKI + AKI but NO BasicConstraints. This is what
-	// scpctl emitted before the fix in this commit, and what
-	// hand-rolled openssl 'minimal' profiles produce.
+// certificatePolicies, with an error message that names the
+// symptom (PSO SW=6A80) and the fix (regenerate the chain), so
+// an operator running 'scpctl oce verify' before
+// bootstrap-scp11a sees the problem and the fix in one place.
+func TestOCEVerify_LeafMissingCertificatePolicies_FailsLoudly(t *testing.T) {
 	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	rootSKI := computeSKI(&rootKey.PublicKey)
 	rootTmpl := &x509.Certificate{
@@ -482,8 +514,8 @@ func TestOCEVerify_LeafMissingBasicConstraints_FailsLoudly(t *testing.T) {
 		KeyUsage:       x509.KeyUsageKeyAgreement,
 		SubjectKeyId:   leafSKI,
 		AuthorityKeyId: rootSKI,
-		// Deliberately NO BasicConstraintsValid: this is the bug
-		// shape we're testing the verifier surfaces.
+		// Deliberately NO certificatePolicies — this is the
+		// bug shape we're testing the verifier surfaces.
 	}
 	leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, root, &leafKey.PublicKey, rootKey)
 	leaf, _ := x509.ParseCertificate(leafDER)
@@ -494,36 +526,38 @@ func TestOCEVerify_LeafMissingBasicConstraints_FailsLoudly(t *testing.T) {
 	env := &runEnv{out: &buf, errOut: &buf}
 	err := cmdOCEVerify(context.Background(), env, []string{"--chain", chainPath})
 	if err == nil {
-		t.Fatalf("verify on leaf-without-BasicConstraints should error\n--- output ---\n%s",
+		t.Fatalf("verify on leaf-without-certificatePolicies should error\n--- output ---\n%s",
 			buf.String())
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "leaf BasicConstraints") {
-		t.Errorf("expected a 'leaf BasicConstraints' line\n--- output ---\n%s", out)
+	if !strings.Contains(out, "leaf certificatePolicies") {
+		t.Errorf("expected a 'leaf certificatePolicies' line\n--- output ---\n%s", out)
 	}
 	if !strings.Contains(out, "FAIL") {
-		t.Errorf("expected FAIL on the BasicConstraints check\n--- output ---\n%s", out)
+		t.Errorf("expected FAIL on the certificatePolicies check\n--- output ---\n%s", out)
 	}
 	// Pin the diagnostic content so the operator-facing message
 	// can't quietly drift away from the actionable fix.
 	for _, want := range []string{
 		"6A80",                  // names the on-card symptom
 		"YubiKey 5.7+",          // names the affected firmware class
+		"1.2.840.114283.100.0.10.2.1.0", // names the required OID
 		"Regenerate the chain",  // names the fix
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("BasicConstraints diagnostic missing %q\n--- output ---\n%s", want, out)
+			t.Errorf("certificatePolicies diagnostic missing %q\n--- output ---\n%s", want, out)
 		}
 	}
 }
 
-// TestOCEGen_LeafHasBasicConstraintsCAFalse is the positive twin:
-// 'scpctl oce gen' must produce a chain whose leaf includes
-// BasicConstraints cA=FALSE. If a future refactor drops this
+// TestOCEGen_LeafHasYubicoCertificatePolicies is the positive
+// twin: 'scpctl oce gen' must produce a chain whose leaf includes
+// a critical certificatePolicies extension with the Yubico OCE
+// policy OID. If a future refactor drops or alters this
 // extension, hardware bootstrap → scp11a-sd-read silently
 // regresses to PSO SW=6A80; this test catches it in CI.
-func TestOCEGen_LeafHasBasicConstraintsCAFalse(t *testing.T) {
+func TestOCEGen_LeafHasYubicoCertificatePolicies(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 	env := &runEnv{out: &buf, errOut: &buf}
@@ -549,13 +583,60 @@ func TestOCEGen_LeafHasBasicConstraintsCAFalse(t *testing.T) {
 		t.Fatalf("parse leaf: %v", err)
 	}
 
-	if !leaf.BasicConstraintsValid {
-		t.Fatal("leaf must have BasicConstraints extension; YubiKey 5.7+ SCP11 " +
-			"firmware rejects PSO ['Verify Certificate'] with SW=6A80 on chains " +
-			"that omit it. Do not remove this without re-validating against retail " +
-			"hardware.")
+	// Find the certificatePolicies extension (OID 2.5.29.32).
+	var cpExt *pkix.Extension
+	for i, ext := range leaf.Extensions {
+		if ext.Id.Equal(asn1.ObjectIdentifier{2, 5, 29, 32}) {
+			cpExt = &leaf.Extensions[i]
+			break
+		}
 	}
-	if leaf.IsCA {
-		t.Error("leaf BasicConstraints cA must be FALSE")
+	if cpExt == nil {
+		t.Fatal("leaf must have a certificatePolicies extension; retail YubiKey " +
+			"5.7+ SCP11 firmware rejects PSO ['Verify Certificate'] with SW=6A80 " +
+			"on OCE leaf certs that omit it. Do not remove this without " +
+			"re-validating against retail hardware.")
+	}
+	if !cpExt.Critical {
+		t.Error("certificatePolicies must be critical=TRUE; Samsung's reference " +
+			"OCE cert and Yubico's SD attestation intermediate both mark it " +
+			"critical")
+	}
+
+	// Walk the policies for the Yubico-arc OID.
+	yubicoOID := asn1.ObjectIdentifier{1, 2, 840, 114283, 100, 0, 10, 2, 1, 0}
+	type policyInfo struct {
+		ID         asn1.ObjectIdentifier
+		Qualifiers asn1.RawValue `asn1:"optional"`
+	}
+	var policies []policyInfo
+	if _, err := asn1.Unmarshal(cpExt.Value, &policies); err != nil {
+		t.Fatalf("parse certificatePolicies: %v", err)
+	}
+	var hasYubico bool
+	for _, p := range policies {
+		if p.ID.Equal(yubicoOID) {
+			hasYubico = true
+			break
+		}
+	}
+	if !hasYubico {
+		t.Errorf("certificatePolicies must include the Yubico OCE policy OID %s; "+
+			"got %d policies, none matching", yubicoOID.String(), len(policies))
+	}
+
+	// Bytewise sanity: the extension Value must match Samsung's
+	// reference cert byte-for-byte (3010 300e 060c 2a8648 86fc6b
+	// 64000a 020100). If a future Go x509 refactor changes the
+	// encoding, this test catches it before hardware does.
+	wantValue := []byte{
+		0x30, 0x10,
+		0x30, 0x0e,
+		0x06, 0x0c,
+		0x2a, 0x86, 0x48, 0x86, 0xfc, 0x6b, 0x64, 0x00, 0x0a, 0x02, 0x01, 0x00,
+	}
+	if !bytesEqual(cpExt.Value, wantValue) {
+		t.Errorf("certificatePolicies bytes drifted from Samsung's reference cert\n"+
+			"  want: %X\n  got:  %X", wantValue, cpExt.Value)
 	}
 }
