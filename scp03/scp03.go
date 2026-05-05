@@ -52,12 +52,18 @@
 //	defer sess.Close()
 //
 //	resp, _ := sess.Transmit(ctx, myCommand) // Encrypted + MACed
+//
+// # Errors
+//
+// Open and Transmit wrap a small set of sentinel errors so callers
+// can use errors.Is to discriminate categories without pattern-
+// matching on message text. See ErrAuthFailed, ErrInvalidConfig,
+// and ErrInvalidResponse.
 package scp03
 
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -242,13 +248,13 @@ type Session struct {
 // explicitly. The act of typing that name is the consent.
 func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, error) {
 	if t == nil {
-		return nil, errors.New("scp03: transport is required")
+		return nil, fmt.Errorf("%w: transport is required", ErrInvalidConfig)
 	}
 	if cfg == nil {
-		return nil, errors.New("scp03: Config is required (cfg.Keys cannot be nil)")
+		return nil, fmt.Errorf("%w: Config is required (cfg.Keys cannot be nil)", ErrInvalidConfig)
 	}
 	if len(cfg.Keys.ENC) == 0 || len(cfg.Keys.MAC) == 0 || len(cfg.Keys.DEK) == 0 {
-		return nil, errors.New("scp03: Config.Keys must be set; for factory-fresh cards explicitly use scp03.DefaultKeys (test keys, no security)")
+		return nil, fmt.Errorf("%w: Config.Keys must be set; for factory-fresh cards explicitly use scp03.DefaultKeys (test keys, no security)", ErrInvalidConfig)
 	}
 
 	// All three SCP03 static keys must be the same AES size (16, 24,
@@ -259,10 +265,10 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	// error rather than an opaque card-side rejection later.
 	encLen, macLen, dekLen := len(cfg.Keys.ENC), len(cfg.Keys.MAC), len(cfg.Keys.DEK)
 	if encLen != 16 && encLen != 24 && encLen != 32 {
-		return nil, fmt.Errorf("scp03: Keys.ENC length %d invalid (must be 16, 24, or 32 for AES-128/192/256)", encLen)
+		return nil, fmt.Errorf("%w: Keys.ENC length %d invalid (must be 16, 24, or 32 for AES-128/192/256)", ErrInvalidConfig, encLen)
 	}
 	if macLen != encLen || dekLen != encLen {
-		return nil, fmt.Errorf("scp03: Keys.ENC, Keys.MAC, Keys.DEK must all be the same length (got %d/%d/%d)", encLen, macLen, dekLen)
+		return nil, fmt.Errorf("%w: Keys.ENC, Keys.MAC, Keys.DEK must all be the same length (got %d/%d/%d)", ErrInvalidConfig, encLen, macLen, dekLen)
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull
@@ -281,10 +287,10 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		hasRENC := cfg.SecurityLevel&channel.LevelRENC != 0
 		hasRMAC := cfg.SecurityLevel&channel.LevelRMAC != 0
 		if hasCDEC && !hasCMAC {
-			return nil, errors.New("scp03: SecurityLevel includes C-DEC without C-MAC; encryption without authentication is unsafe (set InsecureAllowPartialSecurityLevel for spec conformance testing only)")
+			return nil, fmt.Errorf("%w: SecurityLevel includes C-DEC without C-MAC; encryption without authentication is unsafe (set InsecureAllowPartialSecurityLevel for spec conformance testing only)", ErrInvalidConfig)
 		}
 		if hasRENC && !hasRMAC {
-			return nil, errors.New("scp03: SecurityLevel includes R-ENC without R-MAC; encryption without authentication is unsafe (set InsecureAllowPartialSecurityLevel for spec conformance testing only)")
+			return nil, fmt.Errorf("%w: SecurityLevel includes R-ENC without R-MAC; encryption without authentication is unsafe (set InsecureAllowPartialSecurityLevel for spec conformance testing only)", ErrInvalidConfig)
 		}
 	}
 
@@ -314,7 +320,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		}
 	}
 	if len(hostChallenge) != 8 && len(hostChallenge) != 16 {
-		return nil, errors.New("host challenge must be 8 bytes (S8) or 16 bytes (S16)")
+		return nil, fmt.Errorf("%w: host challenge must be 8 bytes (S8) or 16 bytes (S16)", ErrInvalidConfig)
 	}
 
 	// Step 3: Send INITIALIZE UPDATE.
@@ -392,7 +398,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, fmt.Errorf("calculate card cryptogram: %w", err)
 	}
 	if !constantTimeEqual(expectedCC, iur.cardCryptogram) {
-		return nil, errors.New("card cryptogram mismatch: possible MITM or wrong keys")
+		return nil, fmt.Errorf("%w: card cryptogram mismatch: possible MITM or wrong keys", ErrAuthFailed)
 	}
 
 	// Step 7: Calculate host cryptogram (also derived with S-MAC).
@@ -630,7 +636,7 @@ type initUpdateResponse struct {
 // GP Amendment D §7.1.1: response is 28+ bytes.
 func parseInitUpdateResponse(data []byte) (*initUpdateResponse, error) {
 	if len(data) < 29 {
-		return nil, fmt.Errorf("INITIALIZE UPDATE response too short: %d bytes (need 29+)", len(data))
+		return nil, fmt.Errorf("%w: INITIALIZE UPDATE response too short: %d bytes (need 29+)", ErrInvalidResponse, len(data))
 	}
 
 	r := &initUpdateResponse{
@@ -642,13 +648,13 @@ func parseInitUpdateResponse(data []byte) (*initUpdateResponse, error) {
 
 	// Verify SCP identifier.
 	if r.scpID != 0x03 {
-		return nil, fmt.Errorf("unexpected SCP identifier: 0x%02X (expected 0x03)", r.scpID)
+		return nil, fmt.Errorf("%w: unexpected SCP identifier: 0x%02X (expected 0x03)", ErrInvalidResponse, r.scpID)
 	}
 
 	if r.iParam&0x01 != 0 {
 		// S16 mode uses 16-byte host/card challenges and 16-byte cryptograms.
 		if len(data) < 45 {
-			return nil, fmt.Errorf("INITIALIZE UPDATE S16 response too short: %d bytes (need 45+)", len(data))
+			return nil, fmt.Errorf("%w: INITIALIZE UPDATE S16 response too short: %d bytes (need 45+)", ErrInvalidResponse, len(data))
 		}
 		r.cardChallenge = data[13:29]
 		r.cardCryptogram = data[29:45]

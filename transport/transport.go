@@ -78,7 +78,7 @@ const (
 
 // Transport is the low-level card communication interface. Implementations
 // send raw APDU bytes to the card and return raw response bytes.
-// The SCP11 session layer wraps this to add encryption and MAC.
+// The SCP session layer (SCP03 or SCP11) wraps this to add encryption and MAC.
 type Transport interface {
 	// Transmit sends a command APDU and returns the response.
 	// Implementations handle the physical layer: PC/SC SCardTransmit,

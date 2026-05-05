@@ -24,6 +24,13 @@
 //
 // The session layer orchestrates the complete SCP11 handshake
 // the Session wraps a Transport and exposes a secure Transmit method.
+//
+// # Errors
+//
+// Open and Transmit wrap a small set of sentinel errors so callers
+// can use errors.Is to discriminate categories without pattern-
+// matching on message text. See ErrAuthFailed, ErrInvalidConfig,
+// ErrInvalidResponse, and ErrTrustValidation.
 package scp11
 
 import (
@@ -407,10 +414,10 @@ type Session struct {
 // and session key derivation.
 func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, error) {
 	if t == nil {
-		return nil, errors.New("scp11: transport is required")
+		return nil, fmt.Errorf("%w: transport is required", ErrInvalidConfig)
 	}
 	if cfg == nil {
-		return nil, errors.New("scp11: Config is required (use YubiKeyDefaultSCP11bConfig() or StrictGPSCP11bConfig() as a starting point)")
+		return nil, fmt.Errorf("%w: Config is required (use YubiKeyDefaultSCP11bConfig() or StrictGPSCP11bConfig() as a starting point)", ErrInvalidConfig)
 	}
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull
@@ -425,7 +432,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	case SCP11a, SCP11b, SCP11c:
 		// ok
 	default:
-		return nil, fmt.Errorf("unsupported SCP11 variant: %d (valid: SCP11a=0, SCP11b=1, SCP11c=2)", cfg.Variant)
+		return nil, fmt.Errorf("%w: unsupported SCP11 variant: %d (valid: SCP11a=0, SCP11b=1, SCP11c=2)", ErrInvalidConfig, cfg.Variant)
 	}
 
 	// Validate that the configured SecurityLevel is consistent with the
@@ -433,8 +440,8 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	// AUTHENTICATE. The card enforces the negotiated level, so a mismatch
 	// causes the host wrapper to diverge from what the card expects.
 	if cfg.SecurityLevel != channel.LevelFull {
-		return nil, errors.New("SCP11 currently only supports full security level (C-MAC|C-DEC|R-MAC|R-ENC); " +
-			"the key usage qualifier 0x3C negotiated with the card requires it")
+		return nil, fmt.Errorf("%w: SCP11 currently only supports full security level (C-MAC|C-DEC|R-MAC|R-ENC); "+
+			"the key usage qualifier 0x3C negotiated with the card requires it", ErrInvalidConfig)
 	}
 
 	// HostID and CardGroupID are partially implemented: the KDF
@@ -443,7 +450,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	// set would silently derive different keys than the card. Fail
 	// closed until the wire side is implemented.
 	if len(cfg.HostID) > 0 || len(cfg.CardGroupID) > 0 {
-		return nil, errors.New("SCP11 HostID/CardGroupID identifiers are not fully implemented (KDF inclusion is wired but the AUTHENTICATE parameter bit and tag 0x84 are not); leave both nil")
+		return nil, fmt.Errorf("%w: SCP11 HostID/CardGroupID identifiers are not fully implemented (KDF inclusion is wired but the AUTHENTICATE parameter bit and tag 0x84 are not); leave both nil", ErrInvalidConfig)
 	}
 
 	// Trust-posture guard. Caller must declare one of:
@@ -458,10 +465,11 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	if cfg.CardTrustAnchors == nil &&
 		cfg.CardTrustPolicy == nil &&
 		!cfg.InsecureSkipCardAuthentication {
-		return nil, errors.New(
-			"SCP11 requires an explicit trust posture: set CardTrustPolicy " +
-				"or CardTrustAnchors for production, or InsecureSkipCardAuthentication " +
+		return nil, fmt.Errorf(
+			"%w: SCP11 requires an explicit trust posture: set CardTrustPolicy "+
+				"or CardTrustAnchors for production, or InsecureSkipCardAuthentication "+
 				"for lab use",
+			ErrInvalidConfig,
 		)
 	}
 
@@ -496,10 +504,10 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	// MUTUAL AUTHENTICATE.
 	if cfg.Variant == SCP11a || cfg.Variant == SCP11c {
 		if cfg.OCEPrivateKey == nil {
-			return nil, errors.New("OCE private key required for SCP11a/c (mutual-auth variants)")
+			return nil, fmt.Errorf("%w: OCE private key required for SCP11a/c (mutual-auth variants)", ErrInvalidConfig)
 		}
 		if len(cfg.OCECertificates) == 0 {
-			return nil, errors.New("OCE certificate chain required for SCP11a/c (mutual-auth variants); set Config.OCECertificates to a non-empty slice in leaf-last order")
+			return nil, fmt.Errorf("%w: OCE certificate chain required for SCP11a/c (mutual-auth variants); set Config.OCECertificates to a non-empty slice in leaf-last order", ErrInvalidConfig)
 		}
 		// OCEKeyReference is sent on the wire as P1=KVN, P2=KID|chain-bit
 		// in every PSO certificate-upload APDU (GP §7.5.2). The zero
@@ -507,7 +515,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		// silently sending PSO with P1=0 P2=0 produces opaque card
 		// rejections during provisioning. Reject up front instead.
 		if cfg.OCEKeyReference == (KeyRef{}) {
-			return nil, errors.New("OCEKeyReference required for SCP11a/c (mutual-auth variants); set Config.OCEKeyReference.KID and KVN to the card's OCE key slot (KID 0x10 is the YubiKey default)")
+			return nil, fmt.Errorf("%w: OCEKeyReference required for SCP11a/c (mutual-auth variants); set Config.OCEKeyReference.KID and KVN to the card's OCE key slot (KID 0x10 is the YubiKey default)", ErrInvalidConfig)
 		}
 		// Defense-in-depth: ensure the configured private key actually
 		// corresponds to the LEAF certificate (last entry) — that's the
@@ -787,7 +795,7 @@ func (s *Session) getCardCertificate(ctx context.Context) error {
 // responder, which is not authentication.
 func (s *Session) legacyExtractAndStoreKey(data []byte) error {
 	if s.config.CardTrustAnchors == nil && !s.config.InsecureSkipCardAuthentication {
-		return errors.New("SCP11 card certificate validation is required; configure CardTrustPolicy/CardTrustAnchors or set InsecureSkipCardAuthentication for tests")
+		return fmt.Errorf("%w: SCP11 card certificate validation is required; configure CardTrustPolicy/CardTrustAnchors or set InsecureSkipCardAuthentication for tests", ErrInvalidConfig)
 	}
 	pubKey, err := extractCardPublicKey(data, s.config.CardTrustAnchors)
 	if err != nil {
@@ -817,7 +825,7 @@ func (s *Session) validateCardCertChain(data []byte) error {
 			return fmt.Errorf("custom card validator: %w", err)
 		}
 		if result == nil || result.PublicKey == nil {
-			return errors.New("custom card validator returned nil PublicKey")
+			return fmt.Errorf("%w: custom card validator returned nil PublicKey", ErrTrustValidation)
 		}
 		// CustomValidator owns the trust decision in full, but two
 		// invariants are non-negotiable for SCP11 to function at all:
@@ -826,7 +834,7 @@ func (s *Session) validateCardCertChain(data []byte) error {
 		// returns so a buggy or overly-permissive custom path can't
 		// hand back a key the rest of the protocol can't use.
 		if result.PublicKey.Curve == nil || result.PublicKey.Curve.Params().Name != "P-256" {
-			return fmt.Errorf("custom card validator returned non-P-256 key (curve %v); SCP11 requires P-256", result.PublicKey.Curve)
+			return fmt.Errorf("%w: custom card validator returned non-P-256 key (curve %v); SCP11 requires P-256", ErrTrustValidation, result.PublicKey.Curve)
 		}
 		ecdhKey, err := result.PublicKey.ECDH()
 		if err != nil {
@@ -842,7 +850,7 @@ func (s *Session) validateCardCertChain(data []byte) error {
 		return fmt.Errorf("parse card certificates: %w", err)
 	}
 	if len(certs) == 0 {
-		return errors.New("no certificates in card response")
+		return fmt.Errorf("%w: no certificates in card response", ErrTrustValidation)
 	}
 
 	// Trust validation with try-each fallback.
@@ -878,7 +886,7 @@ func (s *Session) validateCardCertChain(data []byte) error {
 		}
 	}
 	if firstErr != nil {
-		return fmt.Errorf("card certificate chain validation: %w", firstErr)
+		return fmt.Errorf("%w: card certificate chain validation: %w", ErrTrustValidation, firstErr)
 	}
 
 	// Convert the validated ECDSA key to ECDH for key agreement.
@@ -939,7 +947,7 @@ func (s *Session) validateCardCertChain(data []byte) error {
 // transmission.
 func (s *Session) sendOCECertificate(ctx context.Context) error {
 	if len(s.config.OCECertificates) == 0 {
-		return errors.New("OCE certificate chain required for SCP11a/c (mutual-auth variants)")
+		return fmt.Errorf("%w: OCE certificate chain required for SCP11a/c (mutual-auth variants)", ErrInvalidConfig)
 	}
 
 	// Filter out any self-signed certs at the start of the chain.
@@ -948,10 +956,9 @@ func (s *Session) sendOCECertificate(ctx context.Context) error {
 	// reference. See doc comment above for the SW=6A80 backstory.
 	chain := stripLeadingTrustAnchors(s.config.OCECertificates)
 	if len(chain) == 0 {
-		return errors.New(
-			"OCE certificate chain consists entirely of self-signed certs; " +
-				"PSO uploads the path BELOW the trust anchor, so the chain " +
-				"must contain at least one non-self-signed cert (the leaf)")
+		return fmt.Errorf("%w: OCE certificate chain consists entirely of self-signed certs; "+
+			"PSO uploads the path BELOW the trust anchor, so the chain "+
+			"must contain at least one non-self-signed cert (the leaf)", ErrInvalidConfig)
 	}
 	lastIdx := len(chain) - 1
 
@@ -1039,7 +1046,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 		// after the host has already sent it on the wire.
 		// Better to fail before APDU construction.
 		if s.config.InsecureTestOnlyEphemeralKey.Curve() != ecdh.P256() {
-			return errors.New("InsecureTestOnlyEphemeralKey must be a P-256 ECDH private key (this implementation supports P-256 only)")
+			return fmt.Errorf("%w: InsecureTestOnlyEphemeralKey must be a P-256 ECDH private key (this implementation supports P-256 only)", ErrInvalidConfig)
 		}
 		ephKey = s.config.InsecureTestOnlyEphemeralKey
 	} else {
@@ -1142,7 +1149,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	// TR-03111 §4.3.1: verify the shared secret is not the point at infinity
 	// (which manifests as an all-zero byte string after coordinate extraction).
 	if isZeroSecret(shSee) {
-		return errors.New("ECDH (ephemeral-ephemeral): shared secret is zero (invalid point)")
+		return fmt.Errorf("%w: ECDH (ephemeral-ephemeral): shared secret is zero (invalid point)", ErrInvalidResponse)
 	}
 
 	// ShSes = ECDH(SK.OCE or eSK.OCE, PK.SD)
@@ -1152,7 +1159,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	var shSesKey *ecdh.PrivateKey
 	if s.config.Variant == SCP11a || s.config.Variant == SCP11c {
 		if s.config.OCEPrivateKey == nil {
-			return errors.New("OCE private key required for SCP11a/c")
+			return fmt.Errorf("%w: OCE private key required for SCP11a/c", ErrInvalidConfig)
 		}
 		// Convert the OCE static ECDSA key to ECDH.
 		oceStaticECDH, err := s.config.OCEPrivateKey.ECDH()
@@ -1169,7 +1176,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 		return fmt.Errorf("ECDH (static/ephemeral-static): %w", err)
 	}
 	if isZeroSecret(shSes) {
-		return errors.New("ECDH (static/ephemeral-static): shared secret is zero (invalid point)")
+		return fmt.Errorf("%w: ECDH (static/ephemeral-static): shared secret is zero (invalid point)", ErrInvalidResponse)
 	}
 
 	// Derive session keys.
@@ -1206,10 +1213,10 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	if receipt == nil {
 		switch s.config.Variant {
 		case SCP11a, SCP11c:
-			return errors.New("expected receipt for SCP11a/c but none received (mutual auth requires it)")
+			return fmt.Errorf("%w: expected receipt for SCP11a/c but none received (mutual auth requires it)", ErrAuthFailed)
 		case SCP11b:
 			if !s.config.InsecureAllowSCP11bWithoutReceipt {
-				return errors.New("expected receipt for SCP11b but none received; modern cards (Amendment F v1.4, YubiKey 5.7.2+) include one. Set Config.InsecureAllowSCP11bWithoutReceipt=true only for legacy SCP11b cards that omit it")
+				return fmt.Errorf("%w: expected receipt for SCP11b but none received; modern cards (Amendment F v1.4, YubiKey 5.7.2+) include one. Set Config.InsecureAllowSCP11bWithoutReceipt=true only for legacy SCP11b cards that omit it", ErrAuthFailed)
 			}
 		}
 	}
@@ -1222,7 +1229,7 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 		keyAgreementData = append(keyAgreementData, cardEphPubTLV.Encode()...)
 		err = kdf.VerifyReceipt(keys.Receipt, keyAgreementData, receipt)
 		if err != nil {
-			return fmt.Errorf("receipt verification: %w", err)
+			return fmt.Errorf("%w: receipt verification: %w", ErrAuthFailed, err)
 		}
 	}
 
