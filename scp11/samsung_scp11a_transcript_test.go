@@ -143,7 +143,15 @@ func TestSCP11a_SamsungTranscript_ByteExact(t *testing.T) {
 		{name: "GET_DATA", matchINS: 0xCA, response: getDataChunk0},
 		{name: "GET_RESPONSE_1", matchINS: 0xC0, response: getDataChunk1},
 		{name: "GET_RESPONSE_2", matchINS: 0xC0, response: getDataChunk2},
-		{name: "PSO", matchINS: 0x2A, response: mustHex(t, "9000")},
+		// PSO with command chaining: a 533-byte cert split into
+		// 255+255+23. CLA=0x90 on the first two (chained), CLA=0x80
+		// on the final chunk. Each chunk gets a 9000 response. This
+		// is the wire shape required by retail YubiKey 5.7.4 and
+		// matches yubikit-python's SmartCardProtocol behavior; see
+		// sendOCECertificate doc comment for the SW=6A80 backstory.
+		{name: "PSO_chunk_1", matchCLA: 0x90, matchINS: 0x2A, response: mustHex(t, "9000")},
+		{name: "PSO_chunk_2", matchCLA: 0x90, matchINS: 0x2A, response: mustHex(t, "9000")},
+		{name: "PSO_chunk_final", matchCLA: 0x80, matchINS: 0x2A, response: mustHex(t, "9000")},
 		{name: "MUTUAL_AUTH", matchINS: 0x82, expectExact: mutualAuthExpectedCAPDU, response: mutualAuthRAPDU},
 		{name: "LIST_PACKAGES", matchCLA: 0x84, matchINS: 0xF2, expectExact: listPackagesExpectedCAPDU, response: listPackagesRAPDU},
 	})
