@@ -1,0 +1,482 @@
+package securitydomain
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+
+	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/tlv"
+)
+
+// StatusScope identifies which subset of the card registry GetStatus
+// queries. Maps to the P1 byte per GP §11.4.2.
+type StatusScope byte
+
+const (
+	// StatusScopeISD selects the Issuer Security Domain only.
+	StatusScopeISD StatusScope = 0x80
+
+	// StatusScopeApplications selects Applications and SSDs.
+	StatusScopeApplications StatusScope = 0x40
+
+	// StatusScopeLoadFiles selects Executable Load Files only.
+	StatusScopeLoadFiles StatusScope = 0x20
+
+	// StatusScopeLoadFilesAndModules selects Executable Load Files
+	// and their Executable Modules. The same load files appear as
+	// in StatusScopeLoadFiles, but each entry's Modules field is
+	// populated.
+	StatusScopeLoadFilesAndModules StatusScope = 0x10
+)
+
+// String returns a short identifier for the scope.
+func (s StatusScope) String() string {
+	switch s {
+	case StatusScopeISD:
+		return "ISD"
+	case StatusScopeApplications:
+		return "Applications"
+	case StatusScopeLoadFiles:
+		return "LoadFiles"
+	case StatusScopeLoadFilesAndModules:
+		return "LoadFilesAndModules"
+	default:
+		return fmt.Sprintf("StatusScope(0x%02X)", byte(s))
+	}
+}
+
+// RegistryEntry is one row of the card registry returned by GetStatus.
+// Which fields are populated depends on Scope.
+type RegistryEntry struct {
+	// AID is the entry's primary AID. Always populated.
+	AID []byte
+
+	// Scope is the StatusScope that produced this entry. Knowing it
+	// lets callers interpret Lifecycle (each scope has its own
+	// lifecycle state machine per GP §5.3).
+	Scope StatusScope
+
+	// Lifecycle is the raw GP lifecycle byte. Use LifecycleString
+	// for a human-readable interpretation.
+	Lifecycle byte
+
+	// Privileges is the decoded privilege set. Zero value when the
+	// entry is a Load File or Module, which carry no privileges.
+	Privileges Privileges
+
+	// Version is the load file version. Populated only for
+	// Load File scopes when the card returns tag 0xCE.
+	Version []byte
+
+	// AssociatedSDAID is the AID of the Security Domain associated
+	// with this entry. Populated when the card returns tag 0xCC.
+	AssociatedSDAID []byte
+
+	// Modules holds Executable Module AIDs. Populated only when
+	// Scope == StatusScopeLoadFilesAndModules.
+	Modules [][]byte
+}
+
+// LifecycleString returns a human-readable interpretation of the
+// lifecycle byte appropriate to this entry's Scope. Returns
+// "unknown(0xXX)" if no interpretation matches.
+func (e RegistryEntry) LifecycleString() string {
+	switch e.Scope {
+	case StatusScopeISD:
+		switch e.Lifecycle {
+		case 0x01:
+			return "OP_READY"
+		case 0x07:
+			return "INITIALIZED"
+		case 0x0F:
+			return "SECURED"
+		case 0x7F:
+			return "CARD_LOCKED"
+		case 0xFF:
+			return "TERMINATED"
+		}
+	case StatusScopeApplications:
+		// Applications: 0x03 INSTALLED, 0x07 SELECTABLE, 0x0F PERSONALIZED.
+		// Higher bits (0x80) indicate LOCKED. SSDs reuse the ISD
+		// states. We test the bits rather than equality so that
+		// LOCKED variants get a clear render.
+		if e.Lifecycle&0x80 != 0 {
+			return "LOCKED"
+		}
+		switch e.Lifecycle {
+		case 0x03:
+			return "INSTALLED"
+		case 0x07:
+			return "SELECTABLE"
+		case 0x0F:
+			return "PERSONALIZED"
+		}
+	case StatusScopeLoadFiles, StatusScopeLoadFilesAndModules:
+		// Executable Load Files: 0x01 LOADED is the only legal
+		// runtime state per GP §5.3.3. Anything else is unusual
+		// enough that the raw byte is more useful than a guess.
+		if e.Lifecycle == 0x01 {
+			return "LOADED"
+		}
+	}
+	return fmt.Sprintf("unknown(0x%02X)", e.Lifecycle)
+}
+
+// Privileges represents the GP Table 6-1 privilege bits assigned to
+// an Application or Security Domain.
+type Privileges struct {
+	// Byte 1
+	SecurityDomain          bool // bit 8
+	DAPVerification         bool // bit 7
+	DelegatedManagement     bool // bit 6
+	CardLock                bool // bit 5
+	CardTerminate           bool // bit 4
+	CardReset               bool // bit 3
+	CVMManagement           bool // bit 2
+	MandatedDAPVerification bool // bit 1
+
+	// Byte 2
+	TrustedPath          bool // bit 8
+	AuthorizedManagement bool // bit 7
+	TokenVerification    bool // bit 6
+	GlobalDelete         bool // bit 5
+	GlobalLock           bool // bit 4
+	GlobalRegistry       bool // bit 3
+	FinalApplication     bool // bit 2
+	GlobalService        bool // bit 1
+
+	// Byte 3
+	ReceiptGeneration         bool // bit 8
+	CipheredLoadFileDataBlock bool // bit 7
+	ContactlessActivation     bool // bit 6
+	ContactlessSelfActivation bool // bit 5
+	// bits 4–1 are RFU per GP §6.6.1.
+}
+
+// ParsePrivileges decodes a 3-byte privilege string per GP Table 6-1.
+// Returns ErrInvalidResponse if the input is not exactly 3 bytes; some
+// older cards send 1 byte (legacy) — those callers should preprocess
+// or reject up front.
+func ParsePrivileges(b []byte) (Privileges, error) {
+	if len(b) != 3 {
+		return Privileges{}, fmt.Errorf("%w: privileges field must be 3 bytes (GP Table 6-1), got %d", ErrInvalidResponse, len(b))
+	}
+	return Privileges{
+		SecurityDomain:          b[0]&0x80 != 0,
+		DAPVerification:         b[0]&0x40 != 0,
+		DelegatedManagement:     b[0]&0x20 != 0,
+		CardLock:                b[0]&0x10 != 0,
+		CardTerminate:           b[0]&0x08 != 0,
+		CardReset:               b[0]&0x04 != 0,
+		CVMManagement:           b[0]&0x02 != 0,
+		MandatedDAPVerification: b[0]&0x01 != 0,
+
+		TrustedPath:          b[1]&0x80 != 0,
+		AuthorizedManagement: b[1]&0x40 != 0,
+		TokenVerification:    b[1]&0x20 != 0,
+		GlobalDelete:         b[1]&0x10 != 0,
+		GlobalLock:           b[1]&0x08 != 0,
+		GlobalRegistry:       b[1]&0x04 != 0,
+		FinalApplication:     b[1]&0x02 != 0,
+		GlobalService:        b[1]&0x01 != 0,
+
+		ReceiptGeneration:         b[2]&0x80 != 0,
+		CipheredLoadFileDataBlock: b[2]&0x40 != 0,
+		ContactlessActivation:     b[2]&0x20 != 0,
+		ContactlessSelfActivation: b[2]&0x10 != 0,
+	}, nil
+}
+
+// Raw returns the 3-byte encoded form of the privilege set. Inverse
+// of ParsePrivileges.
+func (p Privileges) Raw() [3]byte {
+	var r [3]byte
+	if p.SecurityDomain {
+		r[0] |= 0x80
+	}
+	if p.DAPVerification {
+		r[0] |= 0x40
+	}
+	if p.DelegatedManagement {
+		r[0] |= 0x20
+	}
+	if p.CardLock {
+		r[0] |= 0x10
+	}
+	if p.CardTerminate {
+		r[0] |= 0x08
+	}
+	if p.CardReset {
+		r[0] |= 0x04
+	}
+	if p.CVMManagement {
+		r[0] |= 0x02
+	}
+	if p.MandatedDAPVerification {
+		r[0] |= 0x01
+	}
+
+	if p.TrustedPath {
+		r[1] |= 0x80
+	}
+	if p.AuthorizedManagement {
+		r[1] |= 0x40
+	}
+	if p.TokenVerification {
+		r[1] |= 0x20
+	}
+	if p.GlobalDelete {
+		r[1] |= 0x10
+	}
+	if p.GlobalLock {
+		r[1] |= 0x08
+	}
+	if p.GlobalRegistry {
+		r[1] |= 0x04
+	}
+	if p.FinalApplication {
+		r[1] |= 0x02
+	}
+	if p.GlobalService {
+		r[1] |= 0x01
+	}
+
+	if p.ReceiptGeneration {
+		r[2] |= 0x80
+	}
+	if p.CipheredLoadFileDataBlock {
+		r[2] |= 0x40
+	}
+	if p.ContactlessActivation {
+		r[2] |= 0x20
+	}
+	if p.ContactlessSelfActivation {
+		r[2] |= 0x10
+	}
+	return r
+}
+
+// Names returns the names of all set privileges, in stable order.
+func (p Privileges) Names() []string {
+	all := []struct {
+		set  bool
+		name string
+	}{
+		{p.SecurityDomain, "SecurityDomain"},
+		{p.DAPVerification, "DAPVerification"},
+		{p.DelegatedManagement, "DelegatedManagement"},
+		{p.CardLock, "CardLock"},
+		{p.CardTerminate, "CardTerminate"},
+		{p.CardReset, "CardReset"},
+		{p.CVMManagement, "CVMManagement"},
+		{p.MandatedDAPVerification, "MandatedDAPVerification"},
+		{p.TrustedPath, "TrustedPath"},
+		{p.AuthorizedManagement, "AuthorizedManagement"},
+		{p.TokenVerification, "TokenVerification"},
+		{p.GlobalDelete, "GlobalDelete"},
+		{p.GlobalLock, "GlobalLock"},
+		{p.GlobalRegistry, "GlobalRegistry"},
+		{p.FinalApplication, "FinalApplication"},
+		{p.GlobalService, "GlobalService"},
+		{p.ReceiptGeneration, "ReceiptGeneration"},
+		{p.CipheredLoadFileDataBlock, "CipheredLoadFileDataBlock"},
+		{p.ContactlessActivation, "ContactlessActivation"},
+		{p.ContactlessSelfActivation, "ContactlessSelfActivation"},
+	}
+	out := make([]string, 0, len(all))
+	for _, e := range all {
+		if e.set {
+			out = append(out, e.name)
+		}
+	}
+	return out
+}
+
+// String returns a comma-separated list of set privilege names, or
+// "(none)" if no privileges are set.
+func (p Privileges) String() string {
+	names := p.Names()
+	if len(names) == 0 {
+		return "(none)"
+	}
+	var buf bytes.Buffer
+	for i, n := range names {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString(n)
+	}
+	return buf.String()
+}
+
+// GP §11.4.2 GET STATUS.
+const (
+	insGetStatus byte = 0xF2
+
+	// P2 controls the response format and continuation flag.
+	// 0x02 = TLV format, first call.
+	// 0x03 = TLV format, subsequent call (continuation after SW=6310).
+	p2GetStatusTLVFirst byte = 0x02
+	p2GetStatusTLVNext  byte = 0x03
+
+	swMoreData uint16 = 0x6310
+
+	// TLV tags inside the GET STATUS response template.
+	tagRegistryEntry     tlv.Tag = 0xE3
+	tagRegistryAID       tlv.Tag = 0x4F
+	tagRegistryLCAndPriv tlv.Tag = 0x9F70 // lifecycle (1B) + privileges (3B)
+	tagRegistryPrivOnly  tlv.Tag = 0xC5   // privileges (3B), legacy variant
+	tagRegistryAssocSD   tlv.Tag = 0xCC
+	tagRegistryVersion   tlv.Tag = 0xCE
+	tagRegistryModule    tlv.Tag = 0x84
+)
+
+// GetStatus queries the card's GP registry per GP §11.4.2 and returns
+// every entry matching the given scope.
+//
+// The TLV-formatted response (P2 = 0x02) is requested. Cards that do
+// not support the TLV variant return SW=6A86; callers that need the
+// pre-TLV "Application" format are not supported.
+//
+// The card may signal a multi-segment response with SW=6310 ("more
+// data"); GetStatus issues continuation calls (P2 = 0x03) until the
+// card responds 0x9000 or returns a non-success SW. SW=6A88
+// ("referenced data not found") is treated as an empty registry —
+// common when querying Load Files on a card with nothing installed
+// beyond the ISD.
+//
+// The returned entries each carry the scope they were collected
+// under, so RegistryEntry.LifecycleString and downstream consumers
+// can interpret Lifecycle correctly.
+func (s *Session) GetStatus(ctx context.Context, scope StatusScope) ([]RegistryEntry, error) {
+	// "Match any AID" search criteria: tag 0x4F, length 0.
+	criteria := []byte{0x4F, 0x00}
+
+	var entries []RegistryEntry
+	p2 := p2GetStatusTLVFirst
+	for {
+		cmd := &apdu.Command{
+			CLA:  clsGP,
+			INS:  insGetStatus,
+			P1:   byte(scope),
+			P2:   p2,
+			Data: criteria,
+			Le:   0, // 0 = max response length (256 short / 65536 extended)
+		}
+		resp, err := s.transmit(ctx, cmd)
+		if err != nil {
+			return nil, fmt.Errorf("securitydomain: GET STATUS: %w", err)
+		}
+		sw := resp.StatusWord()
+		switch {
+		case resp.IsSuccess():
+			parsed, err := parseStatusResponse(resp.Data, scope)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, parsed...)
+			return entries, nil
+		case sw == swMoreData:
+			parsed, err := parseStatusResponse(resp.Data, scope)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, parsed...)
+			p2 = p2GetStatusTLVNext
+			continue
+		case sw == 0x6A88:
+			// Referenced data not found: empty registry for this scope.
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("%w: GET STATUS scope=%s: SW=%04X", ErrCardStatus, scope, sw)
+		}
+	}
+}
+
+// parseStatusResponse decodes the TLV body of a GET STATUS response.
+// The body is a sequence of 0xE3 templates per GP §11.4.2.2.
+func parseStatusResponse(data []byte, scope StatusScope) ([]RegistryEntry, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	nodes, err := tlv.Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: GET STATUS TLV decode: %v", ErrInvalidResponse, err)
+	}
+	var entries []RegistryEntry
+	for _, n := range nodes {
+		if n.Tag != tagRegistryEntry {
+			// GP §11.4.2.2 says the response is a sequence of 0xE3
+			// templates. Anything else at the top level is malformed.
+			return nil, fmt.Errorf("%w: GET STATUS: unexpected top-level tag 0x%X (want 0x%X)",
+				ErrInvalidResponse, n.Tag, tagRegistryEntry)
+		}
+		entry, err := parseRegistryEntry(n, scope)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// parseRegistryEntry decodes one 0xE3 template into a RegistryEntry.
+// The set of fields populated depends on which tags the card actually
+// returned — only AID is mandatory; everything else is best-effort.
+func parseRegistryEntry(node *tlv.Node, scope StatusScope) (RegistryEntry, error) {
+	children, err := tlv.Decode(node.Value)
+	if err != nil {
+		return RegistryEntry{}, fmt.Errorf("%w: GET STATUS entry decode: %v", ErrInvalidResponse, err)
+	}
+	entry := RegistryEntry{Scope: scope}
+
+	if aid := tlv.Find(children, tagRegistryAID); aid != nil {
+		entry.AID = append([]byte(nil), aid.Value...)
+	} else {
+		return RegistryEntry{}, fmt.Errorf("%w: GET STATUS entry missing AID (tag 0x4F)", ErrInvalidResponse)
+	}
+
+	// GP carries lifecycle + privileges in two slightly different
+	// shapes: combined under tag 0x9F70 (modern), or split with
+	// lifecycle implicit and privileges under tag 0xC5 (legacy).
+	// Try the modern form first.
+	if combined := tlv.Find(children, tagRegistryLCAndPriv); combined != nil {
+		switch len(combined.Value) {
+		case 4:
+			entry.Lifecycle = combined.Value[0]
+			privs, err := ParsePrivileges(combined.Value[1:])
+			if err != nil {
+				return RegistryEntry{}, err
+			}
+			entry.Privileges = privs
+		case 1:
+			// Lifecycle only; privileges may be in a separate tag.
+			entry.Lifecycle = combined.Value[0]
+		default:
+			return RegistryEntry{}, fmt.Errorf("%w: GET STATUS tag 0x9F70 length %d (want 1 or 4)",
+				ErrInvalidResponse, len(combined.Value))
+		}
+	}
+	if privOnly := tlv.Find(children, tagRegistryPrivOnly); privOnly != nil {
+		privs, err := ParsePrivileges(privOnly.Value)
+		if err != nil {
+			return RegistryEntry{}, err
+		}
+		entry.Privileges = privs
+	}
+
+	if assoc := tlv.Find(children, tagRegistryAssocSD); assoc != nil {
+		entry.AssociatedSDAID = append([]byte(nil), assoc.Value...)
+	}
+	if version := tlv.Find(children, tagRegistryVersion); version != nil {
+		entry.Version = append([]byte(nil), version.Value...)
+	}
+	if scope == StatusScopeLoadFilesAndModules {
+		for _, m := range tlv.FindAll(children, tagRegistryModule) {
+			entry.Modules = append(entry.Modules, append([]byte(nil), m.Value...))
+		}
+	}
+
+	return entry, nil
+}

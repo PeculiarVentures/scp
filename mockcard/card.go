@@ -154,6 +154,19 @@ type Card struct {
 	// stripped on write and reapplied on read so callers see the
 	// same shape regardless of which path they took in.
 	pivObjects map[string][]byte
+
+	// RegistryISD, RegistryApps, RegistryLoadFiles back the GP
+	// GET STATUS handler. Tests populate these to control what the
+	// mock card claims is installed; an empty slice for any scope
+	// makes that scope return SW=6A88 (referenced data not found),
+	// matching real-card behavior on a barren registry.
+	//
+	// The SCP11b/SCP03 unwrap is unaffected — GET STATUS reaches the
+	// dispatch only when a session is open, so tests must establish
+	// authentication first.
+	RegistryISD       []MockRegistryEntry
+	RegistryApps      []MockRegistryEntry
+	RegistryLoadFiles []MockRegistryEntry
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -262,6 +275,9 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 
 	case 0xCA: // GET DATA
 		return c.doGetData(cmd)
+
+	case 0xF2: // GP §11.4.2 GET STATUS
+		return c.doGetStatus(cmd)
 
 	case 0x88: // INTERNAL AUTHENTICATE (SCP11b handshake)
 		if underSM {
