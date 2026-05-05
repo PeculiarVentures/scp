@@ -103,10 +103,12 @@ func TestResolveMgmtKey_ExplicitAlgorithmOverridesDefault(t *testing.T) {
 	}
 }
 
-// TestPIVReset_RequiresBothGates verifies the two-flag pattern on
-// 'piv reset': --confirm-write alone is not enough, and the order
-// in which the gates fail is stable so error messages are
-// predictable.
+// TestPIVReset_GateSemantics verifies the single-flag gate on
+// 'piv reset' aligns with the parity spec: --confirm-reset-piv is
+// the destructive gate (because PIV reset is applet-scoped, not
+// slot-scoped), --confirm-write alone is no longer sufficient
+// (and produces a deprecation SKIP), and channel-mode selection
+// is still required.
 //
 // The profile-refusal-of-unsupported-mgmt-algorithm path (a related
 // concern, since resolveMgmtKey accepts arbitrary --mgmt-alg
@@ -115,7 +117,7 @@ func TestResolveMgmtKey_ExplicitAlgorithmOverridesDefault(t *testing.T) {
 // TestSession_ChangeManagementKey_RefusedAlgUnsupported in
 // piv/session/. resolveMgmtKey itself is just a parser; the
 // session is the gate.
-func TestPIVReset_RequiresBothGates(t *testing.T) {
+func TestPIVReset_GateSemantics(t *testing.T) {
 	card, err := mockcard.New()
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
@@ -132,48 +134,59 @@ func TestPIVReset_RequiresBothGates(t *testing.T) {
 		}, &buf
 	}
 
-	// Each gate is tested in isolation by satisfying every OTHER
-	// gate. This decouples the tests from the order of the gate
-	// checks in the handler: if a future commit reorders them
-	// (channel-mode first vs confirm-write first), each gate-
-	// specific test still asserts the right thing.
-
-	// confirm-write missing (with channel-mode and reset-piv ok).
-	env, _ := makeEnv()
-	err = cmdPIVGroupReset(context.Background(), env, []string{
+	// No confirmation at all → dry-run with SKIPs, not an error.
+	// This is design principle 4: dry-run by default, mutating
+	// commands print what they would do.
+	env, buf := makeEnv()
+	if err := cmdPIVGroupReset(context.Background(), env, []string{
 		"--reader", "fake",
 		"--raw-local-ok",
-		"--confirm-reset-piv",
-	})
-	if err == nil {
-		t.Fatal("expected error without --confirm-write")
+	}); err != nil {
+		t.Fatalf("dry-run should not error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--confirm-write") {
-		t.Errorf("error should mention --confirm-write: %v", err)
+	out := buf.String()
+	for _, want := range []string{"PIV reset", "SKIP", "dry-run", "--confirm-reset-piv"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "PIV applet reset to factory state") {
+		t.Errorf("dry-run should not announce destructive completion\n--- output ---\n%s", out)
 	}
 
-	// confirm-reset-piv missing (with channel-mode and confirm-write ok).
-	env, _ = makeEnv()
-	err = cmdPIVGroupReset(context.Background(), env, []string{
+	// Legacy --confirm-write alone → still dry-run, with deprecation SKIP.
+	// Stale scripts that pass --confirm-write must NOT trigger destructive
+	// path; the rename is meant to be safe.
+	env, buf = makeEnv()
+	if err := cmdPIVGroupReset(context.Background(), env, []string{
 		"--reader", "fake",
 		"--raw-local-ok",
 		"--confirm-write",
-	})
-	if err == nil {
-		t.Fatal("expected error without --confirm-reset-piv")
+	}); err != nil {
+		t.Fatalf("legacy --confirm-write should not error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--confirm-reset-piv") {
-		t.Errorf("error should mention --confirm-reset-piv: %v", err)
+	out = buf.String()
+	for _, want := range []string{
+		"--confirm-write (deprecated)",
+		"--confirm-reset-piv",
+		"dry-run",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("legacy --confirm-write output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "PIV applet reset to factory state") {
+		t.Errorf("legacy --confirm-write alone should not trigger destructive reset\n--- output ---\n%s", out)
 	}
 
-	// channel-mode missing (with both confirmations ok). This is
-	// covered by the table-driven TestChannelMode_* tests in
+	// Channel-mode missing (with --confirm-reset-piv set) — error.
+	// Channel-mode selection is fail-closed regardless of gate state;
+	// this is covered exhaustively by TestChannelMode_* in
 	// cmd_piv_channel_test.go but kept here as the locality marker
 	// for the reset-specific gate set.
 	env, _ = makeEnv()
 	err = cmdPIVGroupReset(context.Background(), env, []string{
 		"--reader", "fake",
-		"--confirm-write",
 		"--confirm-reset-piv",
 	})
 	if err == nil {
