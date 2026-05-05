@@ -58,8 +58,23 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	trust := registerTrustFlags(fs)
-	confirm := fs.Bool("confirm-write", false,
-		"Confirm destructive write. Without this flag, piv-reset runs in dry-run mode and prints what would happen.")
+	confirm := fs.Bool("confirm-reset-piv", false,
+		"Confirm PIV applet reset. Without this flag, piv-reset runs in dry-run "+
+			"mode and prints what would happen. Distinct from --confirm-write because "+
+			"PIV reset and SD reset have different blast radii and overloading a single "+
+			"flag across both is a foot-gun. PIV reset wipes ALL 24 PIV slots, "+
+			"certificates, PIN, PUK, and management key — but does NOT touch Security "+
+			"Domain key material. For SD reset, see 'scpctl sd reset'.")
+	// Transitional: --confirm-write is still accepted but does NOT enable
+	// the destructive path on its own. Operators who pass it without
+	// --confirm-reset-piv get a clear failure with a pointer to the new
+	// flag. This is the safe direction for a flag rename — silently
+	// treating the old flag as the new one would let stale scripts
+	// reset cards their authors didn't intend.
+	confirmWriteLegacy := fs.Bool("confirm-write", false,
+		"DEPRECATED. Use --confirm-reset-piv instead. Kept so scripts that pass "+
+			"--confirm-write don't crash on the unknown flag, but it no longer enables "+
+			"the destructive path on its own — set --confirm-reset-piv to actually mutate.")
 	maxAttempts := fs.Int("max-block-attempts", 16,
 		"Maximum wrong-PIN/wrong-PUK attempts before giving up trying to block "+
 			"a credential. YubiKey defaults to 3 retries, so 3 attempts is the typical "+
@@ -78,10 +93,19 @@ func cmdPIVReset(ctx context.Context, env *runEnv, args []string) error {
 	data := &pivResetData{}
 	report.Data = data
 
+	// Surface the deprecation in the report so scripts don't silently
+	// flip from "destructive" to "dry-run" on the rename without anyone
+	// noticing.
+	if *confirmWriteLegacy && !*confirm {
+		report.Skip("--confirm-write (deprecated)",
+			"--confirm-write no longer enables PIV reset on its own. "+
+				"Pass --confirm-reset-piv to actually mutate. Treating this run as dry-run.")
+	}
+
 	if !*confirm {
-		report.Skip("block PIN", "dry-run; pass --confirm-write to actually run")
+		report.Skip("block PIN", "dry-run; pass --confirm-reset-piv to actually run")
 		report.Skip("block PUK", "dry-run")
-		report.Skip("PIV reset", "dry-run — would erase ALL 24 PIV slots, certs, and reset PIN/PUK/management key")
+		report.Skip("PIV reset", "dry-run — would erase ALL 24 PIV slots, certs, and reset PIN/PUK/management key. Does NOT touch Security Domain state.")
 		_ = report.Emit(env.out, *jsonMode)
 		return nil
 	}
