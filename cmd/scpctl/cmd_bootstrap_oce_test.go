@@ -98,10 +98,17 @@ func TestBootstrapOCE_WithConfirm(t *testing.T) {
 	}
 }
 
-// TestBootstrapOCE_StoreChainAndCASKI exercises the optional flags.
-// Confirms STORE DATA (INS=0xE2) is issued for both the cert chain
-// and the CA SKI when their flags are set.
-func TestBootstrapOCE_StoreChainAndCASKI(t *testing.T) {
+// TestBootstrapOCE_RegistersCASKI confirms that bootstrap-oce
+// emits exactly one STORE DATA at the application layer — the
+// CA SKI registration — when --ca-ski is provided. There is no
+// OCE cert chain STORE DATA: the OCE chain is wire-only (sent
+// via PSO at session-open, not stored on-card). An earlier
+// version of this command had a --store-chain flag that wrote
+// the OCE chain to the OCE CA key reference, which the YubiKey
+// rejected with SW=6A80 because the operation has no GP-spec
+// meaning. The test now pins the corrected behavior: at most
+// one STORE DATA from this command, the CA SKI write.
+func TestBootstrapOCE_RegistersCASKI(t *testing.T) {
 	_, certPath := writeOCEFixturePEMs(t)
 
 	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
@@ -116,7 +123,6 @@ func TestBootstrapOCE_StoreChainAndCASKI(t *testing.T) {
 	err := cmdBootstrapOCE(context.Background(), env, []string{
 		"--reader", "fake",
 		"--oce-cert", certPath,
-		"--store-chain",
 		"--ca-ski", "0123456789ABCDEF0123456789ABCDEF01234567",
 		"--confirm-write",
 	})
@@ -130,12 +136,23 @@ func TestBootstrapOCE_StoreChainAndCASKI(t *testing.T) {
 			nE2++
 		}
 	}
-	if nE2 < 2 {
-		t.Errorf("expected at least 2 STORE DATA (INS=0xE2) calls (chain + CA SKI); got %d", nE2)
+	// Exactly 1 STORE DATA: the CA SKI write. NOT 2 — the OCE
+	// cert chain STORE DATA was the broken --store-chain path
+	// that this PR removed. Anything > 1 means a regression.
+	if nE2 != 1 {
+		t.Errorf("expected exactly 1 STORE DATA (CA SKI registration only); got %d. "+
+			"If a cert-chain STORE DATA reappeared, it's the conceptually-broken "+
+			"OCE-chain-on-card storage; that was removed deliberately.", nE2)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "store OCE cert chain") || !strings.Contains(out, "register CA SKI") {
-		t.Errorf("output missing expected pass labels\n--- output ---\n%s", out)
+	if !strings.Contains(out, "register CA SKI") {
+		t.Errorf("output missing register-CA-SKI pass label\n--- output ---\n%s", out)
+	}
+	// The "store OCE cert chain" line should NOT appear in the
+	// output — it was the label of the removed step.
+	if strings.Contains(out, "store OCE cert chain") {
+		t.Errorf("output unexpectedly contains 'store OCE cert chain' — that "+
+			"step was removed (OCE chain is wire-only)\n--- output ---\n%s", out)
 	}
 }
 
