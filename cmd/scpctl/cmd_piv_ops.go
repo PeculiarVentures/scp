@@ -1016,18 +1016,35 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 // is erased, every certificate is dropped, PIN/PUK/management-key
 // all return to factory defaults. A wrong-card reset is a card
 // that has to be re-enrolled, with all of the trust-bootstrap cost
-// that implies. So this command takes a second gate beyond
-// --confirm-write: --confirm-reset-piv. The two-flag pattern
-// distinguishes 'I am about to overwrite a slot' from 'I am about
-// to wipe the whole applet' so an operator who pastes a stale
-// command line cannot accidentally turn a slot rotation into a
-// full reset.
+// that implies. So this command requires its own scope-correct
+// confirmation flag: --confirm-reset-piv. Slot-scoped destructive
+// operations (key generate, cert put, etc.) gate on --confirm-write;
+// applet-scoped destructive operations (this one) gate on
+// --confirm-reset-piv. SD reset, with its own different blast
+// radius, gates on --confirm-reset-sd. An operator who pastes a
+// stale command line with --confirm-write cannot accidentally turn
+// a slot rotation into a full applet reset because --confirm-write
+// alone no longer enables this path; it surfaces a deprecation
+// SKIP and falls through to dry-run.
+//
+// Dry-run is the default. Without --confirm-reset-piv the command
+// prints what it WOULD do, including the explicit note that SD
+// state is not affected.
 func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("piv reset", env)
 	reader := fs.String("reader", "", "PC/SC reader name.")
-	confirm := fs.Bool("confirm-write", false, "Required: confirm a destructive operation.")
-	confirmReset := fs.Bool("confirm-reset-piv", false,
-		"Required (in addition to --confirm-write): confirm the operator understands this is a full PIV applet reset, not a single-slot operation. Erases all 24 slot keys, all certificates, and resets PIN/PUK/management-key to factory defaults.")
+	confirm := fs.Bool("confirm-reset-piv", false,
+		"Confirm PIV applet reset. Without this flag, piv reset runs in "+
+			"dry-run mode and prints what would happen. Distinct from "+
+			"--confirm-write (which gates slot-scoped operations) because "+
+			"PIV reset has applet-wide blast radius: ALL 24 slot keys, ALL "+
+			"certificates, PIN, PUK, and management key are erased. For SD "+
+			"reset (different applet), see 'scpctl sd reset'.")
+	confirmWriteLegacy := fs.Bool("confirm-write", false,
+		"DEPRECATED. Use --confirm-reset-piv instead. Kept so scripts that "+
+			"pass --confirm-write don't crash on the unknown flag, but it no "+
+			"longer enables the destructive path on its own — set "+
+			"--confirm-reset-piv to actually mutate.")
 	chFlags := registerSCP11bChannelFlags(fs)
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	if err := fs.Parse(args); err != nil {
@@ -1036,11 +1053,23 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	if err := chFlags.validate(); err != nil {
 		return err
 	}
-	if !*confirm {
-		return fmt.Errorf("piv reset erases all slots, certificates, and credentials; pass --confirm-write to proceed")
+
+	report := &Report{Subcommand: "piv reset", Reader: *reader}
+
+	// Stale-script safety: if --confirm-write is set without
+	// --confirm-reset-piv, surface a clear deprecation SKIP and
+	// fall through to dry-run rather than treating the old flag
+	// as the new one.
+	if *confirmWriteLegacy && !*confirm {
+		report.Skip("--confirm-write (deprecated)",
+			"--confirm-write no longer enables PIV reset on its own. "+
+				"Pass --confirm-reset-piv to actually mutate. Treating this run as dry-run.")
 	}
-	if !*confirmReset {
-		return fmt.Errorf("piv reset additionally requires --confirm-reset-piv to distinguish a full applet wipe from a single-slot operation; pass both flags to proceed")
+
+	if !*confirm {
+		report.Skip("open SCP11b vs PIV", "dry-run; pass --confirm-reset-piv to actually open a session")
+		report.Skip("PIV reset", "dry-run — would erase ALL 24 PIV slots, certs, and reset PIN/PUK/management key. Does NOT touch Security Domain state.")
+		return report.Emit(env.out, *jsonMode)
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -1049,7 +1078,6 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	report := &Report{Subcommand: "piv reset", Reader: *reader}
 	sess, proceed, err := openPIVSession(ctx, t, chFlags, report)
 	if err != nil {
 		report.Fail("open session", err.Error())

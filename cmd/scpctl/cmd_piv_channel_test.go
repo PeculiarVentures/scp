@@ -164,9 +164,15 @@ func newChannelTestEnv(t *testing.T) (*runEnv, *bytes.Buffer) {
 	}, &buf
 }
 
-// withDestructiveFlags returns args with --confirm-write (and, for
-// the reset command, --confirm-reset-piv) prepended. For non-
-// destructive handlers the input is returned unchanged.
+// withDestructiveFlags returns args with the appropriate
+// confirmation flag(s) prepended:
+//   - slot-scoped destructive commands get --confirm-write.
+//   - reset (applet-scoped) gets --confirm-reset-piv.
+//
+// Both flags are passed for reset-shaped commands when destructive
+// is true alongside destructiveTwoGate; the legacy --confirm-write
+// is now accepted-but-ignored on reset, but passing it doesn't
+// hurt because --confirm-reset-piv is the operative gate.
 func withDestructiveFlags(spec pivCommandSpec, args []string) []string {
 	out := append([]string(nil), args...)
 	if spec.destructive {
@@ -232,10 +238,16 @@ func TestChannelMode_BothFlagsRejected(t *testing.T) {
 }
 
 // TestConfirmWrite_RequiredOnDestructive verifies every
-// destructive scpctl piv command refuses to run without
-// --confirm-write. The confirmation gate fires before any
+// slot-scoped destructive scpctl piv command refuses to run
+// without --confirm-write. The confirmation gate fires before any
 // session-open or APDU-transmit, so this test exercises pure
 // flag validation.
+//
+// 'piv reset' is excluded: it's applet-scoped, not slot-scoped,
+// so its confirmation gate is --confirm-reset-piv, not
+// --confirm-write. Its dry-run-with-deprecation-SKIP behavior is
+// asserted by TestConfirmResetPIV_LegacyConfirmWriteIsDryRun
+// instead.
 //
 // The channel-mode flags are NOT passed here, but the test does
 // not expect the channel-mode error: the confirm-write gate fires
@@ -244,6 +256,11 @@ func TestChannelMode_BothFlagsRejected(t *testing.T) {
 func TestConfirmWrite_RequiredOnDestructive(t *testing.T) {
 	for _, spec := range pivCommandSpecs() {
 		if !spec.destructive {
+			continue
+		}
+		// Reset's gate is --confirm-reset-piv (applet-scoped),
+		// not --confirm-write (slot-scoped). Tested separately.
+		if spec.destructiveTwoGate {
 			continue
 		}
 		t.Run(spec.name, func(t *testing.T) {
@@ -266,23 +283,39 @@ func TestConfirmWrite_RequiredOnDestructive(t *testing.T) {
 	}
 }
 
-// TestConfirmResetPIV_RequiredOnReset verifies the reset command
-// refuses --confirm-write alone; --confirm-reset-piv must also be
-// present. Other destructive commands do NOT take this second
-// flag (only reset does), so the reset path is the only one that
-// needs this gate test.
-func TestConfirmResetPIV_RequiredOnReset(t *testing.T) {
-	env, _ := newChannelTestEnv(t)
-	err := cmdPIVGroupReset(context.Background(), env, []string{
+// TestConfirmResetPIV_LegacyConfirmWriteIsDryRun verifies the
+// --confirm-write → --confirm-reset-piv flag rename is safe for
+// stale scripts. Passing --confirm-write alone (without
+// --confirm-reset-piv) does NOT trigger the destructive path;
+// instead, the run is treated as dry-run with a deprecation SKIP
+// in the output. This mirrors the same protection added to
+// 'scpctl smoke piv-reset' in PR #87 and the gate semantics from
+// 'scpctl sd reset' in PR #86.
+//
+// Silently treating the old flag as the new one would defeat the
+// rename — stale scripts could reset cards their authors didn't
+// intend, which is exactly what the spec rename prevents.
+func TestConfirmResetPIV_LegacyConfirmWriteIsDryRun(t *testing.T) {
+	env, buf := newChannelTestEnv(t)
+	if err := cmdPIVGroupReset(context.Background(), env, []string{
 		"--reader", "fake",
 		"--raw-local-ok",
 		"--confirm-write",
-	})
-	if err == nil {
-		t.Fatal("expected error without --confirm-reset-piv")
+	}); err != nil {
+		t.Fatalf("legacy --confirm-write should not error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--confirm-reset-piv") {
-		t.Errorf("error should mention --confirm-reset-piv: %v", err)
+	out := buf.String()
+	for _, want := range []string{
+		"--confirm-write (deprecated)",
+		"--confirm-reset-piv",
+		"dry-run",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "PIV applet reset to factory state") {
+		t.Errorf("legacy --confirm-write alone should not trigger destructive reset\n--- output ---\n%s", out)
 	}
 }
 
