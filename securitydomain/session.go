@@ -498,12 +498,11 @@ func (s *Session) requireDEK() error {
 	return nil
 }
 
-// transmitWithChaining handles large payloads using ISO 7816-4 APDU
-// chaining (CLA bit 5).
-//
-// For payloads ≤ chunkBudget bytes, transmits as-is. For larger
-// payloads, splits into chained APDUs whose wrapped on-wire form stays
-// within short-Lc (≤ 255 bytes):
+// transmitWithChaining sends a logical APDU using ISO 7816-4 §5.1.1
+// command chaining (CLA bit b5 = 0x10) when the data field exceeds a
+// single short APDU's capacity. For payloads that fit in a single APDU,
+// transmits unchanged. For larger payloads, splits into chained APDUs
+// whose wrapped on-wire form stays within short-Lc (≤ 255 bytes):
 //
 //   - When authenticated through SCP, each chunk is sized to
 //     secureWrapSafeBlock (223) so that AES-CBC padding + MAC still
@@ -511,13 +510,11 @@ func (s *Session) requireDEK() error {
 //   - When unauthenticated, each chunk is sized to 255 bytes; nothing
 //     inflates the wire size.
 //
-// STORE DATA is explicitly refused — it has its own application-level
-// chaining protocol; callers must use transmitStoreDataChained.
+// STORE DATA is included here (no carve-out): retail YubiKey 5.7.4
+// rejects GP §11.11 application-level block chaining with SW=6A86
+// and requires the same ISO transport-layer chaining used by yubikit-
+// python's SmartCardProtocol.
 func (s *Session) transmitWithChaining(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
-	if cmd.INS == insStoreData {
-		return nil, fmt.Errorf("transmitWithChaining must not be used for STORE DATA; use transmitStoreDataChained")
-	}
-
 	chunkBudget := 255
 	if s.authenticated && s.scpSession != nil {
 		chunkBudget = secureWrapSafeBlock
@@ -594,49 +591,34 @@ func chainCommandsAt(cmd *apdu.Command, chunkSize int) []*apdu.Command {
 // keeps chained management commands portable across hardware.
 const secureWrapSafeBlock = 223
 
-// storeDataMaxBlock is the maximum plaintext per STORE DATA block.
-// Set to secureWrapSafeBlock so the on-wire APDU stays ≤ 255 bytes
-// after secure-messaging wrap.
-const storeDataMaxBlock = secureWrapSafeBlock
-
-// transmitStoreDataChained sends a STORE DATA payload that may exceed a
-// single APDU using GP application-level chaining (§11.11). The payload
-// is split into ≤255-byte blocks, each block is sent as an individual
-// STORE DATA APDU with P2 = block number, P1 b8 = 0 for all but the last.
-// Each block goes through secure messaging individually (no plaintext
-// pre-splitting after wrapping).
+// transmitStoreDataChained sends a STORE DATA payload as a single
+// LOGICAL command, splitting at the transport layer with ISO 7816-4
+// §5.1.1 command chaining (CLA bit b5 = 0x10) when the payload
+// exceeds a single short APDU.
+//
+// Earlier this function used GP §11.11 application-level block
+// chaining (P2 = block number, P1 b8 = 0 on non-final blocks).
+// That's spec-correct for cards that implement it, but retail
+// YubiKey 5.7.4 rejects multi-block STORE DATA with SW=6A86
+// ("incorrect P1-P2"). yubikit-python's store_data is a single
+// send_apdu call with P1=0x90 P2=0x00 and relies on its
+// SmartCardProtocol to do ISO CLA chaining when data > 255 bytes,
+// the same wire shape PSO uses (see scp11/scp11.go
+// psoSendCertChained for the parallel fix). Mirroring that here
+// closes the SW=6A86 path and matches what the YubiKey accepts.
+//
+// Logical APDU: P1=0x90 (b8=last/only block, b5=BER-TLV format),
+// P2=0x00. transmitWithChaining splits this into N short APDUs
+// with CLA progression 0x84 → 0x84+0x10 → ... → 0x84 (the SCP-
+// wrapped CLA path) or 0x80 → 0x80|0x10 → ... → 0x80 if not
+// authenticated. Each chained chunk reuses INS/P1/P2 unchanged.
 func (s *Session) transmitStoreDataChained(ctx context.Context, payload []byte) (*apdu.Response, error) {
-	if len(payload) == 0 {
-		return s.transmit(ctx, storeDataCmd(nil))
+	cmd := storeDataCmd(payload)
+	resp, err := s.transmitWithChaining(ctx, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("STORE DATA: %w", err)
 	}
-	if len(payload) <= storeDataMaxBlock {
-		return s.transmit(ctx, storeDataCmd(payload))
-	}
-
-	totalBlocks := (len(payload) + storeDataMaxBlock - 1) / storeDataMaxBlock
-	if totalBlocks > 256 {
-		return nil, fmt.Errorf("STORE DATA payload requires %d blocks; P2 block number exceeds 0xFF", totalBlocks)
-	}
-
-	var lastResp *apdu.Response
-	for i := 0; i < totalBlocks; i++ {
-		start := i * storeDataMaxBlock
-		end := start + storeDataMaxBlock
-		if end > len(payload) {
-			end = len(payload)
-		}
-		isLast := i == totalBlocks-1
-		cmd := storeDataBlockCmd(byte(i), isLast, payload[start:end])
-		resp, err := s.transmit(ctx, cmd)
-		if err != nil {
-			return nil, fmt.Errorf("STORE DATA block %d/%d: %w", i, totalBlocks, err)
-		}
-		if !isLast && !resp.IsSuccess() {
-			return resp, fmt.Errorf("STORE DATA block %d/%d: %w", i, totalBlocks, resp.Error())
-		}
-		lastResp = resp
-	}
-	return lastResp, nil
+	return resp, nil
 }
 
 // --- Introspection ---
