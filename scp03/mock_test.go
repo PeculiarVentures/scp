@@ -40,11 +40,17 @@ func TestMockCard_GetData_CRD_Unauthenticated(t *testing.T) {
 	}
 }
 
-// TestMockCard_GetData_KeyInfo_RequiresSecureMessaging documents the
-// security model: the key information template is auth-gated. A
-// plaintext request is refused with 6982 (security status not
-// satisfied), which is what real Security Domains do.
-func TestMockCard_GetData_KeyInfo_RequiresSecureMessaging(t *testing.T) {
+// TestMockCard_GetData_KeyInfo_AllowedUnauth covers the
+// YubiKey-shaped GET DATA discovery surface. Real YubiKey 5.x
+// firmware permits unauthenticated reads of the Key Information
+// Template (tag 0x00E0) — that's how ykman's 'sd info' and
+// 'sd keys list' work without prompting for SCP03 keys. The
+// mock matches that behavior so integration tests against
+// auto-detected profile flows can run without an SCP03 session
+// open. Standard GP cards typically gate KIT behind the
+// authenticated state and answer 6982 here; a future
+// 'standard-sd profile' mock variant would assert that.
+func TestMockCard_GetData_KeyInfo_AllowedUnauth(t *testing.T) {
 	card := NewMockCard(DefaultKeys)
 	tr := card.Transport()
 
@@ -54,8 +60,35 @@ func TestMockCard_GetData_KeyInfo_RequiresSecureMessaging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transmit: %v", err)
 	}
+	if resp.StatusWord() != 0x9000 {
+		t.Errorf("plaintext GET DATA 0x00E0 on YubiKey-shaped mock should return 9000; got %04X",
+			resp.StatusWord())
+	}
+}
+
+// TestMockCard_GetData_OutsideAllowlist_RequiresSecureMessaging
+// pins the residual auth-gating: tags NOT in the unauth
+// allowlist (0x0066 CRD, 0x5FC1 YubiKey version, 0x00E0 KIT)
+// must still answer 6982 plaintext. Catches a regression
+// where the unauth path accidentally falls through to the
+// post-SM dispatcher and serves auth-only objects.
+func TestMockCard_GetData_OutsideAllowlist_RequiresSecureMessaging(t *testing.T) {
+	card := NewMockCard(DefaultKeys)
+	tr := card.Transport()
+
+	// Tag 0xFF21 isn't in the mock's unauth allowlist; the
+	// post-SM doGetData would normally answer 6A88 (reference
+	// data not found) for it, but the pre-handshake gate
+	// returns 6982 first.
+	resp, err := tr.Transmit(context.Background(), &apdu.Command{
+		CLA: 0x80, INS: 0xCA, P1: 0xFF, P2: 0x21, Le: 0,
+	})
+	if err != nil {
+		t.Fatalf("transmit: %v", err)
+	}
 	if resp.StatusWord() != 0x6982 {
-		t.Errorf("plaintext GET DATA 0x00E0 should return 6982; got %04X", resp.StatusWord())
+		t.Errorf("plaintext GET DATA 0xFF21 should return 6982; got %04X",
+			resp.StatusWord())
 	}
 }
 
