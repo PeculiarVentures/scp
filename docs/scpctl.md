@@ -1,8 +1,8 @@
 # `scpctl` — administrative CLI
 
-`scpctl` is the unified administrative CLI for `github.com/PeculiarVentures/scp`. It replaces the original `scp-smoke` binary with a grouped command structure that scales as the PIV and Security Domain operation surface grows.
+`scpctl` is the unified administrative CLI for `github.com/PeculiarVentures/scp`. Grouped command structure with four operator-distinct groups plus a small set of top-level utilities.
 
-For the operator-facing reference (build, examples, per-command flags), see [`cmd/scpctl/README.md`](../cmd/scpctl/README.md). This document covers design decisions, the migration map from `scp-smoke`, and the command structure rationale.
+For the operator-facing reference (build, examples, per-command flags), see [`cmd/scpctl/README.md`](../cmd/scpctl/README.md). This document covers design decisions and the command structure rationale.
 
 ## Why `scpctl` and not `scp`
 
@@ -10,45 +10,18 @@ The bare name `scp` shadows OpenSSH's `scp` command on every Unix system. Naming
 
 `scpctl` makes the function explicit (this is a control tool, not a scheme name), avoids the OpenSSH conflict, and matches the conventional `<thing>ctl` naming used by `systemctl`, `kubectl`, `etcdctl`, and similar tools.
 
-## Why grouped commands
+## Group structure
 
-The original `scp-smoke` had a flat command list of ten subcommands. As PIV provisioning landed and Security Domain bootstrap got its own subcommand, the flat list crossed the readable threshold: an operator running `scp-smoke help` saw a table that mixed protocol-correctness checks, hardware probes, and destructive provisioning paths with no visible structure.
+Four groups plus two top-level utilities:
 
-The three groups in `scpctl` correspond to three different operator mental models:
-
-- **`smoke`**: "Is the library correct against this hardware?" Pre-deployment validation, regression testing, troubleshooting wire-level issues.
-- **`piv`**: "Provision and operate a PIV credential on this card." User-facing day-to-day operations.
-- **`sd`**: "Bootstrap or inspect this card's Security Domain." Card admin operations that don't touch PIV.
+- **`test`** — hardware regression checks. Read-only against real cards: validates the SCP library produces wire bytes the card accepts, and that the wire layer carries through higher-level applet protocols. Used in CI to catch regressions before they ship.
+- **`piv`** — PIV operator surface. PIN/PUK lifecycle, management-key authentication and rotation, slot key generation, certificate install/read/delete, raw object I/O, attestation, full applet reset, and the SCP11b-secured `provision` flow. These commands write to the card; safety is documented in [`piv.md`](piv.md).
+- **`sd`** — Security Domain operator surface. `info` reads CRD and key-info template (with `--full` for a GP §11.4.2 registry walk); `reset` factory-resets SD key material; `bootstrap-oce` / `bootstrap-scp11a` / `bootstrap-scp11a-sd` are the day-1 provisioning flows that install OCE material and the SCP11a SD ECDH key on fresh cards.
+- **`oce`** — off-card OCE certificate diagnostics. `verify` validates a chain off-card; `gen` produces a fresh known-good chain. Host-only — does not touch a card.
 
 Top-level utilities (`readers`, `probe`, `version`, `help`) sit outside any group because they're the things you run before deciding which group you're in.
 
-## Migration map from `scp-smoke`
-
-Every `scp-smoke` subcommand is reachable as `scpctl smoke <same-name>`. Names are preserved verbatim, including the hyphenation:
-
-| Old | New |
-| --- | --- |
-| `scp-smoke readers` | `scpctl smoke readers` (or `scpctl readers`) |
-| `scp-smoke probe` | `scpctl smoke probe` (or `scpctl probe`) |
-| `scp-smoke scp03-sd-read` | `scpctl smoke scp03-sd-read` |
-| `scp-smoke scp11b-sd-read` | `scpctl smoke scp11b-sd-read` |
-| `scp-smoke scp11a-sd-read` | `scpctl smoke scp11a-sd-read` |
-| `scp-smoke scp11b-piv-verify` | `scpctl smoke scp11b-piv-verify` |
-| `scp-smoke bootstrap-oce` | `scpctl smoke bootstrap-oce` |
-| `scp-smoke piv-provision` | `scpctl smoke piv-provision` |
-| `scp-smoke piv-reset` | `scpctl smoke piv-reset` |
-| `scp-smoke test` | `scpctl smoke test` |
-
-All flags carry over unchanged. JSON output shape is unchanged except the report header, which now reads `scpctl smoke probe` rather than `scp-smoke probe`.
-
-## Group-vs-smoke split for new commands
-
-The `piv` and `sd` groups are intentionally minimal today. Only `piv info` and `sd info` are wired; the SCP-secured provisioning paths still live under `smoke`. The split is deliberate:
-
-- The `info` commands are the safe-by-default starting point: read-only, no auth, no state change. Operators can run them on any card without risk.
-- The provisioning paths under `smoke` are SCP-wrapped, destructive-with-confirm, and depend on infrastructure (OCE keys, trust roots) that is operationally distinct from `info`. Migrating them under `piv` and `sd` is staged work that needs the `piv/session` library to grow change-PIN, change-management-key, import, and detailed cert operations first.
-
-When a `smoke` provisioning subcommand has a clean `piv/session` equivalent, it migrates. Until then, the smoke version is the right path. The README's per-command reference notes which path to use for each operation.
+The split is along an operator mental-model axis: "is this a regression check," "am I operating PIV," "am I operating the Security Domain," "am I doing host-side OCE work."
 
 ## Output shape
 

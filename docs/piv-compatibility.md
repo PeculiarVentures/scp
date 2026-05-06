@@ -20,7 +20,7 @@ Tracks which PIV operations have been exercised end to end against which cards. 
 
 ## What `verified` means for the YubiKey rows
 
-The YubiKey rows are verified against retail YubiKey 5 series tokens via `cmd/scpctl smoke ...` runs. The smoke suite (`scpctl smoke test`) covers SELECT, PIN verify, the SCP03/11b/11a SD reads, and the SCP11b-wrapped PIV verify. Generate, put cert, attest, and reset are exercised by `scpctl smoke piv-provision` and `scpctl smoke piv-reset` against the same hardware. SCP11b PIV requires firmware 5.7+; older firmware shows up as `n/a`, not as a regression.
+The YubiKey rows are verified against retail YubiKey 5 series tokens via `cmd/scpctl test ...` runs. The test suite (`scpctl test all`) covers SELECT, PIN verify, the SCP03/11b/11a SD reads, and the SCP11b-wrapped PIV verify. Generate, put cert, attest, and reset are exercised by `scpctl piv provision` and `scpctl piv reset` against the same hardware. SCP11b PIV requires firmware 5.7+; older firmware shows up as `n/a`, not as a regression.
 
 ## What `spec` means for the Standard PIV row
 
