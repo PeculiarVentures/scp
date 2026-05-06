@@ -24,11 +24,23 @@ Three modes, controlled by the same `--scp03-*` flag set on every verb:
 
 **Unauthenticated.** No `--scp03-*` flags. Read verbs only — write verbs require auth and will reject this combination at flag-parse time. Whether unauthenticated reads succeed depends on the card; YubiKeys allow CRD (tag 0066) but typically gate KIT (tag 00E0) and the cert store (tag BF21) behind authentication. If a read returns SW=6982 unauthenticated, switch to one of the authenticated modes.
 
-**Factory keys.** `--scp03-keys-default`. Authenticates with the well-known factory SCP03 keys (KVN=0xFF, AES-128, the values published in the YubiKey Security Domain SCP03 documentation). Use this for fresh cards or for read-only inspection of an unrotated card. Mutually exclusive with the custom-key flags.
+**Factory keys.** `--scp03-keys-default`. Authenticates with the well-known factory SCP03 keys (KVN=0xFF, AES-128, the values published in the YubiKey Security Domain SCP03 documentation). Use this for fresh cards or for read-only inspection of an unrotated card. Mutually exclusive with the custom-key flags. **Only valid on `--vendor-profile yubikey`** (the default); on `--vendor-profile generic`, this flag is rejected because the factory keys are vendor-specific.
 
-**Custom triple.** `--scp03-kvn KVN --scp03-enc ENC --scp03-mac MAC --scp03-dek DEK`. All four required. KVN is a hex byte (e.g. `01`, `FE`); ENC, MAC, DEK are hex strings of equal length matching the AES variant (16 bytes for AES-128, 24 for AES-192, 32 for AES-256). Use this after the factory keys have been rotated.
+**Custom triple.** `--scp03-kvn KVN --scp03-enc ENC --scp03-mac MAC --scp03-dek DEK`. All four required. KVN is a hex byte (e.g. `01`, `FE`); ENC, MAC, DEK are hex strings of equal length matching the AES variant (16 bytes for AES-128, 24 for AES-192, 32 for AES-256). Use this after the factory keys have been rotated, or on any non-YubiKey card.
 
 Pick one mode. The flags reject the combination of `--scp03-keys-default` and `--scp03-kvn`.
+
+### `--vendor-profile yubikey|generic`
+
+Every SCP03-aware verb accepts `--vendor-profile`. Default is `yubikey` — preserves all current behavior, factory keys recognized, KIDs labeled with YubiKey conventions.
+
+Pass `--vendor-profile generic` for non-YubiKey GP cards. Three behavioral changes apply:
+
+- `--scp03-keys-default` is rejected at parse time. Operator must supply explicit `--scp03-{kvn,enc,mac,dek}`. Required-auth verbs without any SCP03 flags are also rejected (no implicit factory-key fallback).
+- `sd keys generate` is rejected because GENERATE EC KEY (INS=0xF1) is a Yubico extension. To install an EC key on a non-YubiKey card, generate the keypair off-card and use `sd keys import` instead.
+- `sd keys list` relabels KIDs 0x11/0x13/0x15 as `scp11-sd` (without the variant letter). The raw KID is still in the JSON's `kid_hex` field as the authoritative value.
+
+The flag does not affect `sd keys export`, `sd keys delete`, or `sd allowlist set/clear` — those verbs use only GP-spec mechanics that don't depend on vendor.
 
 ## Verbs
 
@@ -72,6 +84,8 @@ scpctl sd keys export --kid 11 --kvn 01 --out chain.pem --scp03-keys-default
 
 PEM is the default output format; `--der` writes raw DER (concatenated, leaf last). `--allow-empty` makes the no-chain case a SKIP at exit 0 — without it, a missing chain is FAIL.
 
+**Chain order.** `--chain-order` controls the order of certs in the output. Default `as-stored` preserves the on-card storage order (leaf-last on conforming cards, matching ykman/yubikit expectations). `leaf-last` actively reorders to put the leaf at the end (defensive against malformed cards). `leaf-first` reverses to validation order — leaf at position 0, then each subsequent cert is the issuer of the one before it. Leaf detection uses signature relationships; ambiguous chains (multiple unrelated leaves, or cycles) error rather than guessing.
+
 The exported file content is byte-equal to what was stored: a successful `sd keys import --certs ...` followed by `sd keys export` produces a file that round-trips through `openssl x509 -in` to the same DER bytes that were imported.
 
 ### `sd keys delete`
@@ -85,6 +99,8 @@ scpctl sd keys delete --kid 11 --kvn 01 --confirm-delete-key --scp03-keys-defaul
 `--confirm-delete-key` is a distinct flag from `--confirm-write` — a careless `--confirm-write` alone won't delete keys. Without `--confirm-delete-key`, the verb runs in dry-run mode (validates inputs, reports the planned APDU shape, makes no card-state mutations).
 
 For SCP03 key set deletion, omit `--kid` and pass `--kvn` only; the library normalizes the deletion to "all keys at this version" which is the SCP03 keyset semantic.
+
+**Orphan-auth pre-flight.** Before emitting DELETE KEY, the verb pre-fetches the inventory and refuses if the deletion would leave the card with zero SCP03 keysets — that's the foot-gun case where the operator removes the only authentication path and locks themselves out of subsequent management. Pass `--allow-orphan-auth` to bypass the check (intentional retirement, migration to a non-SCP03 auth model, or recovery scenarios). Pre-flight failures (card doesn't expose KIT) are logged as SKIP and the destructive operation proceeds — the operator already gave explicit consent via `--confirm-delete-key`.
 
 ### `sd keys generate`
 
@@ -218,6 +234,7 @@ The `checks` stream is the audit log — every step taken (open SCP03, GET DATA,
   "kvn_hex": "0x01",
   "format": "pem" | "der",
   "out_path": "/path/to/written/file",
+  "chain_order": "as-stored" | "leaf-last" | "leaf-first",
   "certificates": [
     {"subject": "...", "issuer": "...", "not_before": "...", "not_after": "...",
      "spki_fingerprint_sha256": "...", "serial_hex": "..."}
@@ -225,7 +242,7 @@ The `checks` stream is the audit log — every step taken (open SCP03, GET DATA,
 }
 ```
 
-The `certificates` array carries metadata about every cert that was written to `--out`, in leaf-last order.
+The `certificates` array carries metadata about every cert that was written to `--out`, in the order matching the file's actual cert order (after `--chain-order` is applied).
 
 ### `sd keys generate` data schema
 
@@ -382,6 +399,18 @@ openssl x509 -in chain.pem -pubkey -noout \
 ```
 
 The output of that pipeline matches the `spki_fingerprint_sha256` field in `sd keys list --json` and `sd keys export --json`. Same algorithm Chrome's cert viewer labels as "Public Key SHA-256."
+
+Cert-chain export output is openssl-parseable. Test in CI uses `openssl x509 -in <exported.pem> -noout` as an external parser witness on every chain export round-trip — see `cmd/scpctl/ykman_shape_interop_test.go`. The same PEM format is what ykman/yubikit consume, so a chain that round-trips through openssl will also round-trip through ykman.
+
+## Diagnostic SW visibility
+
+When optional GET DATA reads (KLOC tag FF33, KLCC tag FF34) fail with non-success status words other than 6A88/6A82 (Reference Data Not Found), the verb emits a SKIP with the actual SW preserved in the detail line — for example:
+
+```
+GET DATA tags 0xFF33/0xFF34 (KLOC/KLCC)        SKIP — securitydomain: get CA identifiers (tag 0xFF33): card error status: SW=6982
+```
+
+That distinguishes auth-required (6982) from instruction-not-supported (6D00) from other diagnostic SWs, so an operator running unauthenticated against a card that gates KLOC reads can re-run with `--scp03-keys-default` (or the custom triple) to see the data instead of guessing why the optional data was empty.
 
 ## Known limitations
 
