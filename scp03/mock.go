@@ -383,6 +383,14 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 		// will not return what was just PUT.)
 		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+	case 0xF0:
+		// SET STATUS (GP §11.1.10). Recorded for wire-shape
+		// inspection. The mock does not persist a lifecycle byte
+		// — there's no GET STATUS handler here either; tests that
+		// need pre/post lifecycle state should use the mockcard
+		// package's SCP11 mock, which DOES round-trip lifecycle.
+		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0xF1:
 		// GENERATE EC KEY (Yubico extension). Unlike PUT KEY, this
 		// returns response data: Tlv(0xB0, <65-byte uncompressed
