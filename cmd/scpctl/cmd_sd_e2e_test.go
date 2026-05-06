@@ -626,6 +626,216 @@ func TestE2E_SDKeysList_BasicInventory(t *testing.T) {
 	}
 }
 
+// TestE2E_SDKeys_ImportThenList_PostInstallStateVisible drives sd
+// keys import (SCP11 SD path) followed by sd keys list against the
+// same mock instance, and asserts the imported key reference now
+// appears in the inventory output.
+//
+// Before the inventory model was added to the SCP03 mock, this
+// round-trip wasn't observable: GET DATA tag E0 returned a fixed
+// blob advertising only the factory key (0x01/0xFF) regardless of
+// what had been installed. With the inventory model in place, PUT
+// KEY registers at the requested ref and the subsequent KIT
+// response includes it.
+//
+// This is the third class of round-trip E2E coverage on the new
+// sd-keys-cli surface, alongside import→export (cert-store path)
+// and the per-verb APDU-emission tests:
+//
+//  1. APDU-emission tests: did the right wire bytes go out?
+//  2. Cert-store round-trip: write a chain, read it back?
+//  3. (this) Inventory round-trip: install a key, see it listed?
+func TestE2E_SDKeys_ImportThenList_PostInstallStateVisible(t *testing.T) {
+	dir := t.TempDir()
+	priv := genE2EP256Key(t)
+	keyPath := writeE2EKeyPEM(t, dir, priv)
+
+	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
+	connect := func(_ context.Context, _ string) (transport.Transport, error) {
+		return mockCard.Transport(), nil
+	}
+
+	// Phase 1: install an SCP11 SD private key at 0x11/0x03.
+	// (No --certs — focus on inventory visibility, not the
+	// cert-store path which is covered by the import→export
+	// round-trip test.)
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysImport(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "11", "--kvn", "03",
+			"--key-pem", keyPath,
+			"--confirm-write",
+		})
+		if err != nil {
+			t.Fatalf("import phase: %v\n%s", err, buf.String())
+		}
+	}
+
+	// Phase 2: list against the same mock. The imported ref
+	// should now show up alongside the factory SCP03 key.
+	var buf bytes.Buffer
+	env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+	err := cmdSDKeysList(context.Background(), env, []string{
+		"--reader", "fake",
+		"--scp03-keys-default",
+	})
+	if err != nil {
+		t.Fatalf("list phase: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	// Factory key still there.
+	for _, want := range []string{"0x01", "0xFF"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing factory key marker %q\n%s", want, out)
+		}
+	}
+	// Imported key now visible.
+	for _, want := range []string{"0x11", "0x03"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing imported key marker %q\n%s", want, out)
+		}
+	}
+}
+
+// TestE2E_SDKeys_GenerateThenList_PostGenStateVisible drives sd
+// keys generate (which emits GENERATE EC KEY INS=0xF1) and then
+// asserts the generated ref appears in the inventory.
+func TestE2E_SDKeys_GenerateThenList_PostGenStateVisible(t *testing.T) {
+	dir := t.TempDir()
+	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
+	connect := func(_ context.Context, _ string) (transport.Transport, error) {
+		return mockCard.Transport(), nil
+	}
+
+	// Phase 1: generate an on-card EC key at 0x13/0x07.
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysGenerate(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "13", "--kvn", "07",
+			"--out", filepath.Join(dir, "gen.pem"),
+			"--confirm-write",
+		})
+		if err != nil {
+			t.Fatalf("generate phase: %v\n%s", err, buf.String())
+		}
+	}
+
+	// Phase 2: list. The generated ref should now appear.
+	var buf bytes.Buffer
+	env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+	err := cmdSDKeysList(context.Background(), env, []string{
+		"--reader", "fake",
+		"--scp03-keys-default",
+	})
+	if err != nil {
+		t.Fatalf("list phase: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{"0x13", "0x07"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing generated key marker %q\n%s", want, out)
+		}
+	}
+}
+
+// TestE2E_SDKeys_InstallThenDeleteThenList_FullLifecycle exercises
+// the complete install → delete → list flow on a single mock
+// instance. Proves the inventory model handles all three phases:
+//
+//  1. PUT KEY registers the new ref
+//  2. DELETE KEY unregisters it
+//  3. GET DATA tag E0 reflects both transitions
+//
+// This is the most demanding round-trip test of the inventory
+// model: it exercises every mutation path through real CLI verbs,
+// not direct calls to the mock's helpers.
+func TestE2E_SDKeys_InstallThenDeleteThenList_FullLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	priv := genE2EP256Key(t)
+	keyPath := writeE2EKeyPEM(t, dir, priv)
+
+	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
+	connect := func(_ context.Context, _ string) (transport.Transport, error) {
+		return mockCard.Transport(), nil
+	}
+
+	// Phase 1: install at 0x11/0x05.
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysImport(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "11", "--kvn", "05",
+			"--key-pem", keyPath,
+			"--confirm-write",
+		})
+		if err != nil {
+			t.Fatalf("install phase: %v\n%s", err, buf.String())
+		}
+	}
+
+	// Phase 2: list — confirm install is visible.
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		if err := cmdSDKeysList(context.Background(), env, []string{
+			"--reader", "fake", "--scp03-keys-default",
+		}); err != nil {
+			t.Fatalf("list (post-install): %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, "0x11") || !strings.Contains(out, "0x05") {
+			t.Errorf("post-install list missing 0x11/0x05; out:\n%s", out)
+		}
+	}
+
+	// Phase 3: delete 0x11/0x05.
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysDelete(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "11", "--kvn", "05",
+			"--confirm-delete-key",
+		})
+		if err != nil {
+			t.Fatalf("delete phase: %v\n%s", err, buf.String())
+		}
+	}
+
+	// Phase 4: list — confirm delete is reflected. Factory key
+	// must still be there; deleted key must be gone.
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		if err := cmdSDKeysList(context.Background(), env, []string{
+			"--reader", "fake", "--scp03-keys-default",
+		}); err != nil {
+			t.Fatalf("list (post-delete): %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, "0x01") || !strings.Contains(out, "0xFF") {
+			t.Errorf("factory key removed by unrelated delete; out:\n%s", out)
+		}
+		// Both "0x11" and "0x05" must be gone — search for the
+		// pair as a single substring is unreliable (output may
+		// have whitespace), so we check that neither appears.
+		// (The factory key markers 0x01/0xFF can still appear,
+		// but there's no other key with KID=0x11 or KVN=0x05 in
+		// the inventory after delete.)
+		if strings.Contains(out, "0x11") {
+			t.Errorf("deleted KID 0x11 still in list output:\n%s", out)
+		}
+		if strings.Contains(out, "0x05") {
+			t.Errorf("deleted KVN 0x05 still in list output:\n%s", out)
+		}
+	}
+}
+
 // min is provided by the standard library since Go 1.21 but the
 // scp module declares go 1.22; this is here only because some Go
 // linters dislike calls into builtin in the round-trip test above.
