@@ -462,6 +462,12 @@ Subcommands:
                        one key reference to a file. PEM by default,
                        --der for raw concatenated DER. Read-only,
                        unauthenticated.
+  keys delete          Delete one key reference (--kid + --kvn) or
+                       all keys at a KVN (--kvn + --all). Strict
+                       flag validation refuses ambiguous invocations.
+                       Authenticated SCP03; gated on
+                       --confirm-delete-key (NOT --confirm-write).
+                       Dry-run by default.
   allowlist set        Install a certificate-serial-number allowlist
                        for one SCP11 key reference. Replaces any
                        existing allowlist wholesale (full-replace,

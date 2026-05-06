@@ -40,13 +40,15 @@ import (
 // have an established trust path or are inspecting a card.
 func cmdSDKeys(ctx context.Context, env *runEnv, args []string) error {
 	if len(args) == 0 {
-		return &usageError{msg: "scpctl sd keys <list|export> [flags]"}
+		return &usageError{msg: "scpctl sd keys <list|export|delete> [flags]"}
 	}
 	switch args[0] {
 	case "list":
 		return cmdSDKeysList(ctx, env, args[1:])
 	case "export":
 		return cmdSDKeysExport(ctx, env, args[1:])
+	case "delete":
+		return cmdSDKeysDelete(ctx, env, args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(env.out, `scpctl sd keys - Security Domain key inventory and certificate export
 
@@ -59,6 +61,10 @@ Verbs:
   export    Export the certificate chain stored against one key
             reference. PEM by default; --der for raw DER. Read-only.
             Fails when no chain is stored unless --allow-empty.
+  delete    Delete one key reference (--kid + --kvn) or all keys at
+            a given KVN (--kvn + --all). Authenticated SCP03; gated
+            on --confirm-delete-key (NOT --confirm-write). Dry-run
+            by default.
 
 Use "scpctl sd keys <verb> -h" for per-verb flags.
 `)

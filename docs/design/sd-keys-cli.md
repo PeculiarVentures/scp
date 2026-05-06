@@ -258,19 +258,43 @@ Authenticated. Gated on `--confirm-write`. KID-dispatched, with two distinct sem
 
 The library treats SCP11c as `oceAuthenticated=true` (correct per GP — SCP11c is mutual). `ykman` device tests behave as if SCP11c writes are rejected on YubiKey. Possibilities: card-side policy rejects, or `ykman`'s test phrasing reflects a `ykman`-side preference. The right move is **measurement, not refactor**, performed as part of Phase 3.
 
-**Test specifics:**
+**Status:** the lab test is a follow-up commit on this branch. `sd keys delete` (Phase 3 main deliverable) only opens SCP03, so it is not gated on the SCP11c question. The measurement gates only future destructive verbs that would open over SCP11c.
+
+**Test specifics (for the follow-up commit):**
 
 ```text
-1. Open SCP03 against retail YubiKey (in lab profile).
-2. Generate or import a known-disposable SCP11 key reference at
-   a high-numbered KVN (e.g. 0x7E or 0x7F) reserved for the lab.
-3. Close SCP03. Open SCP11c.
-4. Attempt a recoverable management op (STORE CERTIFICATES with a
-   throwaway cert, or DELETE KEY against the disposable ref).
-5. Restore: re-open SCP03 and clean up. Cleanup runs even on
-   failure (defer / t.Cleanup).
-6. Gated on a lab-profile flag (e.g. SCPCTL_LAB_HARDWARE env);
-   SKIP'd in normal CI.
+Build tag: //go:build lab
+Env gates:
+  SCPCTL_LAB_HARDWARE=1   required (belt-and-suspenders)
+  SCPCTL_LAB_READER=...   PC/SC reader substring
+  SCPCTL_LAB_SCP03_*      factory by default; override for rotated labs
+  SCPCTL_LAB_OCE_KEY      PEM, OCE private key for SCP11c open
+  SCPCTL_LAB_OCE_CERT     PEM, OCE leaf cert
+  SCPCTL_LAB_TRUST_ROOT   PEM, card trust root
+
+Library API surface to use:
+  transport/pcsc.OpenReader(name) (*Transport, error)
+  securitydomain.OpenSCP03(ctx, t, *scp03.Config)  → setup/cleanup
+  securitydomain.OpenSCP11(ctx, t, *scp11.Config)  → SCP11c via Variant
+  Session.GenerateECKey, Session.DeleteKey         → install + probe
+
+Sequence:
+  1. OpenSCP03 with factory (or SCPCTL_LAB_SCP03_* override).
+  2. GenerateECKey at kid=0x11 kvn=0x7F (disposable, reserved).
+  3. Close SCP03.
+  4. OpenSCP11 with Variant=SCP11c using OCE key/cert/trust env.
+  5. Probe: DeleteKey against the disposable ref. Record SW.
+  6. t.Cleanup runs SCP03 again to remove the disposable ref;
+     errors during cleanup are t.Errorf so the test result reflects
+     residual card state.
+
+Outcomes (logged for the measurement record, no assertion either way):
+  ACCEPTED → library treatment is vindicated; no policy change.
+  REJECTED → add SecurityDomainWritePolicy keyed on profile +
+             protocol variant before exposing CLI surface that
+             opens SCP11c for writes.
+  SCP11c open itself fails → measurement inconclusive; documented
+             as such (e.g. card profile doesn't support SCP11c).
 ```
 
 If the card rejects, add a profile-aware `SecurityDomainWritePolicy` before exposing CLI surface that opens SCP11c for writes.
