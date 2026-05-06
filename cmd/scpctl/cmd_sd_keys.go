@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -244,9 +245,26 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 			entry.CASKI = hexEncode(ski)
 		}
 
-		certs, err := sd.GetCertificates(ctx, ki.Reference)
+		// Selective cert fetch. SCP03 references never have a
+		// stored certificate chain (they're symmetric key sets),
+		// so issuing a 0xBF21 GET DATA against KID=0x01 is wasted
+		// APDU traffic that always returns SW=6A88. Match ykman's
+		// convention: only fetch certs for cert-capable kinds
+		// (SCP11 SD refs, OCE/CA public-key refs, and unknown
+		// non-canonical KIDs where the operator is explicitly
+		// inspecting an unfamiliar card).
 		checkName := fmt.Sprintf("certificates kid=0x%02X kvn=0x%02X",
 			ki.Reference.ID, ki.Reference.Version)
+		if entry.Kind == "scp03" {
+			report.Skip(checkName, "scp03 ref (no chain expected)")
+			data.Keys = append(data.Keys, entry)
+			continue
+		}
+
+		// Library returns (nil, nil) for SW=6A88 (no chain stored),
+		// which is the common case for SCP11 references that use
+		// bare-key trust rather than chain trust.
+		certs, err := sd.GetCertificates(ctx, ki.Reference)
 		switch {
 		case err != nil:
 			report.Skip(checkName, err.Error())
@@ -414,11 +432,15 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 	data.Certificates = projectCertChain(certs)
 
 	if *outPath != "" {
-		// 0o644: cert chains are public material; they're stored
-		// on the card unauthenticated and routinely included in
-		// TLS handshakes. No need for restrictive perms here, and
-		// 0o600 would surprise scripts that want to chmod later.
-		if err := os.WriteFile(*outPath, body, 0o644); err != nil {
+		// Atomic write: create a sibling temp file, sync, close,
+		// rename into place. A failure between create and rename
+		// leaves only the temp file behind (cleaned up); the final
+		// path is never partially populated. This matters for
+		// automation that uses the existence of the output file as
+		// the success signal — a partial PEM/DER file would be
+		// silently consumed and then fail downstream parsing far
+		// from the cause.
+		if err := writeFileAtomic(*outPath, body, 0o644); err != nil {
 			report.Fail("write file", err.Error())
 			_ = report.Emit(env.out, *jsonMode)
 			return fmt.Errorf("write %s: %w", *outPath, err)
@@ -490,6 +512,49 @@ func openSDForRead(
 	}
 	report.Pass("select ISD", "")
 	return sd, "unauthenticated", nil
+}
+
+// writeFileAtomic writes data to path via a sibling temp file and a
+// rename, so a failure mid-write never leaves a partial file at the
+// final path. The temp file is created in the same directory as the
+// target so the rename is atomic on POSIX filesystems (same-volume
+// constraint). On any error after the temp file is created, the
+// temp file is removed before returning.
+//
+// Mode is applied to the temp file before the rename so the final
+// file lands with the requested permissions in one step.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".scpctl-tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		cleanup()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return fmt.Errorf("rename to final path: %w", err)
+	}
+	return nil
 }
 
 // classifyKID maps a Key ID byte to a human-readable kind label per

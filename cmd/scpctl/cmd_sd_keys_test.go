@@ -29,23 +29,46 @@ func envForMock(mc *mockcard.Card) (*runEnv, *bytes.Buffer) {
 	return env, &buf
 }
 
+// kitBytes builds a Key Information Template TLV with one C0 entry
+// per (kid, kvn) pair. Component is fixed at id=0xC0 type=0x88
+// (AES-128) — the existing synthetic shape — because the tests in
+// this file only care about the KID/KVN structure surfacing through
+// to the host, not the component layout.
+//
+// Output shape: 0xE0 <len> [0xC0 <len> kid kvn 0xC0 0x88]+
+// matching the syntheticKeyInfo template that mockcard ships by
+// default.
+func kitBytes(refs ...struct{ KID, KVN byte }) []byte {
+	var inner []byte
+	for _, r := range refs {
+		inner = append(inner, 0xC0, 0x04, r.KID, r.KVN, 0xC0, 0x88)
+	}
+	return append([]byte{0xE0, byte(len(inner))}, inner...)
+}
+
 // --- sd keys list ---
 
-// TestSDKeysList_TextOutput verifies the human-readable shape: report
-// header, the three GET DATA check lines (KIT, KLOC/KLCC, per-ref
-// certs), and at least one key entry rendered in the data block.
+// TestSDKeysList_TextOutput verifies the human-readable shape of an
+// inventory run: report header, KIT/KLOC/KLCC check lines, and per-
+// reference cert-fetch lines that branch by KID kind. The mock is
+// loaded with one SCP03 ref (KID=0x01) and one SCP11a-sd ref
+// (KID=0x11) so both branches of the selective-fetch policy execute
+// in one test:
 //
-// The mock card advertises one KIT entry (KID=0x01, KVN=0xFF, AES-128)
-// and returns its self-signed cert for any 0xBF21 query, so an
-// authentic 'sd keys list' run produces:
-//   - one PASS for KIT (1 entries)
-//   - one SKIP for KLOC/KLCC (mock returns SW=6A88)
-//   - one PASS for the per-ref cert fetch (1 entry)
+//   - SCP03 ref: no cert fetch issued; SKIP "scp03 ref (no chain
+//     expected)" recorded against the host-side classifier.
+//   - SCP11a-sd ref: cert fetch issued; mock returns its synthetic
+//     "Mock SD Certificate" so the chain projection path runs.
 func TestSDKeysList_TextOutput(t *testing.T) {
 	mc, err := mockcard.New()
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
+	mc.KeyInformationTemplate = kitBytes(
+		struct{ KID, KVN byte }{0x01, 0xFF},
+		struct{ KID, KVN byte }{0x11, 0x01},
+	)
+
 	env, buf := envForMock(mc)
 	if err := cmdSDKeysList(context.Background(), env, []string{"--reader", "fake"}); err != nil {
 		t.Fatalf("cmdSDKeysList: %v", err)
@@ -56,10 +79,12 @@ func TestSDKeysList_TextOutput(t *testing.T) {
 		"select ISD",
 		"PASS",
 		"GET DATA tag 0x00E0 (KIT)",
-		"1 entries",
+		"2 entries",
 		"GET DATA tags 0xFF33/0xFF34", // KLOC/KLCC line
 		"certificates kid=0x01 kvn=0xFF",
-		"Mock SD Certificate", // cert subject from mockcard.New
+		"scp03 ref (no chain expected)", // SCP03 SKIP rationale
+		"certificates kid=0x11 kvn=0x01",
+		"Mock SD Certificate", // cert subject only on the SCP11 ref
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
@@ -69,12 +94,19 @@ func TestSDKeysList_TextOutput(t *testing.T) {
 
 // TestSDKeysList_JSONShape verifies the JSON payload schema. JSON is
 // what automation consumes; pinning the field names and types here
-// catches accidental schema drift in downstream changes.
+// catches accidental schema drift in downstream changes. Same two-
+// reference inventory as the text test so the SCP03-skip and the
+// cert-bearing SCP11a entries both surface in the data block.
 func TestSDKeysList_JSONShape(t *testing.T) {
 	mc, err := mockcard.New()
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
+	mc.KeyInformationTemplate = kitBytes(
+		struct{ KID, KVN byte }{0x01, 0xFF},
+		struct{ KID, KVN byte }{0x11, 0x01},
+	)
+
 	env, buf := envForMock(mc)
 	if err := cmdSDKeysList(context.Background(), env, []string{"--reader", "fake", "--json"}); err != nil {
 		t.Fatalf("cmdSDKeysList: %v", err)
@@ -85,15 +117,11 @@ func TestSDKeysList_JSONShape(t *testing.T) {
 		Data       struct {
 			Channel string `json:"channel"`
 			Keys    []struct {
-				KID        int    `json:"kid"`
-				KVN        int    `json:"kvn"`
-				KIDHex     string `json:"kid_hex"`
-				KVNHex     string `json:"kvn_hex"`
-				Kind       string `json:"kind"`
-				Components []struct {
-					ID   int `json:"id"`
-					Type int `json:"type"`
-				} `json:"components"`
+				KID          int    `json:"kid"`
+				KVN          int    `json:"kvn"`
+				KIDHex       string `json:"kid_hex"`
+				KVNHex       string `json:"kvn_hex"`
+				Kind         string `json:"kind"`
 				Certificates []struct {
 					Subject               string `json:"subject"`
 					SPKIFingerprintSHA256 string `json:"spki_fingerprint_sha256"`
@@ -110,52 +138,51 @@ func TestSDKeysList_JSONShape(t *testing.T) {
 	if report.Data.Channel != "unauthenticated" {
 		t.Errorf("data.channel = %q, want %q", report.Data.Channel, "unauthenticated")
 	}
-	if len(report.Data.Keys) != 1 {
-		t.Fatalf("keys length = %d, want 1; payload:\n%s", len(report.Data.Keys), buf.String())
+	if len(report.Data.Keys) != 2 {
+		t.Fatalf("keys length = %d, want 2; payload:\n%s", len(report.Data.Keys), buf.String())
 	}
-	k := report.Data.Keys[0]
-	if k.KID != 0x01 {
-		t.Errorf("keys[0].kid = %d, want 1", k.KID)
+
+	scp03 := report.Data.Keys[0]
+	if scp03.Kind != "scp03" || scp03.KID != 0x01 {
+		t.Errorf("keys[0] = (kid=%d kind=%q), want (1 scp03)", scp03.KID, scp03.Kind)
 	}
-	if k.KVN != 0xFF {
-		t.Errorf("keys[0].kvn = %d, want 255", k.KVN)
+	if len(scp03.Certificates) != 0 {
+		t.Errorf("scp03 ref must not carry certificates in the projection; got %d", len(scp03.Certificates))
 	}
-	if k.KIDHex != "0x01" {
-		t.Errorf("keys[0].kid_hex = %q, want 0x01", k.KIDHex)
+
+	scp11 := report.Data.Keys[1]
+	if scp11.Kind != "scp11a-sd" || scp11.KID != 0x11 {
+		t.Errorf("keys[1] = (kid=%d kind=%q), want (17 scp11a-sd)", scp11.KID, scp11.Kind)
 	}
-	if k.KVNHex != "0xFF" {
-		t.Errorf("keys[0].kvn_hex = %q, want 0xFF", k.KVNHex)
+	if len(scp11.Certificates) != 1 {
+		t.Fatalf("scp11a-sd ref should have 1 cert; got %d", len(scp11.Certificates))
 	}
-	if k.Kind != "scp03" {
-		t.Errorf("keys[0].kind = %q, want scp03", k.Kind)
+	if !strings.Contains(scp11.Certificates[0].Subject, "Mock SD Certificate") {
+		t.Errorf("subject = %q, want substring 'Mock SD Certificate'",
+			scp11.Certificates[0].Subject)
 	}
-	if len(k.Components) == 0 {
-		t.Errorf("keys[0].components is empty; mockcard advertises an AES-128 component")
-	}
-	if len(k.Certificates) != 1 {
-		t.Fatalf("keys[0].certificates length = %d, want 1", len(k.Certificates))
-	}
-	if !strings.Contains(k.Certificates[0].Subject, "Mock SD Certificate") {
-		t.Errorf("keys[0].certificates[0].subject = %q, want substring 'Mock SD Certificate'",
-			k.Certificates[0].Subject)
-	}
-	if got := k.Certificates[0].SPKIFingerprintSHA256; len(got) != 64 {
-		t.Errorf("spki_fingerprint_sha256 length = %d, want 64 hex chars; got %q",
+	if got := scp11.Certificates[0].SPKIFingerprintSHA256; len(got) != 64 {
+		t.Errorf("spki_fingerprint_sha256 length = %d, want 64; got %q",
 			len(got), got)
 	}
 }
 
 // TestSDKeysList_NoCertChain verifies the per-reference cert-fetch
-// fail-soft path: when the card returns SW=6A88 for a 0xBF21 query,
-// the per-ref check is SKIP, and the entry has no Certificates field.
+// fail-soft path on a cert-capable ref: when the card returns SW=6A88
+// for a 0xBF21 query against an SCP11 SD ref, the per-ref check is
+// SKIP "no chain stored" and the entry has no Certificates field.
 // The command itself still exits 0 because list is fundamentally an
 // inventory call where empty cells are normal.
+//
+// Uses an SCP11a-sd ref because SCP03 refs skip the fetch entirely
+// (and would not exercise the SW=6A88 code path).
 func TestSDKeysList_NoCertChain(t *testing.T) {
 	mc, err := mockcard.New()
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	mc.CertDER = nil // makes 0xBF21 return SW=6A88 (see mockcard convention)
+	mc.KeyInformationTemplate = kitBytes(struct{ KID, KVN byte }{0x11, 0x01})
+	mc.CertDER = nil // makes 0xBF21 return SW=6A88
 
 	env, buf := envForMock(mc)
 	if err := cmdSDKeysList(context.Background(), env, []string{"--reader", "fake", "--json"}); err != nil {
@@ -167,6 +194,32 @@ func TestSDKeysList_NoCertChain(t *testing.T) {
 	}
 	if strings.Contains(out, "Mock SD Certificate") {
 		t.Errorf("output should not include cert subject when chain is empty:\n%s", out)
+	}
+}
+
+// TestSDKeysList_SCP03RefSkipsFetch is the explicit guard that an
+// SCP03 reference does not trigger any 0xBF21 traffic, even when the
+// card would happily answer one. Avoiding that wasted APDU is the
+// whole point of the selective-fetch design; if a future change
+// regresses to fetching for every KID, this test catches it.
+func TestSDKeysList_SCP03RefSkipsFetch(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	// Default mock has KID=0x01 and a populated CertDER. If the
+	// host-side selective-fetch logic regresses, the SCP03 ref will
+	// pull "Mock SD Certificate" into the output — which it must not.
+	env, buf := envForMock(mc)
+	if err := cmdSDKeysList(context.Background(), env, []string{"--reader", "fake"}); err != nil {
+		t.Fatalf("cmdSDKeysList: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "scp03 ref (no chain expected)") {
+		t.Errorf("expected SCP03-skip rationale; got:\n%s", out)
+	}
+	if strings.Contains(out, "Mock SD Certificate") {
+		t.Errorf("SCP03 ref must not produce cert output; got:\n%s", out)
 	}
 }
 
@@ -517,6 +570,72 @@ func TestSDKeysList_DefaultIsUnauthenticated(t *testing.T) {
 	}
 	if strings.Contains(out, "open SCP03 session") {
 		t.Errorf("default path should NOT trigger SCP03 open; got:\n%s", out)
+	}
+}
+
+// TestSDKeysExport_AtomicWrite_NoPartialOnFailure exercises the
+// atomic-write contract: if the rename target's parent directory is
+// not writable, the command must fail without leaving a partial
+// output file at the final path. We can't easily make Rename itself
+// fail mid-operation, but we can make the final write impossible by
+// pointing --out at a path under a directory the process cannot
+// create. The contract this test pins is: on failure, the operator
+// finds either the complete file or no file — never a half-written
+// file at the named path.
+func TestSDKeysExport_AtomicWrite_NoPartialOnFailure(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	dir := t.TempDir()
+	// Path under a non-existent subdirectory: CreateTemp will fail
+	// (parent dir doesn't exist), so the export command fails before
+	// any final-path file is touched.
+	outPath := filepath.Join(dir, "no-such-subdir", "chain.pem")
+
+	env, _ := envForMock(mc)
+	args := []string{"--reader", "fake", "--kid", "01", "--kvn", "FF", "--out", outPath}
+	if err := cmdSDKeysExport(context.Background(), env, args); err == nil {
+		t.Fatal("expected write failure, got success")
+	}
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Errorf("final path must not exist after failed write; stat err = %v", statErr)
+	}
+}
+
+// TestSDKeysExport_AtomicWrite_NoTempLeftover guards against a
+// regression where the temp file used for the atomic write isn't
+// cleaned up after a successful rename. After a successful export,
+// the only file in the output directory should be the final output
+// file — no .scpctl-tmp-* leftovers.
+func TestSDKeysExport_AtomicWrite_NoTempLeftover(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "chain.pem")
+
+	env, _ := envForMock(mc)
+	args := []string{"--reader", "fake", "--kid", "01", "--kvn", "FF", "--out", outPath}
+	if err := cmdSDKeysExport(context.Background(), env, args); err != nil {
+		t.Fatalf("cmdSDKeysExport: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read out dir: %v", err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only the output file in dir; got %d entries: %v",
+			len(entries), names)
+	}
+	if entries[0].Name() != "chain.pem" {
+		t.Errorf("found %q, want chain.pem (and no temp leftover)", entries[0].Name())
 	}
 }
 

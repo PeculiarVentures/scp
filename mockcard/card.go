@@ -182,6 +182,14 @@ type Card struct {
 	RegistryISD       []MockRegistryEntry
 	RegistryApps      []MockRegistryEntry
 	RegistryLoadFiles []MockRegistryEntry
+
+	// KeyInformationTemplate, when non-nil, replaces the synthetic
+	// KIT bytes returned by GET DATA tag 0x00E0. Lets tests exercise
+	// per-KID branches of host-side code (e.g. selective cert fetch
+	// that skips SCP03 references) by advertising whichever key
+	// references they need. Default (nil) preserves the historical
+	// single-SCP03-entry behavior used by existing tests.
+	KeyInformationTemplate []byte
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -682,9 +690,15 @@ func (c *Card) doGetData(cmd *apdu.Command) (*apdu.Response, error) {
 		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
 	case 0x00E0:
 		// Key Information Template. The mock advertises one entry
-		// (KID=0x01, KVN=0xFF, AES-128) so host-side
-		// GetKeyInformation produces a non-empty result.
-		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
+		// (KID=0x01, KVN=0xFF, AES-128) by default so host-side
+		// GetKeyInformation produces a non-empty result. Tests that
+		// need a different layout (e.g. an SCP11 SD ref to exercise
+		// per-KID branches) set KeyInformationTemplate.
+		kit := syntheticKeyInfo
+		if c.KeyInformationTemplate != nil {
+			kit = c.KeyInformationTemplate
+		}
+		return &apdu.Response{Data: append([]byte(nil), kit...), SW1: 0x90, SW2: 0x00}, nil
 	case 0xBF21:
 		// Certificate store. Empty CertDER → SW=6A88 (no chain
 		// stored), mirroring the empty-RegistryISD convention so
