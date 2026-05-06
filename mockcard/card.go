@@ -174,6 +174,12 @@ type Card struct {
 	RegistryISD       []MockRegistryEntry
 	RegistryApps      []MockRegistryEntry
 	RegistryLoadFiles []MockRegistryEntry
+
+	// loadCtx tracks in-flight INSTALL [for load] state across the
+	// LOAD command sequence. Nil when no load is in progress;
+	// populated by doInstallForLoad and cleared by the final LOAD
+	// block. See mockcard/install.go for the state machine.
+	loadCtx *installLoadContext
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -317,6 +323,15 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 
 	case 0xF0: // GP §11.1.10 SET STATUS
 		return c.doSetStatus(cmd)
+
+	case 0xE6: // GP §11.5 INSTALL (for load + for install variants)
+		return c.doInstall(cmd)
+
+	case 0xE8: // GP §11.6 LOAD (CAP component bytes streamed in chunks)
+		return c.doLoad(cmd)
+
+	case 0xE4: // GP §11.2 DELETE
+		return c.doDelete(cmd)
 
 	case 0xE2: // GP §11.11 STORE DATA
 		// Mock just acknowledges — validating wire format is the
