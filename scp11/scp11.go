@@ -195,12 +195,22 @@ type Config struct {
 	// verify the key against the SD, then open SCP11 against PIV with
 	// the key already in hand.
 	//
-	// Setting this field does NOT bypass the trust posture requirement.
-	// One of CardTrustPolicy, CardTrustAnchors, or
-	// InsecureSkipCardAuthentication must still be set — the field
-	// asserts "key already obtained," not "trust validation already
-	// completed." Callers that have validated upstream should set
-	// InsecureSkipCardAuthentication to declare that explicitly.
+	// Trust-posture pairing.
+	//
+	// Setting this field bypasses the in-library chain-validation
+	// path entirely — there is no cert fetch and no chain for
+	// CardTrustPolicy or CardTrustAnchors to validate against
+	// (Policy validates a cert chain, not a bare pubkey). Open
+	// rejects the combination of PreverifiedCardStaticPublicKey with
+	// CardTrustPolicy or CardTrustAnchors with ErrInvalidConfig.
+	//
+	// Callers using this field MUST set InsecureSkipCardAuthentication
+	// = true as the trust-posture marker. The "Insecure" in the name
+	// is loud on purpose: the in-library validation is being
+	// deliberately bypassed, the asserted assumption being that the
+	// caller validated upstream (e.g. via
+	// securitydomain.FetchCardPublicKey applying their trust policy
+	// to the SD's cert chain before extracting the leaf pubkey).
 	PreverifiedCardStaticPublicKey *ecdh.PublicKey
 
 	// HostID is the optional OCE identifier included in the KDF shared
@@ -476,6 +486,35 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 			"%w: SCP11 requires an explicit trust posture: set CardTrustPolicy "+
 				"or CardTrustAnchors for production, or InsecureSkipCardAuthentication "+
 				"for lab use",
+			ErrInvalidConfig,
+		)
+	}
+
+	// Reject the trust-posture/preverified-key combination. When
+	// PreverifiedCardStaticPublicKey is set the in-library chain-
+	// validation path (GET DATA BF21 → trust.ValidateSCP11Chain) is
+	// skipped entirely — there is no chain available for
+	// CardTrustPolicy or CardTrustAnchors to validate against. A
+	// caller setting both fields is most likely confused about
+	// which path applies, expecting the policy to validate the
+	// pre-supplied key (it can't — Policy validates a cert chain,
+	// not a bare pubkey). Fail closed with a clear message rather
+	// than silently bypassing the policy. Callers that have
+	// validated upstream (e.g. via securitydomain.FetchCardPublicKey
+	// applying their CardTrustPolicy to the SD's cert chain before
+	// extracting the leaf pubkey) should set InsecureSkipCard-
+	// Authentication=true on this second Open as the trust-posture
+	// marker — the "Insecure" in the name is loud on purpose, since
+	// the in-library validation is being deliberately bypassed.
+	if cfg.PreverifiedCardStaticPublicKey != nil &&
+		(cfg.CardTrustPolicy != nil || cfg.CardTrustAnchors != nil) {
+		return nil, fmt.Errorf(
+			"%w: PreverifiedCardStaticPublicKey is incompatible with "+
+				"CardTrustPolicy or CardTrustAnchors — Policy validates a cert "+
+				"chain, but the preverified path skips the cert fetch. Either "+
+				"drop PreverifiedCardStaticPublicKey to use library chain "+
+				"validation, or keep it and set InsecureSkipCardAuthentication=true "+
+				"as the posture marker (validation already happened out-of-band)",
 			ErrInvalidConfig,
 		)
 	}
