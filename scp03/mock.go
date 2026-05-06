@@ -61,6 +61,30 @@ type MockCard struct {
 	// at the assembled-command boundary, exactly like retail
 	// hardware does.
 	chainBuffer []byte
+
+	// certStore holds cert chains written via STORE DATA tag
+	// 0xBF21 + key reference. Read back via GET DATA tag 0xBF21
+	// + the same key reference. The key is the wire-encoded
+	// (KID<<8 | KVN) for a small fixed-size hash key.
+	//
+	// The mock previously had no cert-store persistence — STORE
+	// DATA was a record-and-9000 no-op and GET DATA tag 0xBF21
+	// returned 6A88. That's fine for tests that only assert the
+	// write APDU shape, but it blocks any test that wants to
+	// round-trip a chain (write then read on the same mock
+	// instance) — including the SCP11 cert-store flow used by
+	// bootstrap-scp11a-sd's chain validation step. Fixing the
+	// gap here makes the mock a faithful simulator of the
+	// cert-store life cycle, not just an APDU recorder.
+	//
+	// Stored bytes are the raw concatenated DER from the
+	// BF21{...} payload — we don't re-wrap on read because the
+	// library's parseCertificates accepts both the BF21-wrapped
+	// and bare 0x30-prefixed concatenated DER shapes. We return
+	// BF21{stored} to match what storeCertificatesData put on
+	// the wire originally; that round-trips cleanly through
+	// parseCertificates on the way back.
+	certStore map[uint16][]byte
 }
 
 type mockSession struct {
@@ -158,7 +182,7 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 		// real cards typically permit CRD probe before any session.
 		// Other tags require secure messaging.
 		if cmd.P1 == 0x00 && cmd.P2 == 0x66 {
-			return c.doGetData(cmd.P1, cmd.P2)
+			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
 		}
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil // security status not satisfied
 	default:
@@ -373,17 +397,28 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 	case 0xFD: // Echo (test)
 		return &apdu.Response{Data: data, SW1: 0x90, SW2: 0x00}, nil
 	case 0xCA: // GET DATA
-		return c.doGetData(p1, p2)
+		return c.doGetData(p1, p2, data)
 	case 0xE2, 0xE4:
 		// STORE DATA (0xE2), DELETE KEY (0xE4) — the OCE-write
 		// commands the bootstrap-oce CLI issues. The mock records
 		// each write so tests can assert the host sent the right
 		// shape; the response is unconditionally 9000 because
 		// validating wire format is the securitydomain package's
-		// job, not the mock's. (The mock does not persist anything
-		// — a follow-up GET DATA against the same key reference
-		// will not return what was just PUT.)
+		// job, not the mock's. (Most STORE DATA shapes are pure
+		// recording — the mock has no persistence for allowlists
+		// or CA-issuer SKIs because no test currently rounds them
+		// trip via GET DATA against the same mock instance.)
 		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		if ins == 0xE2 {
+			// Cert-chain STORE DATA is the one shape we DO persist:
+			// it round-trips with GET DATA tag BF21 in the same
+			// session, which is the bootstrap-scp11a-sd chain-
+			// validation flow. tryStoreCertChain returns true when
+			// the body matches A6{83{KID,KVN}} || BF21{certs}; for
+			// other STORE DATA shapes (allowlist, CA issuer, etc.)
+			// it returns false and we fall through to plain 9000.
+			c.tryStoreCertChain(data)
+		}
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0xD8:
 		// PUT KEY (GP §11.8). Three flavors land here, each with a
@@ -466,25 +501,27 @@ func (c *MockCard) Recorded() []RecordedAPDU {
 }
 
 // doGetData answers the small set of GET DATA tags the host code in
-// this repo issues during smoke and integration tests:
-//
-//   - 0x0066 — Card Recognition Data (a synthetic GP 2.3.1 / SCP03
-//     i=0x65 blob, same shape as the cardrecognition package's
-//     test fixtures).
-//   - 0x00E0 — Key Information Template (one C0 entry: KID=0x01,
-//     KVN=0xFF, component {0x88: 0x10} — AES-128 marker).
-//
-// Other tags return 6A88 (reference data not found), matching real
-// card behavior. The mock does not attempt to be exhaustive — it
-// covers the GP §H.2 + §11.3.3.1 reads the host's Session methods
-// (GetCardRecognitionData, GetKeyInformation) actually issue.
-func (c *MockCard) doGetData(p1, p2 byte) (*apdu.Response, error) {
+// this repo issues during smoke and integration tests. requestBody
+// is the GET DATA body (typically empty for tag-only reads, but
+// non-empty for tag BF21 which carries the key reference of the
+// chain to fetch). Callers without a body pass nil.
+func (c *MockCard) doGetData(p1, p2 byte, requestBody []byte) (*apdu.Response, error) {
 	tag := uint16(p1)<<8 | uint16(p2)
 	switch tag {
 	case 0x0066:
 		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
 	case 0x00E0:
 		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
+	case 0xBF21:
+		// Cert store read: parse key reference from request body,
+		// look up against the persisted certStore map. The library
+		// returns 6A88 for "no chain stored" via parseCertificates;
+		// we mirror that exactly.
+		stored, ok := c.lookupCertChain(requestBody)
+		if !ok {
+			return &apdu.Response{SW1: 0x6A, SW2: 0x88}, nil
+		}
+		return &apdu.Response{Data: stored, SW1: 0x90, SW2: 0x00}, nil
 	default:
 		return &apdu.Response{SW1: 0x6A, SW2: 0x88}, nil // reference data not found
 	}
@@ -716,4 +753,110 @@ func decryptOneAESBlockWithEncrypt(key, plaintext, out []byte) {
 	iv := make([]byte, aes.BlockSize)
 	enc := cipher.NewCBCEncrypter(block, iv)
 	enc.CryptBlocks(out, plaintext)
+}
+
+// tryStoreCertChain inspects a STORE DATA body for the cert-chain
+// shape (A6{83{KID,KVN}} || BF21{cert_DER_concat}) and persists it
+// to the cert store on hit. Returns true on hit, false on any other
+// shape (allowlist, CA-issuer SKI, etc.) — the caller falls back to
+// the plain record-and-9000 behavior for non-cert STORE DATA.
+//
+// We don't enforce the exact tag order or insist on no other tags
+// being present; the parser walks top-level nodes and pairs the
+// first A6 (control reference) with the first BF21 (cert store) it
+// sees. This matches storeCertificatesData's emission order
+// (A6 first, BF21 second) without breaking on potential future
+// shapes that interleave additional tags.
+//
+// Persisting the BF21 *value* (the concatenated DER bytes) — not
+// the wrapper — keeps the storage canonical. On read we re-wrap
+// in BF21 so the response matches the on-the-wire shape that
+// parseCertificates round-trips cleanly.
+func (c *MockCard) tryStoreCertChain(body []byte) bool {
+	nodes, err := tlv.Decode(body)
+	if err != nil {
+		return false
+	}
+	ref, refOK := extractKeyRefFromControlRef(nodes)
+	if !refOK {
+		return false
+	}
+	store := tlv.Find(nodes, tlv.Tag(0xBF21))
+	if store == nil || len(store.Value) == 0 {
+		return false
+	}
+	if c.certStore == nil {
+		c.certStore = make(map[uint16][]byte)
+	}
+	c.certStore[refKey(ref)] = append([]byte(nil), store.Value...)
+	return true
+}
+
+// lookupCertChain parses a key reference from a GET DATA tag BF21
+// request body and returns the BF21-wrapped stored chain bytes if
+// present. Returns (nil, false) if no chain is stored at that ref or
+// the request body is malformed; caller surfaces this as 6A88, the
+// same status real cards return when no cert is stored at the
+// requested reference.
+//
+// We re-wrap the stored bytes in BF21 on read because that's what
+// storeCertificatesData put on the wire originally and what the
+// library's parseCertificates expects to round-trip. Keeping the
+// store canonical (DER concat, no wrapper) and re-wrapping on read
+// avoids redundant wrap/unwrap state in the storage map.
+func (c *MockCard) lookupCertChain(reqBody []byte) ([]byte, bool) {
+	if len(c.certStore) == 0 {
+		return nil, false
+	}
+	nodes, err := tlv.Decode(reqBody)
+	if err != nil {
+		return nil, false
+	}
+	ref, ok := extractKeyRefFromControlRef(nodes)
+	if !ok {
+		return nil, false
+	}
+	stored, ok := c.certStore[refKey(ref)]
+	if !ok {
+		return nil, false
+	}
+	return tlv.Build(tlv.Tag(0xBF21), stored).Encode(), true
+}
+
+// keyRef holds (KID, KVN) in a small fixed-size struct usable as a
+// map key. Unlike securitydomain.KeyReference this is package-local
+// to avoid pulling securitydomain into scp03 (would create an import
+// cycle: securitydomain imports scp03 already).
+type keyRef struct {
+	KID byte
+	KVN byte
+}
+
+// refKey packs (KID, KVN) into a uint16 for use as a map key.
+// MSB = KID, LSB = KVN. The compact form keeps the certStore map
+// small even with many keys.
+func refKey(r keyRef) uint16 {
+	return uint16(r.KID)<<8 | uint16(r.KVN)
+}
+
+// extractKeyRefFromControlRef walks a TLV node list looking for
+// A6 { 83 { KID, KVN } } and returns the parsed key reference.
+// Returns (zero, false) if the shape doesn't match or 83's value
+// isn't exactly two bytes.
+//
+// The control-reference tag (A6) wraps key-management TLVs
+// throughout SCP11: storeCertificatesData, storeCaIssuerData, and
+// buildKeyRefTLV all emit A6{83{KID,KVN}} as the address field.
+// Centralizing the parser here means all three paths (store certs,
+// store CA issuer, get certs) extract the ref the same way.
+func extractKeyRefFromControlRef(nodes []*tlv.Node) (keyRef, bool) {
+	ctrl := tlv.Find(nodes, tlv.Tag(0xA6))
+	if ctrl == nil {
+		return keyRef{}, false
+	}
+	keyID := tlv.Find(ctrl.Children, tlv.Tag(0x83))
+	if keyID == nil || len(keyID.Value) != 2 {
+		return keyRef{}, false
+	}
+	return keyRef{KID: keyID.Value[0], KVN: keyID.Value[1]}, true
 }
