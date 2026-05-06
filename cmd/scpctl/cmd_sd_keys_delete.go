@@ -75,6 +75,14 @@ func cmdSDKeysDelete(ctx context.Context, env *runEnv, args []string) error {
 			"careless script that authorizes ordinary writes cannot trigger "+
 			"deletion. Without this flag, sd keys delete runs in dry-run "+
 			"mode (validates inputs, reports planned action, exits 0).")
+	allowOrphan := fs.Bool("allow-orphan-auth", false,
+		"Permit a delete that would leave the card with zero SCP03 keysets "+
+			"installed. Without this flag, sd keys delete pre-fetches the "+
+			"inventory and refuses if the deletion would remove the last "+
+			"SCP03 keyset (KID=0x01) — that's the foot-gun case where the "+
+			"operator loses the only authentication path and can no longer "+
+			"manage the card. Pass this flag deliberately when rotating to "+
+			"a non-SCP03 auth model or when intentionally retiring the SD.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -163,6 +171,49 @@ func cmdSDKeysDelete(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
 
+	// Pre-flight orphan check. The foot-gun case: operator deletes
+	// the only SCP03 keyset on the card and locks themselves out
+	// of any subsequent management because no auth path remains.
+	// Pre-fetch the inventory, count SCP03 keysets that would
+	// remain after the planned delete, and refuse the operation
+	// when the count drops to zero — unless the operator has
+	// explicitly acknowledged the consequence with
+	// --allow-orphan-auth.
+	//
+	// We don't extend the check to SCP11 SD slots because an SCP11
+	// SD key on the card alone isn't an auth path the operator can
+	// reach: SCP11 needs both the SD key AND OCE credentials AND
+	// trust-anchor agreement. SCP03 is the simplest and most
+	// reliable indicator of "can I still authenticate to this
+	// card?" — protecting it captures the realistic foot-gun.
+	//
+	// Pre-fetch failure isn't fatal. If GetKeyInformation can't
+	// read the KIT (some cards gate it; some applets don't
+	// implement it), we log a SKIP and proceed — destructive ops
+	// shouldn't block on failed inquiry. The operator already
+	// passed --confirm-delete-key.
+	if !*allowOrphan {
+		preDelete, err := sd.GetKeyInformation(ctx)
+		switch {
+		case err != nil:
+			report.Skip("orphan-auth pre-flight check",
+				fmt.Sprintf("GetKeyInformation failed (%v); proceeding without pre-flight", err))
+		default:
+			scp03After := countSCP03After(preDelete, mode, kid, kvn)
+			scp03Before := countSCP03(preDelete)
+			if scp03Before > 0 && scp03After == 0 {
+				report.Fail("orphan-auth pre-flight check",
+					fmt.Sprintf("delete would leave card with zero SCP03 keysets (had %d, would have 0); "+
+						"this removes the only authentication path. Pass --allow-orphan-auth to proceed.",
+						scp03Before))
+				_ = report.Emit(env.out, *jsonMode)
+				return fmt.Errorf("sd keys delete: would orphan card auth; pass --allow-orphan-auth if intended")
+			}
+			report.Pass("orphan-auth pre-flight check",
+				fmt.Sprintf("%d SCP03 keyset(s) would remain after delete", scp03After))
+		}
+	}
+
 	var checkName string
 	switch mode {
 	case "single":
@@ -185,4 +236,65 @@ func cmdSDKeysDelete(ctx context.Context, env *runEnv, args []string) error {
 		return fmt.Errorf("sd keys delete reported failures")
 	}
 	return nil
+}
+
+// countSCP03 returns the number of SCP03 keyset entries (KID=0x01)
+// in the given KIT slice. SCP03 keysets are identified by the
+// canonical KID=0x01 — every YubiKey-tested card uses this; a
+// hypothetical non-standard card that puts SCP03 elsewhere would
+// fall outside this check, but no such card has been encountered
+// in practice.
+func countSCP03(keys []securitydomain.KeyInfo) int {
+	n := 0
+	for _, k := range keys {
+		if k.Reference.ID == securitydomain.KeyIDSCP03 {
+			n++
+		}
+	}
+	return n
+}
+
+// countSCP03After computes how many SCP03 keysets would remain in
+// the inventory after the planned delete is applied. The mode,
+// kid, kvn arguments mirror the cmdSDKeysDelete dispatch:
+//
+//   - mode "single", kid==0x01, kvn==X → -1 if (0x01, X) is currently
+//     present (else no change, the entry doesn't exist)
+//   - mode "single", kid!=0x01 → no change (deleting a non-SCP03 ref
+//     can't affect the SCP03 count)
+//   - mode "all-at-kvn", kvn==X → -count of (0x01, X) entries
+//
+// The function is total over the inputs the dispatch would emit;
+// other (mode, kid, kvn) combinations get rejected at flag-parse
+// time before they reach this code path.
+func countSCP03After(keys []securitydomain.KeyInfo, mode string, kid, kvn byte) int {
+	current := countSCP03(keys)
+	switch mode {
+	case "single":
+		if kid != securitydomain.KeyIDSCP03 {
+			return current
+		}
+		// Single-ref delete of an SCP03 keyset at KVN. -1 if it's
+		// installed; no change if the operator is asking to delete
+		// something that isn't there.
+		for _, k := range keys {
+			if k.Reference.ID == securitydomain.KeyIDSCP03 && k.Reference.Version == kvn {
+				return current - 1
+			}
+		}
+		return current
+	case "all-at-kvn":
+		// Every key at the named KVN is removed, including any
+		// SCP03 keyset at that KVN.
+		removed := 0
+		for _, k := range keys {
+			if k.Reference.ID == securitydomain.KeyIDSCP03 && k.Reference.Version == kvn {
+				removed++
+			}
+		}
+		return current - removed
+	default:
+		// Unreachable given the dispatch's flag validation.
+		return current
+	}
 }

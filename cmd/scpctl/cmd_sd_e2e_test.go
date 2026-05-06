@@ -626,7 +626,155 @@ func TestE2E_SDKeysList_BasicInventory(t *testing.T) {
 	}
 }
 
-// TestE2E_SDKeys_ImportThenList_PostInstallStateVisible drives sd
+// TestE2E_SDKeysDelete_OrphanAuth_Refused exercises the foot-gun
+// guard: deleting the only SCP03 keyset on a card removes the
+// only authentication path. Without --allow-orphan-auth the
+// delete must be refused before the destructive APDU is sent;
+// the recorded APDU log must show no DELETE KEY (INS=0xE4) for
+// the key the operator named.
+//
+// Default mock inventory has one SCP03 keyset at 0x01/0xFF.
+// Asking to delete that exact ref should fail with an
+// orphan-auth error and emit no DELETE KEY APDU.
+func TestE2E_SDKeysDelete_OrphanAuth_Refused(t *testing.T) {
+	env, buf, mockCard := envForSCP03Mock(t)
+	err := cmdSDKeysDelete(context.Background(), env, []string{
+		"--reader", "fake",
+		"--kid", "01", "--kvn", "FF",
+		"--confirm-delete-key",
+	})
+	if err == nil {
+		t.Fatalf("expected orphan-auth refusal, got success\n%s", buf.String())
+	}
+	if !strings.Contains(err.Error(), "orphan") {
+		t.Errorf("expected orphan-auth diagnostic in error, got %q", err.Error())
+	}
+	// CRITICAL: no DELETE KEY APDU should have hit the card.
+	if recordedAPDUWithINS(mockCard.Recorded(), 0xE4) != nil {
+		t.Errorf("orphan-auth refusal must occur BEFORE DELETE KEY emission; got APDU: %+v",
+			mockCard.Recorded())
+	}
+}
+
+// TestE2E_SDKeysDelete_OrphanAuth_BypassFlag confirms
+// --allow-orphan-auth lets the delete through. The operator has
+// explicitly acknowledged the consequence; no soft-block should
+// stand in the way.
+func TestE2E_SDKeysDelete_OrphanAuth_BypassFlag(t *testing.T) {
+	env, buf, mockCard := envForSCP03Mock(t)
+	err := cmdSDKeysDelete(context.Background(), env, []string{
+		"--reader", "fake",
+		"--kid", "01", "--kvn", "FF",
+		"--confirm-delete-key",
+		"--allow-orphan-auth",
+	})
+	if err != nil {
+		t.Fatalf("expected orphan-bypass success, got %v\n%s", err, buf.String())
+	}
+	if recordedAPDUWithINS(mockCard.Recorded(), 0xE4) == nil {
+		t.Errorf("--allow-orphan-auth path should emit DELETE KEY; got %+v",
+			mockCard.Recorded())
+	}
+}
+
+// TestE2E_SDKeysDelete_NonSCP03_NoOrphanCheckTrigger confirms the
+// orphan check doesn't fire when the targeted ref isn't SCP03 —
+// deleting an SCP11 SD slot or a trust anchor doesn't affect the
+// SCP03 keyset count, so the check passes regardless of inventory
+// state.
+//
+// Mock has only the factory SCP03 key (0x01/0xFF). Operator asks
+// to delete 0x11/0x03 (an SCP11 SD slot that isn't even installed
+// on the mock — a no-op delete on a real card). Orphan check
+// must compute "SCP03 count unchanged" and let the delete
+// through without requiring --allow-orphan-auth.
+func TestE2E_SDKeysDelete_NonSCP03_NoOrphanCheckTrigger(t *testing.T) {
+	env, buf, mockCard := envForSCP03Mock(t)
+	err := cmdSDKeysDelete(context.Background(), env, []string{
+		"--reader", "fake",
+		"--kid", "11", "--kvn", "03",
+		"--confirm-delete-key",
+	})
+	if err != nil {
+		t.Fatalf("delete of non-SCP03 ref should pass orphan check; got %v\n%s",
+			err, buf.String())
+	}
+	if recordedAPDUWithINS(mockCard.Recorded(), 0xE4) == nil {
+		t.Errorf("expected DELETE KEY APDU for non-SCP03 ref; got %+v",
+			mockCard.Recorded())
+	}
+}
+
+// TestE2E_SDKeysDelete_OrphanAuth_TwoKeysetsThenDeleteOne is the
+// realistic key-rotation lifecycle: operator installs a new SCP03
+// keyset alongside the factory one, then deletes the old factory.
+// Inventory pre-delete has 2 SCP03 entries; post-delete has 1.
+// Orphan check must allow this — there's still one SCP03 keyset
+// remaining for the operator to authenticate against.
+func TestE2E_SDKeysDelete_OrphanAuth_TwoKeysetsThenDeleteOne(t *testing.T) {
+	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
+	connect := func(_ context.Context, _ string) (transport.Transport, error) {
+		return mockCard.Transport(), nil
+	}
+
+	// Phase 1: install a second SCP03 keyset at KVN=0xFE (new).
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysImport(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "01", "--kvn", "FE",
+			"--new-scp03-enc", "00112233445566778899AABBCCDDEEFF",
+			"--new-scp03-mac", "11223344556677889900AABBCCDDEEFF",
+			"--new-scp03-dek", "22334455667788990011AABBCCDDEEFF",
+			"--confirm-write",
+		})
+		if err != nil {
+			t.Fatalf("install second keyset: %v\n%s", err, buf.String())
+		}
+	}
+
+	// Phase 2: delete the factory keyset at KVN=0xFF. Pre-delete
+	// inventory has 2 SCP03 keysets; post-delete has 1. Orphan
+	// check should allow.
+	var buf bytes.Buffer
+	env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+	err := cmdSDKeysDelete(context.Background(), env, []string{
+		"--reader", "fake",
+		"--kid", "01", "--kvn", "FF",
+		"--confirm-delete-key",
+	})
+	if err != nil {
+		t.Fatalf("delete should succeed when another SCP03 keyset remains; got %v\n%s",
+			err, buf.String())
+	}
+}
+
+// TestE2E_SDKeysDelete_OrphanAuth_AllAtKVN_FactoryRefused is the
+// all-at-KVN variant of the orphan check: deleting every key at
+// the factory KVN (0xFF) must trigger the same refusal because
+// the factory SCP03 keyset lives at 0xFF and would be removed.
+func TestE2E_SDKeysDelete_OrphanAuth_AllAtKVN_FactoryRefused(t *testing.T) {
+	env, buf, mockCard := envForSCP03Mock(t)
+	err := cmdSDKeysDelete(context.Background(), env, []string{
+		"--reader", "fake",
+		"--kvn", "FF", "--all",
+		"--confirm-delete-key",
+	})
+	if err == nil {
+		t.Fatalf("expected orphan-auth refusal for --all on factory KVN, got success\n%s",
+			buf.String())
+	}
+	if !strings.Contains(err.Error(), "orphan") {
+		t.Errorf("expected orphan-auth diagnostic, got %q", err.Error())
+	}
+	if recordedAPDUWithINS(mockCard.Recorded(), 0xE4) != nil {
+		t.Errorf("--all orphan refusal must occur before APDU emission; got %+v",
+			mockCard.Recorded())
+	}
+}
+
+
 // keys import (SCP11 SD path) followed by sd keys list against the
 // same mock instance, and asserts the imported key reference now
 // appears in the inventory output.
