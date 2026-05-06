@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/x509"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/trust"
 )
 
 // TestOpen_PreverifiedKey_SkipsBF21 is the regression assertion for
@@ -33,8 +35,8 @@ func TestOpen_PreverifiedKey_SkipsBF21(t *testing.T) {
 		// doesn't decode as a valid AUTHENTICATE response, and that
 		// failure is the exit point for the test.
 		responses: [][]byte{
-			{0x90, 0x00},                   // SELECT response
-			{0x00, 0x00, 0x6A, 0x80},       // AUTHENTICATE: malformed, fail-stop
+			{0x90, 0x00},             // SELECT response
+			{0x00, 0x00, 0x6A, 0x80}, // AUTHENTICATE: malformed, fail-stop
 		},
 	}
 
@@ -164,7 +166,7 @@ func (n *noBF21Transport) fetch() (*apdu.Response, error) {
 	return apdu.ParseResponse(raw)
 }
 
-func (n *noBF21Transport) Close() error                       { return nil }
+func (n *noBF21Transport) Close() error { return nil }
 func (n *noBF21Transport) TrustBoundary() transport.TrustBoundary {
 	return transport.TrustBoundaryUnknown
 }
@@ -196,4 +198,93 @@ func mustGenerateP256ECDHPub(t *testing.T) *ecdh.PublicKey {
 		t.Fatalf("generate P-256 ECDH key: %v", err)
 	}
 	return priv.PublicKey()
+}
+
+// TestOpen_PreverifiedKey_RejectsCardTrustPolicy asserts that a
+// caller setting both PreverifiedCardStaticPublicKey AND
+// CardTrustPolicy is failed closed. The combination is incoherent —
+// the preverified path skips the cert-fetch, so there is no chain
+// for CardTrustPolicy to validate against. Earlier the policy was
+// silently dropped, which made the API look like it would validate
+// the supplied pubkey when in fact validation was bypassed. The
+// rejection forces the caller to make the trust posture explicit:
+// either drop the preverified key (so the policy actually runs
+// against a fetched chain) or set InsecureSkipCardAuthentication=true
+// to acknowledge the validation already happened upstream.
+func TestOpen_PreverifiedKey_RejectsCardTrustPolicy(t *testing.T) {
+	pubKey := mustGenerateP256ECDHPub(t)
+
+	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg.SelectAID = AIDPIV
+	cfg.PreverifiedCardStaticPublicKey = pubKey
+	cfg.CardTrustPolicy = &trust.Policy{Roots: x509.NewCertPool()}
+
+	_, err := Open(context.Background(), &noBF21Transport{}, cfg)
+	if err == nil {
+		t.Fatal("Open succeeded with both PreverifiedCardStaticPublicKey and CardTrustPolicy set; the combination must be rejected")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("error should wrap ErrInvalidConfig; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "PreverifiedCardStaticPublicKey") {
+		t.Errorf("error should name the offending field; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "InsecureSkipCardAuthentication") {
+		t.Errorf("error should suggest InsecureSkipCardAuthentication as the alternative; got: %v", err)
+	}
+}
+
+// TestOpen_PreverifiedKey_RejectsCardTrustAnchors mirrors the
+// CardTrustPolicy rejection for the anchors path. Same rationale:
+// the preverified path skips the cert fetch; CardTrustAnchors has
+// no chain to validate.
+func TestOpen_PreverifiedKey_RejectsCardTrustAnchors(t *testing.T) {
+	pubKey := mustGenerateP256ECDHPub(t)
+
+	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg.SelectAID = AIDPIV
+	cfg.PreverifiedCardStaticPublicKey = pubKey
+	cfg.CardTrustAnchors = x509.NewCertPool()
+
+	_, err := Open(context.Background(), &noBF21Transport{}, cfg)
+	if err == nil {
+		t.Fatal("Open succeeded with both PreverifiedCardStaticPublicKey and CardTrustAnchors set; the combination must be rejected")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("error should wrap ErrInvalidConfig; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "PreverifiedCardStaticPublicKey") {
+		t.Errorf("error should name the offending field; got: %v", err)
+	}
+}
+
+// TestOpen_PreverifiedKey_AcceptsInsecureSkipCardAuthentication is
+// the inverse pin: the documented happy-path pairing must continue
+// to work. The handshake won't complete against the canned-response
+// transport (intentionally — we just need Open to get past config
+// validation), but the failure must NOT come from ErrInvalidConfig.
+// If a future refactor accidentally tightens the rejection rule and
+// also blocks this combination, this test catches it.
+func TestOpen_PreverifiedKey_AcceptsInsecureSkipCardAuthentication(t *testing.T) {
+	pubKey := mustGenerateP256ECDHPub(t)
+
+	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg.SelectAID = AIDPIV
+	cfg.PreverifiedCardStaticPublicKey = pubKey
+	cfg.InsecureSkipCardAuthentication = true
+
+	_, err := Open(context.Background(), &noBF21Transport{
+		responses: [][]byte{
+			{0x90, 0x00},             // SELECT response
+			{0x00, 0x00, 0x6A, 0x80}, // AUTHENTICATE: malformed, fail-stop
+		},
+	}, cfg)
+	if err == nil {
+		t.Fatal("Open unexpectedly succeeded; expected handshake failure downstream of config validation")
+	}
+	if errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("Open rejected the documented happy-path pairing "+
+			"(PreverifiedCardStaticPublicKey + InsecureSkipCardAuthentication) "+
+			"with ErrInvalidConfig; this combination must be accepted: %v", err)
+	}
 }

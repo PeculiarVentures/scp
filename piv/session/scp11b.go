@@ -114,9 +114,18 @@ func OpenSCP11bPIV(
 	cfg := scp11.YubiKeyDefaultSCP11bConfig()
 	cfg.SelectAID = scp11.AIDPIV
 	cfg.ApplicationAID = nil
-	cfg.CardTrustPolicy = opts.CardTrustPolicy
-	cfg.InsecureSkipCardAuthentication = opts.InsecureSkipCardAuthentication
 	cfg.PreverifiedCardStaticPublicKey = pubKey
+	// The trust policy/anchors (if any) were applied inside
+	// resolveCardStaticPublicKey above against the SD's cert chain;
+	// pubKey is the validated leaf. The second Open against PIV
+	// skips the cert-fetch path and uses pubKey directly, so
+	// passing the policy through to scp11.Open here would be
+	// rejected as a contradiction (and was a no-op previously, since
+	// the preverified path bypasses chain validation regardless).
+	// InsecureSkipCardAuthentication=true is the trust-posture
+	// marker that says "validation already happened out-of-band";
+	// the loud name is deliberate.
+	cfg.InsecureSkipCardAuthentication = true
 
 	scpSess, err := scp11.Open(ctx, t, cfg)
 	if err != nil {

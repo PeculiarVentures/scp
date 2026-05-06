@@ -9,7 +9,10 @@
 // This file provides the SD-side fetch path: select the SD
 // unauthenticated, GET DATA BF21 for a key reference, validate the
 // returned chain, and extract the leaf's ECDH public key. The returned
-// key is what scp11.Config.PreverifiedCardStaticPublicKey wants.
+// key is what scp11.Config.PreverifiedCardStaticPublicKey wants. The
+// second Open (against the target applet, e.g. PIV) must pair the
+// preverified key with InsecureSkipCardAuthentication=true — see
+// FetchCardPublicKey's doc for the rationale.
 //
 // References:
 //   - Yubico yubikit.securitydomain.get_certificate_bundle: same flow
@@ -60,6 +63,14 @@ type FetchCardPublicKeyOptions struct {
 // returns. Callers that need the raw certificate chain (for example,
 // to inspect attestation extensions on a YubiKey) should use
 // FetchCardCerts instead.
+//
+// When passing the result to scp11.Open via
+// PreverifiedCardStaticPublicKey, the second Open must use
+// InsecureSkipCardAuthentication=true as its trust-posture marker —
+// the preverified path bypasses in-library chain validation, so
+// CardTrustPolicy and CardTrustAnchors on that Open are rejected
+// with ErrInvalidConfig. The trust validation that mattered
+// happened here, against the SD's cert chain.
 func FetchCardPublicKey(
 	ctx context.Context,
 	t transport.Transport,
