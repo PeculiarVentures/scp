@@ -468,6 +468,12 @@ Subcommands:
                        Authenticated SCP03; gated on
                        --confirm-delete-key (NOT --confirm-write).
                        Dry-run by default.
+  keys generate        Generate a P-256 EC key on-card at one SCP11
+                       SD slot (--kid 11/13/15). Private key stays
+                       on the card; SPKI written to --out as PEM.
+                       Authenticated SCP03; gated on --confirm-write.
+                       Dry-run by default. Uses Yubico extension
+                       INS=0xF1.
   allowlist set        Install a certificate-serial-number allowlist
                        for one SCP11 key reference. Replaces any
                        existing allowlist wholesale (full-replace,

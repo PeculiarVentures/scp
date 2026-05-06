@@ -40,7 +40,7 @@ import (
 // have an established trust path or are inspecting a card.
 func cmdSDKeys(ctx context.Context, env *runEnv, args []string) error {
 	if len(args) == 0 {
-		return &usageError{msg: "scpctl sd keys <list|export|delete> [flags]"}
+		return &usageError{msg: "scpctl sd keys <list|export|delete|generate> [flags]"}
 	}
 	switch args[0] {
 	case "list":
@@ -49,6 +49,8 @@ func cmdSDKeys(ctx context.Context, env *runEnv, args []string) error {
 		return cmdSDKeysExport(ctx, env, args[1:])
 	case "delete":
 		return cmdSDKeysDelete(ctx, env, args[1:])
+	case "generate":
+		return cmdSDKeysGenerate(ctx, env, args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(env.out, `scpctl sd keys - Security Domain key inventory and certificate export
 
@@ -65,6 +67,11 @@ Verbs:
             a given KVN (--kvn + --all). Authenticated SCP03; gated
             on --confirm-delete-key (NOT --confirm-write). Dry-run
             by default.
+  generate  Generate an on-card EC P-256 key at one SCP11 SD slot
+            (--kid 11/13/15). The private key never crosses the
+            wire; the SPKI is written to --out as a PEM PUBLIC KEY
+            block. Authenticated SCP03; gated on --confirm-write.
+            Dry-run by default. Uses Yubico extension INS=0xF1.
 
 Use "scpctl sd keys <verb> -h" for per-verb flags.
 `)
