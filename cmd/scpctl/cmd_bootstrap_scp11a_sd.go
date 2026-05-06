@@ -43,23 +43,23 @@ type bootstrapSCP11aSDData struct {
 //
 // Two modes:
 //
-//   --mode oncard   (default)
+//	--mode oncard   (default)
 //
-//     Sends the Yubico GENERATE KEY (INS=0xF1) APDU. The card
-//     generates the P-256 keypair internally, returns the public
-//     key, and stores the private key in the SD. The host never
-//     sees the private key. This is strictly the strongest posture
-//     against host compromise but uses a Yubico-specific extension.
+//	  Sends the Yubico GENERATE KEY (INS=0xF1) APDU. The card
+//	  generates the P-256 keypair internally, returns the public
+//	  key, and stores the private key in the SD. The host never
+//	  sees the private key. This is strictly the strongest posture
+//	  against host compromise but uses a Yubico-specific extension.
 //
-//   --mode import
+//	--mode import
 //
-//     Sends GP PUT KEY (INS=0xD8). The private key is supplied
-//     either via --key-pem (a P-256 EC private key file) or
-//     generated freshly here on the host. In both cases the bytes
-//     are wrapped under the SCP03 session DEK before transmission.
-//     This works on any GP-compliant SD, lets ops policies derive
-//     keys from an HSM or other deterministic source, and produces
-//     reproducible installations across multiple cards.
+//	  Sends GP PUT KEY (INS=0xD8). The private key is supplied
+//	  either via --key-pem (a P-256 EC private key file) or
+//	  generated freshly here on the host. In both cases the bytes
+//	  are wrapped under the SCP03 session DEK before transmission.
+//	  This works on any GP-compliant SD, lets ops policies derive
+//	  keys from an HSM or other deterministic source, and produces
+//	  reproducible installations across multiple cards.
 //
 // In both modes the resulting public key is written to --out as
 // PEM (uncompressed SEC1 inside SubjectPublicKeyInfo) so callers

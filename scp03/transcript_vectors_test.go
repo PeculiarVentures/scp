@@ -29,8 +29,8 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
-	"github.com/PeculiarVentures/scp/transport"
 	"github.com/PeculiarVentures/scp/channel"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 type transcriptStep struct {

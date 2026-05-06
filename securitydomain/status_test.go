@@ -101,7 +101,7 @@ func TestRegistryEntry_LifecycleString(t *testing.T) {
 		{StatusScopeISD, 0x07, "INITIALIZED"},
 		{StatusScopeISD, 0xFF, "TERMINATED"},
 		{StatusScopeApplications, 0x07, "SELECTABLE"},
-		{StatusScopeApplications, 0x83, "LOCKED"},  // high bit set
+		{StatusScopeApplications, 0x83, "LOCKED"}, // high bit set
 		{StatusScopeApplications, 0x0F, "PERSONALIZED"},
 		{StatusScopeLoadFiles, 0x01, "LOADED"},
 		{StatusScopeLoadFiles, 0x99, "unknown(0x99)"},

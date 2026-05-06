@@ -14,9 +14,9 @@ import (
 // for OIDs (decimal-dotted) so JSON output is human-readable without
 // custom encoders.
 type probeData struct {
-	GPVersion             string `json:"gp_version,omitempty"`
-	SCPVersion            string `json:"scp_version,omitempty"`
-	SCPParameter          string `json:"scp_parameter,omitempty"`
+	GPVersion             string   `json:"gp_version,omitempty"`
+	SCPVersion            string   `json:"scp_version,omitempty"`
+	SCPParameter          string   `json:"scp_parameter,omitempty"`
 	SCPs                  []string `json:"scps,omitempty"`
 	CardIdentificationOID string   `json:"card_identification_oid,omitempty"`
 	CardConfigDetailsOID  string   `json:"card_config_details_oid,omitempty"`
@@ -74,8 +74,8 @@ type registryEntryView struct {
 //   - Yubico Python yubikit.securitydomain (CRD retrieval pattern)
 func cmdProbe(ctx context.Context, env *runEnv, args []string) error {
 	return runProbe(ctx, env, args, probeOptions{
-		flagSetName: "probe",
-		reportLabel: "probe",
+		flagSetName:  "probe",
+		reportLabel:  "probe",
 		fetchKeyInfo: false,
 	})
 }

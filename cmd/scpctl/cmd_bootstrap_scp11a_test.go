@@ -70,13 +70,13 @@ func TestBootstrapSCP11a_RequiredFlags(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "missing --oce-cert",
-			args: []string{"--reader", "fake", "--sd-key-out", out},
+			name:    "missing --oce-cert",
+			args:    []string{"--reader", "fake", "--sd-key-out", out},
 			wantErr: "--oce-cert is required",
 		},
 		{
-			name: "missing --sd-key-out",
-			args: []string{"--reader", "fake", "--oce-cert", certPath},
+			name:    "missing --sd-key-out",
+			args:    []string{"--reader", "fake", "--oce-cert", certPath},
 			wantErr: "--sd-key-out is required",
 		},
 	}

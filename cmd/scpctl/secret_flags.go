@@ -21,21 +21,21 @@ import (
 // secretFlags wraps the three flag forms a logical secret (PIN, PUK,
 // management key) accepts:
 //
-//   --<name>          Direct argv value. Easy for one-off use; leaks
-//                     into history and ps. Acceptable for lab work.
+//	--<name>          Direct argv value. Easy for one-off use; leaks
+//	                  into history and ps. Acceptable for lab work.
 //
-//   --<name>-stdin    Read one line from stdin. The trailing newline
-//                     is stripped. Only one --*-stdin flag may be
-//                     active per invocation because stdin is a
-//                     single-consumer resource. Use for piped
-//                     credentials: `printf '%s' "$pin" | scpctl ...`.
+//	--<name>-stdin    Read one line from stdin. The trailing newline
+//	                  is stripped. Only one --*-stdin flag may be
+//	                  active per invocation because stdin is a
+//	                  single-consumer resource. Use for piped
+//	                  credentials: `printf '%s' "$pin" | scpctl ...`.
 //
-//   --<name>-file     Read the file at the given path. Whole file is
-//                     read; a single trailing newline (if present)
-//                     is stripped. The path must not be readable by
-//                     other users; this helper enforces nothing
-//                     beyond permission errors from the OS, but the
-//                     operator should keep the file mode at 0600.
+//	--<name>-file     Read the file at the given path. Whole file is
+//	                  read; a single trailing newline (if present)
+//	                  is stripped. The path must not be readable by
+//	                  other users; this helper enforces nothing
+//	                  beyond permission errors from the OS, but the
+//	                  operator should keep the file mode at 0600.
 //
 // At most one of the three may be set; supplying multiple is a usage
 // error.

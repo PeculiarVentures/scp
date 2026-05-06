@@ -32,8 +32,8 @@ import (
 // which is unconditional success. Used to exercise every distinct
 // SW path through GetSupportedCaIdentifiers.
 type caIdSWStubTransport struct {
-	klocSW  uint16 // 0 = success with empty body
-	klccSW  uint16
+	klocSW   uint16 // 0 = success with empty body
+	klccSW   uint16
 	klocBody []byte
 	klccBody []byte
 }
@@ -61,8 +61,10 @@ func (s *caIdSWStubTransport) Transmit(_ context.Context, cmd *apdu.Command) (*a
 func (s *caIdSWStubTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
 	return nil, nil
 }
-func (s *caIdSWStubTransport) Close() error                         { return nil }
-func (s *caIdSWStubTransport) TrustBoundary() transport.TrustBoundary { return transport.TrustBoundaryLocalPCSC }
+func (s *caIdSWStubTransport) Close() error { return nil }
+func (s *caIdSWStubTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryLocalPCSC
+}
 
 // TestGetSupportedCaIdentifiers_NotPresent_6A88 confirms the
 // canonical "reference data not found" SW is treated as empty.

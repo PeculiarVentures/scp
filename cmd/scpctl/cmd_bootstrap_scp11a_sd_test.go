@@ -84,13 +84,13 @@ func TestBootstrapSCP11aSD_ModeFlagValidation(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "unknown mode rejected",
-			args: []string{"--reader", "fake", "--out", out, "--mode", "wat"},
+			name:    "unknown mode rejected",
+			args:    []string{"--reader", "fake", "--out", out, "--mode", "wat"},
 			wantErr: "must be 'oncard' or 'import'",
 		},
 		{
-			name: "key-pem with oncard rejected",
-			args: []string{"--reader", "fake", "--out", out, "--mode", "oncard", "--key-pem", "/some/path"},
+			name:    "key-pem with oncard rejected",
+			args:    []string{"--reader", "fake", "--out", out, "--mode", "oncard", "--key-pem", "/some/path"},
 			wantErr: "only valid with --mode=import",
 		},
 	}

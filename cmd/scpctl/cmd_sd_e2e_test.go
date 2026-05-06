@@ -774,7 +774,6 @@ func TestE2E_SDKeysDelete_OrphanAuth_AllAtKVN_FactoryRefused(t *testing.T) {
 	}
 }
 
-
 // keys import (SCP11 SD path) followed by sd keys list against the
 // same mock instance, and asserts the imported key reference now
 // appears in the inventory output.

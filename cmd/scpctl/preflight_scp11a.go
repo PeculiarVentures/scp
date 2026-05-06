@@ -17,10 +17,10 @@ import (
 // Return value:
 //
 //   - true  → emit the report as-is and exit the smoke (the report
-//             carries a SKIP that names the missing reference).
+//     carries a SKIP that names the missing reference).
 //   - false → preflight is satisfied, or it was inconclusive in a
-//             way that should not block the smoke. The caller
-//             continues to OpenSCP11.
+//     way that should not block the smoke. The caller
+//     continues to OpenSCP11.
 //
 // Inconclusive cases (KIT fetch fails for transport or card-status
 // reasons, e.g. a card that refuses unauthenticated KIT) downgrade

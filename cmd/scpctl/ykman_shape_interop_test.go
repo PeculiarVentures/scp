@@ -111,10 +111,10 @@ func ykmanShapeChain(t *testing.T) (rootCert, intCert, leafCert *x509.Certificat
 // the marquee interop check: imports a 3-cert chain in ykman's
 // expected leaf-last shape, exports via sd keys export, then:
 //
-//   1. Verifies the exported PEM byte-decodes to the same DER
-//      certs in the same order (round-trip equality)
-//   2. Verifies openssl x509 can parse the exported PEM without
-//      error (third-party parseability witness)
+//  1. Verifies the exported PEM byte-decodes to the same DER
+//     certs in the same order (round-trip equality)
+//  2. Verifies openssl x509 can parse the exported PEM without
+//     error (third-party parseability witness)
 //
 // The two-phase split is deliberate. PEM byte-equality is the
 // strong claim and uses Go's pem.Decode directly; openssl's
