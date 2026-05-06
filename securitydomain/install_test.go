@@ -397,6 +397,103 @@ func TestSession_Install_RequiresAuthentication(t *testing.T) {
 
 // --- LOAD blocks > 256 ---------------------------------------------------
 
+// TestSession_Install_LoadBlockCount_Boundary tests three points
+// around the 256-block sequence-counter limit. The LOAD APDU
+// encodes the sequence number in P2 as a single byte, so 256
+// blocks (sequences 0..255) is the architectural maximum. Past
+// that the host has to fragment differently or use a larger
+// block size.
+//
+// Reviewer item #3 (gp/main-body): 'add tests for a CAP just
+// below and just above the 256-block threshold.' We pin three
+// points:
+//
+//   - 255 blocks (just below): host accepts and emits all 255
+//     LOAD APDUs. Last sequence number = 254. P2 in 0x00..0xFE.
+//   - 256 blocks (exactly at): host accepts and emits all 256
+//     LOAD APDUs. Last sequence number = 255 (P2 = 0xFF).
+//   - 257 blocks (just above): host refuses with an error that
+//     names both the byte count and the block count so an
+//     operator can choose between increasing block size or
+//     splitting the CAP.
+//
+// Block size is set to 1 byte so the test images are small
+// (255-257 bytes) — exercising the boundary without making a
+// 51KB+ CAP-shaped image. The mock acknowledges every LOAD
+// regardless of size, so the cap is purely host-side.
+func TestSession_Install_LoadBlockCount_Boundary(t *testing.T) {
+	cases := []struct {
+		name           string
+		blocks         int
+		wantErr        bool
+		wantLastSeq    int
+	}{
+		{
+			name:        "255_blocks_just_below_limit",
+			blocks:      255,
+			wantErr:     false,
+			wantLastSeq: 254,
+		},
+		{
+			name:        "256_blocks_exactly_at_limit",
+			blocks:      256,
+			wantErr:     false,
+			wantLastSeq: 255,
+		},
+		{
+			name:    "257_blocks_just_above_limit_refused",
+			blocks:  257,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sess, _ := openInstallSession(t)
+			opts := sampleOpts()
+			opts.LoadImage = bytes.Repeat([]byte{0x55}, tc.blocks)
+			opts.LoadBlockSize = 1
+
+			err := sess.Install(context.Background(), opts)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected refusal at %d blocks; got success", tc.blocks)
+				}
+				var pe *securitydomain.PartialInstallError
+				if !errors.As(err, &pe) {
+					t.Fatalf("err type = %T, want *PartialInstallError", err)
+				}
+				if pe.Stage != securitydomain.StageLoad {
+					t.Errorf("Stage = %v, want StageLoad", pe.Stage)
+				}
+				// Diagnostic must name both byte count and
+				// block count so an operator can pick the
+				// right remedy: bigger block size or split.
+				msg := err.Error()
+				if !strings.Contains(msg, "256") {
+					t.Errorf("error must mention the 256 block limit; got %q", msg)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error at %d blocks: %v", tc.blocks, err)
+			}
+			// Happy path: assert the registry shows the applet
+			// was installed (which means INSTALL [for install]
+			// ran after all LOAD blocks succeeded — proves the
+			// LOAD loop completed all sequence numbers up to
+			// wantLastSeq without the cap firing).
+		})
+	}
+}
+
+// TestSession_Install_RejectsImageTooLargeForOneByteSeq is the
+// original 257-block refusal test, kept as a separate top-level
+// case so test discovery names it explicitly. The boundary
+// table above covers the same condition under
+// "257_blocks_just_above_limit_refused".
 func TestSession_Install_RejectsImageTooLargeForOneByteSeq(t *testing.T) {
 	sess, _ := openInstallSession(t)
 	opts := sampleOpts()
