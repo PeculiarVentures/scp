@@ -161,7 +161,28 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	var sd *securitydomain.Session
 	if *discoverSD {
 		var match gp.ISDCandidate
-		sd, match, err = securitydomain.DiscoverISD(ctx, t, gp.ISDDiscoveryAIDs)
+		// Trace each SELECT attempt into the report. The reviewer
+		// flagged that an operator who hits a discovery failure
+		// today sees one aggregate error and can't tell which AIDs
+		// were tried or what SW each returned. Emitting a SKIP per
+		// non-matching attempt and a PASS for the chosen one
+		// surfaces the discovery sequence to operators reading
+		// either the text report or the JSON output.
+		trace := func(a securitydomain.DiscoveryAttempt) {
+			label := candidateAIDStr(a.Candidate)
+			detail := fmt.Sprintf("%s — %s", label, a.Candidate.Source)
+			if a.Selected {
+				report.Pass("discover ISD attempt", detail+" — SW=9000")
+				return
+			}
+			swText := "transport-error"
+			if a.SW != 0 {
+				swText = fmt.Sprintf("SW=%04X", a.SW)
+			}
+			report.Skip("discover ISD attempt",
+				fmt.Sprintf("%s — %s", detail, swText))
+		}
+		sd, match, err = securitydomain.DiscoverISD(ctx, t, gp.ISDDiscoveryAIDs, trace)
 		if err != nil {
 			report.Fail("discover ISD", err.Error())
 			_ = report.Emit(env.out, *jsonMode)

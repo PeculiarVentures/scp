@@ -35,6 +35,7 @@ type gpInstallData struct {
 	LoadBlockCount      int      `json:"load_block_count,omitempty"`
 	PrivilegesHex       string   `json:"privileges_hex,omitempty"`
 	LoadHashAlgorithm   string   `json:"load_hash_algorithm,omitempty"`
+	InstallDataHex      string   `json:"install_data_hex,omitempty"`
 
 	DryRun      bool   `json:"dry_run"`
 	Stage       string `json:"failed_stage,omitempty"`
@@ -89,6 +90,10 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		"LOAD chunk size in bytes (0 = default 200, conservative for SM overhead within short-Lc encoding).")
 	loadHashFlag := fs.String("load-hash", "none",
 		"Load file data block hash policy: none (no hash sent), sha1 (computed by host), sha256 (computed by host), or hex:<digest> for an operator-supplied digest sent verbatim. Some SD policies require a particular algorithm; some reject any hash. Default is none — set this when the target SD is known to require it.")
+	installParamsHex := fs.String("install-params", "",
+		"INSTALL [for install] parameters, hex. JC applets are sensitive to the C9/EF/C7/C8 TLV form here; the hex is sent verbatim as the install_parameters_field per GP §11.5.2.3.2. Empty (default) sends a zero-length field, which is correct for applets that don't expect install params.")
+	loadParamsHex := fs.String("load-params", "",
+		"INSTALL [for load] parameters, hex. Sent verbatim as the load_parameters_field per GP §11.5.2.3.1; common contents are tag-0xC8 (load file version) and tag-0xEF (system-specific). Empty (default) sends a zero-length field.")
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	sdAIDHex := fs.String("sd-aid", "",
 		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
@@ -245,6 +250,49 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	}
 	report.Pass("load hash", hashDetail)
 
+	// Decode --install-params and --load-params. Both are sent
+	// verbatim; the host does no validation beyond hex parse.
+	// JC applets are sensitive to the C9/EF/C7/C8 TLV form,
+	// so the operator who knows the applet's expected shape
+	// supplies the bytes directly.
+	installParams, err := decodeOptionalHex(*installParamsHex, "install-params")
+	if err != nil {
+		report.Fail("install-params", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return &usageError{msg: err.Error()}
+	}
+	loadParamsBytes, err := decodeOptionalHex(*loadParamsHex, "load-params")
+	if err != nil {
+		report.Fail("load-params", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return &usageError{msg: err.Error()}
+	}
+	if len(loadParamsBytes) > 0 {
+		report.Pass("load-params", fmt.Sprintf("%d bytes — 0x%s",
+			len(loadParamsBytes), strings.ToUpper(hex.EncodeToString(loadParamsBytes))))
+	}
+	if len(installParams) > 0 {
+		report.Pass("install-params", fmt.Sprintf("%d bytes — 0x%s",
+			len(installParams), strings.ToUpper(hex.EncodeToString(installParams))))
+	}
+
+	// Dry-run also previews the final INSTALL [for install]
+	// data field as it will go on the wire (post-LV
+	// concatenation, pre-SM-wrapping). JC applets are sensitive
+	// to install-params encoding; surfacing the wire bytes
+	// before --confirm-write lets the operator catch a
+	// mistyped TLV before issuing it.
+	finalInstallData, err := gp.BuildInstallForInstallPayload(
+		loadFileAID, moduleAID, appletAID, privs, installParams, nil)
+	if err != nil {
+		report.Fail("INSTALL [for install] payload", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("build INSTALL payload: %w", err)
+	}
+	data.InstallDataHex = strings.ToUpper(hex.EncodeToString(finalInstallData))
+	report.Pass("INSTALL [for install] data preview",
+		fmt.Sprintf("%d bytes — 0x%s", len(finalInstallData), data.InstallDataHex))
+
 	// 3. Dry-run gate.
 	if !*confirm {
 		report.Skip("INSTALL [for load]", "dry-run; pass --confirm-write to actually install")
@@ -301,9 +349,11 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		LoadFileAID:   loadFileAID,
 		LoadImage:     loadImage,
 		LoadHash:      loadHash,
+		LoadParams:    loadParamsBytes,
 		ModuleAID:     moduleAID,
 		AppletAID:     appletAID,
 		Privileges:    privs,
+		InstallParams: installParams,
 		LoadBlockSize: *loadBlockSize,
 	}
 	// Block progress: print 'LOAD N/M' lines to stderr in text
@@ -453,4 +503,31 @@ func finalBlockBytes(total, chunk int) int {
 		return chunk
 	}
 	return rem
+}
+
+// decodeOptionalHex parses a hex string operator-supplied for
+// install-params / load-params / similar verbatim wire fields.
+// Empty input returns nil with no error (the field is optional).
+// Accepts whitespace and ':' separators for readability — same
+// shape stripWhitespace handles for AID inputs. Returns a
+// usage-shaped error on bad hex so the CLI surfaces a flag-level
+// message rather than a wrapped library error.
+func decodeOptionalHex(s, fieldName string) ([]byte, error) {
+	clean := stripWhitespace(s)
+	if clean == "" {
+		return nil, nil
+	}
+	b, err := hex.DecodeString(clean)
+	if err != nil {
+		return nil, fmt.Errorf("--%s: invalid hex %q: %w", fieldName, s, err)
+	}
+	if len(b) > 255 {
+		// Single-byte LV cap on INSTALL data fields. Same
+		// constraint gp.BuildInstall*Payload enforces; check
+		// here so the operator gets the flag-level error
+		// rather than a wrapped build error.
+		return nil, fmt.Errorf("--%s: %d bytes exceeds single-byte LV cap (255 max per GP §11.5.2.3)",
+			fieldName, len(b))
+	}
+	return b, nil
 }

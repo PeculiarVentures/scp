@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -44,7 +45,7 @@ func TestDiscoverISD_FirstCandidateMatches(t *testing.T) {
 	first := []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00}
 	tt := &selectiveTransport{accept: [][]byte{first}}
 
-	sess, match, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs)
+	sess, match, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs, nil)
 	if err != nil {
 		t.Fatalf("DiscoverISD: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestDiscoverISD_FallsThroughToSecondCandidate(t *testing.T) {
 	second := gp.ISDDiscoveryAIDs[1].AID
 	tt := &selectiveTransport{accept: [][]byte{second}}
 
-	sess, match, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs)
+	sess, match, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs, nil)
 	if err != nil {
 		t.Fatalf("DiscoverISD: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestDiscoverISD_FallsThroughToSecondCandidate(t *testing.T) {
 func TestDiscoverISD_NoneMatch_ReturnsSentinel(t *testing.T) {
 	tt := &selectiveTransport{accept: nil} // accepts nothing
 
-	_, _, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs)
+	_, _, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs, nil)
 	if err == nil {
 		t.Fatal("expected error when no candidate matches")
 	}
@@ -88,7 +89,7 @@ func TestDiscoverISD_NoneMatch_ReturnsSentinel(t *testing.T) {
 func TestDiscoverISD_NonRetryableSWAborts(t *testing.T) {
 	tt := &abortingTransport{sw: 0x6985}
 
-	_, _, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs)
+	_, _, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs, nil)
 	if err == nil {
 		t.Fatal("expected non-6A82 SW to abort discovery")
 	}
@@ -129,7 +130,7 @@ func (*abortingTransport) TrustBoundary() transport.TrustBoundary { return trans
 func TestDiscoverISD_RealMockCardCompatible(t *testing.T) {
 	mc := mockcard.NewSCP03Card(scp03.DefaultKeys)
 
-	sess, match, err := securitydomain.DiscoverISD(context.Background(), mc.Transport(), gp.ISDDiscoveryAIDs)
+	sess, match, err := securitydomain.DiscoverISD(context.Background(), mc.Transport(), gp.ISDDiscoveryAIDs, nil)
 	if err != nil {
 		t.Fatalf("DiscoverISD against mock: %v", err)
 	}
@@ -139,3 +140,115 @@ func TestDiscoverISD_RealMockCardCompatible(t *testing.T) {
 		t.Errorf("matched AID = %X, want first candidate %X", match.AID, want)
 	}
 }
+
+// TestDiscoverISD_LockedSDProducesErrLockedISD covers the 6283
+// path. SW=6283 ("selected file/application invalidated") means
+// the SD exists at this AID but is in TERMINATED/LOCKED state —
+// distinct from "not found." Discovery aborts at this candidate
+// rather than continue probing because the operator's discovery
+// list is correct; the card needs out-of-band recovery.
+func TestDiscoverISD_LockedSDProducesErrLockedISD(t *testing.T) {
+	tr := &scriptedTransport{
+		responses: map[string]apdu.Response{
+			"select:A0000001510000": {SW1: 0x62, SW2: 0x83}, // locked
+		},
+	}
+	candidates := []gp.ISDCandidate{
+		{AID: []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00}, Source: "GP-default"},
+	}
+	_, _, err := securitydomain.DiscoverISD(context.Background(), tr, candidates, nil)
+	if err == nil {
+		t.Fatal("expected ErrLockedISD")
+	}
+	if !errors.Is(err, securitydomain.ErrLockedISD) {
+		t.Errorf("err should wrap ErrLockedISD: %v", err)
+	}
+}
+
+// TestDiscoverISD_6A87TreatedAsNotFound: SmartJac/SafeNet variants
+// answer 6A87 instead of 6A82 when the AID is unknown. Discovery
+// must continue to the next candidate rather than abort.
+func TestDiscoverISD_6A87TreatedAsNotFound(t *testing.T) {
+	tr := &scriptedTransport{
+		responses: map[string]apdu.Response{
+			"select:A0000001510000": {SW1: 0x6A, SW2: 0x87}, // SmartJac "not found" variant
+			"select:A000000003000000": {SW1: 0x90, SW2: 0x00}, // matches the second candidate
+		},
+	}
+	candidates := []gp.ISDCandidate{
+		{AID: []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00}, Source: "GP-default"},
+		{AID: []byte{0xA0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00}, Source: "vendor-X"},
+	}
+	_, match, err := securitydomain.DiscoverISD(context.Background(), tr, candidates, nil)
+	if err != nil {
+		t.Fatalf("DiscoverISD should fall through 6A87 to next candidate: %v", err)
+	}
+	if match.Source != "vendor-X" {
+		t.Errorf("expected vendor-X match, got %q", match.Source)
+	}
+}
+
+// TestDiscoverISD_TraceCallbackInvokedPerAttempt: the trace
+// callback must fire for every probe, including the matching
+// one (Selected=true). Lets a CLI emit per-AID diagnostic lines
+// the reviewer asked for.
+func TestDiscoverISD_TraceCallbackInvokedPerAttempt(t *testing.T) {
+	tr := &scriptedTransport{
+		responses: map[string]apdu.Response{
+			"select:A0000001510000": {SW1: 0x6A, SW2: 0x82}, // not found
+			"select:A000000018434D00": {SW1: 0x6A, SW2: 0x87}, // 6A87 variant
+			"select:A000000003000000": {SW1: 0x90, SW2: 0x00}, // match
+		},
+	}
+	candidates := []gp.ISDCandidate{
+		{AID: []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00}, Source: "first"},
+		{AID: []byte{0xA0, 0x00, 0x00, 0x00, 0x18, 0x43, 0x4D, 0x00}, Source: "second"},
+		{AID: []byte{0xA0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00}, Source: "third"},
+	}
+	var attempts []securitydomain.DiscoveryAttempt
+	trace := func(a securitydomain.DiscoveryAttempt) {
+		attempts = append(attempts, a)
+	}
+	_, _, err := securitydomain.DiscoverISD(context.Background(), tr, candidates, trace)
+	if err != nil {
+		t.Fatalf("DiscoverISD: %v", err)
+	}
+	if len(attempts) != 3 {
+		t.Fatalf("expected 3 attempts traced, got %d", len(attempts))
+	}
+	// First two should be non-selected with their respective SWs.
+	if attempts[0].Selected || attempts[0].SW != 0x6A82 {
+		t.Errorf("attempt[0]: Selected=%v SW=%04X want false / 6A82", attempts[0].Selected, attempts[0].SW)
+	}
+	if attempts[1].Selected || attempts[1].SW != 0x6A87 {
+		t.Errorf("attempt[1]: Selected=%v SW=%04X want false / 6A87", attempts[1].Selected, attempts[1].SW)
+	}
+	// Third should be the selected one.
+	if !attempts[2].Selected || attempts[2].SW != 0x9000 {
+		t.Errorf("attempt[2]: Selected=%v SW=%04X want true / 9000", attempts[2].Selected, attempts[2].SW)
+	}
+}
+
+// scriptedTransport answers SELECT APDUs from a precomputed map
+// keyed on "select:<aid-hex>". Used to drive DiscoverISD through
+// specific SW responses without standing up a full mockcard.
+type scriptedTransport struct {
+	responses map[string]apdu.Response
+}
+
+func (s *scriptedTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	if cmd.INS != 0xA4 {
+		return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
+	}
+	key := fmt.Sprintf("select:%X", cmd.Data)
+	if r, ok := s.responses[key]; ok {
+		return &r, nil
+	}
+	return &apdu.Response{SW1: 0x6A, SW2: 0x82}, nil // default not-found
+}
+
+func (s *scriptedTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return nil, fmt.Errorf("scriptedTransport: TransmitRaw not implemented")
+}
+func (s *scriptedTransport) Close() error                        { return nil }
+func (s *scriptedTransport) TrustBoundary() transport.TrustBoundary { return transport.TrustBoundaryUnknown }
