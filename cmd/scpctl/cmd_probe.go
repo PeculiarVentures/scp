@@ -29,6 +29,34 @@ type probeData struct {
 	// JSON output when nil so the probe's CRD-only schema stays
 	// stable for consumers that only ever see cmdProbe.
 	KeyInfo []string `json:"key_info,omitempty"`
+
+	// Registry is populated by 'sd info --full'. Each scope has
+	// its own slice; nil means that scope was not queried, an empty
+	// slice means the card returned SW=6A88 (no entries) for it.
+	// Per-entry detail is structured for JSON consumers; the
+	// human-readable surface is the per-scope GET STATUS line in
+	// Checks (count and a brief AID summary).
+	Registry *registryDump `json:"registry,omitempty"`
+}
+
+// registryDump is the JSON shape of a --full GP registry walk.
+type registryDump struct {
+	ISD          []registryEntryView `json:"isd,omitempty"`
+	Applications []registryEntryView `json:"applications,omitempty"`
+	LoadFiles    []registryEntryView `json:"load_files,omitempty"`
+}
+
+// registryEntryView is the JSON projection of a securitydomain.RegistryEntry.
+// Bytes are rendered as uppercase hex; Lifecycle has both the parsed
+// human form and the raw byte so callers can re-interpret if needed.
+type registryEntryView struct {
+	AID             string   `json:"aid"`
+	Lifecycle       string   `json:"lifecycle"`
+	LifecycleByte   string   `json:"lifecycle_byte"`
+	Privileges      []string `json:"privileges,omitempty"`
+	Version         string   `json:"version,omitempty"`
+	AssociatedSDAID string   `json:"associated_sd_aid,omitempty"`
+	Modules         []string `json:"modules,omitempty"`
 }
 
 // cmdProbe opens an unauthenticated Security Domain session, fetches
@@ -74,12 +102,26 @@ type probeOptions struct {
 	// identity at the SD-info level should include which key
 	// references the card has installed.
 	fetchKeyInfo bool
+
+	// allowFullStatus controls whether 'sd info --full' is reachable
+	// from this entry point. cmdSDInfo sets it; cmdProbe does not,
+	// keeping the historical 'probe' surface CRD-only.
+	allowFullStatus bool
 }
 
 func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions) error {
 	fs := newSubcommandFlagSet(opts.flagSetName, env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
+	var fullMode *bool
+	if opts.allowFullStatus {
+		fullMode = fs.Bool("full", false,
+			"Walk the GP registry via GET STATUS (GP §11.4.2): "+
+				"ISD, Applications + SSDs, Load Files + Modules. "+
+				"Each scope reports separately; auth-required scopes "+
+				"appear as SKIP on cards that refuse them over an "+
+				"unauthenticated session.")
+	}
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
@@ -205,6 +247,31 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		}
 	}
 
+	// Full GP registry walk via GET STATUS. Three scopes are issued:
+	// ISD (P1=0x80), Applications + SSDs (P1=0x40), and Load Files +
+	// Modules (P1=0x10) — the last one folds the Load Files-only
+	// view in by including module AIDs, so a separate Load Files
+	// (P1=0x20) call would be redundant.
+	//
+	// Real cards typically permit GET STATUS on the ISD without
+	// authentication but require authentication for the other two
+	// scopes. Auth-required scopes manifest as SW=6982 ("security
+	// status not satisfied") which surfaces here as a SKIP rather
+	// than a FAIL — the operator can see exactly which scopes need
+	// an authenticated session if they want a full registry view.
+	if opts.allowFullStatus && fullMode != nil && *fullMode {
+		dump := &registryDump{}
+		dump.ISD = walkRegistry(ctx, sd, securitydomain.StatusScopeISD, "ISD", report)
+		dump.Applications = walkRegistry(ctx, sd, securitydomain.StatusScopeApplications, "Applications", report)
+		dump.LoadFiles = walkRegistry(ctx, sd, securitydomain.StatusScopeLoadFilesAndModules, "LoadFiles", report)
+		// Only attach Registry to Data if at least one scope produced
+		// or attempted output; otherwise the JSON has a meaningless
+		// empty registry object alongside the unrelated CRD fields.
+		if dump.ISD != nil || dump.Applications != nil || dump.LoadFiles != nil {
+			data.Registry = dump
+		}
+	}
+
 	report.Data = data
 
 	if err := report.Emit(env.out, *jsonMode); err != nil {
@@ -255,4 +322,73 @@ func formatSCP(s cardrecognition.SCPInfo) string {
 		return fmt.Sprintf("%s i=0x%04X", label, s.Parameter)
 	}
 	return fmt.Sprintf("%s i=0x%02X", label, s.Parameter)
+}
+
+// walkRegistry issues GET STATUS for one scope and produces both a
+// human-readable PASS/SKIP line on report and a structured slice of
+// registryEntryView for JSON output.
+//
+// Returns nil when the call fails (after recording a SKIP), an empty
+// non-nil slice when the card returned no entries (SW=6A88), or a
+// populated slice when entries were returned.
+func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securitydomain.StatusScope, label string, report *Report) []registryEntryView {
+	checkName := fmt.Sprintf("GET STATUS scope=%s", label)
+	entries, err := sd.GetStatus(ctx, scope)
+	if err != nil {
+		// SW=6982 (security status not satisfied) is the common
+		// authentication-required signal. Other SWs are reported
+		// verbatim so the operator can debug.
+		report.Skip(checkName, err.Error())
+		return nil
+	}
+	if len(entries) == 0 {
+		// Empty (SW=6A88) is a successful "card has nothing in this
+		// scope" result, not an error. Record as PASS with a clear
+		// detail so consumers don't confuse empty with skipped.
+		report.Pass(checkName, "no entries")
+		return []registryEntryView{}
+	}
+
+	// Human summary: count + a comma-separated AID list, truncated
+	// for readability if there are many.
+	aids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		aids = append(aids, hexEncode(e.AID))
+	}
+	summary := fmt.Sprintf("%d entries: %s", len(entries), strings.Join(aids, ", "))
+	report.Pass(checkName, summary)
+
+	views := make([]registryEntryView, 0, len(entries))
+	for _, e := range entries {
+		views = append(views, projectRegistryEntry(e))
+	}
+	return views
+}
+
+// projectRegistryEntry converts a securitydomain.RegistryEntry to its
+// JSON-friendly view. Bytes render as uppercase hex; lifecycle
+// carries both the parsed name (LifecycleString) and the raw byte.
+func projectRegistryEntry(e securitydomain.RegistryEntry) registryEntryView {
+	v := registryEntryView{
+		AID:           hexEncode(e.AID),
+		Lifecycle:     e.LifecycleString(),
+		LifecycleByte: fmt.Sprintf("0x%02X", e.Lifecycle),
+	}
+	if names := e.Privileges.Names(); len(names) > 0 {
+		v.Privileges = names
+	}
+	if len(e.Version) > 0 {
+		v.Version = hexEncode(e.Version)
+	}
+	if len(e.AssociatedSDAID) > 0 {
+		v.AssociatedSDAID = hexEncode(e.AssociatedSDAID)
+	}
+	if len(e.Modules) > 0 {
+		mods := make([]string, len(e.Modules))
+		for i, m := range e.Modules {
+			mods[i] = hexEncode(m)
+		}
+		v.Modules = mods
+	}
+	return v
 }
