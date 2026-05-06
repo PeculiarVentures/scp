@@ -440,6 +440,202 @@ func TestE2E_SDKeysImportTrustAnchor(t *testing.T) {
 	}
 }
 
+// --- Read-side E2E tests (depend on the cert-store mock fix) ---
+
+// TestE2E_SDKeys_ImportExport_Roundtrip drives the full chain
+// life cycle: write a cert chain via sd keys import (SCP11 SD path,
+// which stores chain at the same key reference as the private key),
+// then read it back via sd keys export, and verify the bytes round-
+// trip exactly.
+//
+// This is the highest-value E2E test in the file: it proves the
+// complete operator workflow (install + read-back) works end-to-
+// end against a faithful mock simulator. A regression in either the
+// import-side STORE DATA emission OR the export-side parseCertificates
+// would land an obvious failure here.
+//
+// Depends on:
+//   - scp03 mock cert-store persistence (commit "scp03/mock:
+//     cert-store persistence for STORE DATA / GET DATA tag BF21")
+//   - mock SCP03 PUT KEY response synthesis (commit "scp03/mock:
+//     synthesize SCP03 PUT KEY response per GP §11.8.2.3")
+func TestE2E_SDKeys_ImportExport_Roundtrip(t *testing.T) {
+	dir := t.TempDir()
+	priv := genE2EP256Key(t)
+	keyPath := writeE2EKeyPEM(t, dir, priv)
+	certPath := writeE2ESelfSignedCert(t, dir, priv, "roundtrip-leaf")
+
+	// Snapshot the cert PEM we wrote so we can compare DER on read.
+	originalCertPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert PEM: %v", err)
+	}
+	originalBlock, _ := pem.Decode(originalCertPEM)
+	if originalBlock == nil {
+		t.Fatalf("could not decode PEM written by writeE2ESelfSignedCert")
+	}
+
+	// Use a single mock instance for both import and export so the
+	// cert-store map persists across the two commands.
+	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
+	connect := func(_ context.Context, _ string) (transport.Transport, error) {
+		return mockCard.Transport(), nil
+	}
+
+	// Phase 1: import via sd keys import (SCP11 SD).
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysImport(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "11", "--kvn", "01",
+			"--key-pem", keyPath, "--certs", certPath,
+			"--confirm-write",
+		})
+		if err != nil {
+			t.Fatalf("import phase: %v\n%s", err, buf.String())
+		}
+	}
+
+	// Phase 2: export via sd keys export. Read commands authenticate
+	// via opt-in SCP03; --scp03-keys-default uses factory keys
+	// (which match the mock's scp03.DefaultKeys), so the SCP03
+	// session opens cleanly and GET DATA tag BF21 round-trips.
+	exportPath := filepath.Join(dir, "exported.pem")
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysExport(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "11", "--kvn", "01",
+			"--out", exportPath,
+			"--scp03-keys-default",
+		})
+		if err != nil {
+			t.Fatalf("export phase: %v\n%s", err, buf.String())
+		}
+	}
+
+	// Verify: the exported PEM contains the cert bytes we imported.
+	exportedPEM, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("read exported PEM: %v", err)
+	}
+	exportedBlock, _ := pem.Decode(exportedPEM)
+	if exportedBlock == nil {
+		t.Fatalf("exported file is not PEM:\n%s", exportedPEM)
+	}
+	if exportedBlock.Type != "CERTIFICATE" {
+		t.Errorf("exported PEM type = %q, want CERTIFICATE", exportedBlock.Type)
+	}
+	if !bytes.Equal(originalBlock.Bytes, exportedBlock.Bytes) {
+		t.Errorf("import/export DER mismatch:\n  orig DER head:    %X\n  export DER head:  %X",
+			originalBlock.Bytes[:min(32, len(originalBlock.Bytes))],
+			exportedBlock.Bytes[:min(32, len(exportedBlock.Bytes))])
+	}
+	// Sanity: parse the exported DER as a cert and check its
+	// public key matches the imported private key. The
+	// integrity- and parsing-level guarantees combine here.
+	exportedCert, err := x509.ParseCertificate(exportedBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse exported cert: %v", err)
+	}
+	exportedSPKI, err := x509.MarshalPKIXPublicKey(exportedCert.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal exported SPKI: %v", err)
+	}
+	importedSPKI, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal imported SPKI: %v", err)
+	}
+	if !bytes.Equal(exportedSPKI, importedSPKI) {
+		t.Errorf("exported cert public key does not match imported private key")
+	}
+}
+
+// TestE2E_SDKeysExport_NoChain_Empty confirms the export verb's
+// behavior when no chain is stored at the requested ref. The mock
+// returns 6A88 (cert store) which the library translates to a nil
+// chain; sd keys export's --allow-empty governs whether that's a
+// success or a failure. Without --allow-empty: failure with a clear
+// error. With --allow-empty: success, no file written.
+func TestE2E_SDKeysExport_NoChain_Empty(t *testing.T) {
+	mockCard := scp03.NewMockCard(scp03.DefaultKeys)
+	connect := func(_ context.Context, _ string) (transport.Transport, error) {
+		return mockCard.Transport(), nil
+	}
+
+	// Without --allow-empty: should fail.
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		err := cmdSDKeysExport(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "11", "--kvn", "01",
+			"--out", filepath.Join(t.TempDir(), "out.pem"),
+			"--scp03-keys-default",
+		})
+		if err == nil {
+			t.Errorf("expected error for missing chain without --allow-empty; got success:\n%s", buf.String())
+		}
+	}
+
+	// With --allow-empty: should succeed.
+	{
+		var buf bytes.Buffer
+		env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+		dir := t.TempDir()
+		outPath := filepath.Join(dir, "empty.pem")
+		err := cmdSDKeysExport(context.Background(), env, []string{
+			"--reader", "fake",
+			"--kid", "11", "--kvn", "01",
+			"--out", outPath,
+			"--allow-empty",
+			"--scp03-keys-default",
+		})
+		if err != nil {
+			t.Errorf("--allow-empty should succeed for missing chain; got %v\n%s", err, buf.String())
+		}
+		// File may or may not exist depending on the export
+		// semantics for empty chains; we don't pin that here, only
+		// the success status.
+	}
+}
+
+// TestE2E_SDKeysList_BasicInventory exercises the read path via
+// sd keys list (no --certs). The mock returns syntheticKeyInfo
+// for GET DATA tag E0 (KID=0x01, KVN=0xFF, AES-128 marker); the
+// CLI parses and emits a report. This proves the GET STATUS-
+// equivalent inventory query rounds trips through SCP03 to the mock
+// and out as readable output.
+func TestE2E_SDKeysList_BasicInventory(t *testing.T) {
+	env, buf, _ := envForSCP03Mock(t)
+	err := cmdSDKeysList(context.Background(), env, []string{
+		"--reader", "fake",
+		"--scp03-keys-default",
+	})
+	if err != nil {
+		t.Fatalf("cmdSDKeysList: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	// Mock's syntheticKeyInfo advertises KID=0x01, KVN=0xFF.
+	for _, want := range []string{"0x01", "0xFF"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing %q\n%s", want, out)
+		}
+	}
+}
+
+// min is provided by the standard library since Go 1.21 but the
+// scp module declares go 1.22; this is here only because some Go
+// linters dislike calls into builtin in the round-trip test above.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // --- fixture helpers (E2E-scoped, named to avoid colliding with
 // helpers in cmd_sd_keys_import_scp11_test.go) ---
 
