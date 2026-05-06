@@ -36,8 +36,10 @@ func (rt *recordingTransport) TransmitRaw(ctx context.Context, raw []byte) ([]by
 	return rt.inner.TransmitRaw(ctx, raw)
 }
 
-func (rt *recordingTransport) Close() error                          { return rt.inner.Close() }
-func (rt *recordingTransport) TrustBoundary() transport.TrustBoundary { return rt.inner.TrustBoundary() }
+func (rt *recordingTransport) Close() error { return rt.inner.Close() }
+func (rt *recordingTransport) TrustBoundary() transport.TrustBoundary {
+	return rt.inner.TrustBoundary()
+}
 
 // firstSelect returns the first SELECT command (INS=0xA4) the
 // transport saw, or nil if none was sent. Used by --sd-aid tests

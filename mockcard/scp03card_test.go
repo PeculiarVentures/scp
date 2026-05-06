@@ -161,7 +161,6 @@ func TestSCP03Card_GetStatus_PreSeededRegistry(t *testing.T) {
 
 // --- test helpers -------------------------------------------------------
 
-
 func buildInstallForLoad(loadAID, sdAID, params []byte) []byte {
 	b, err := gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)
 	if err != nil {

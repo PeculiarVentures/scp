@@ -40,8 +40,10 @@ func (t *selectiveTransport) Transmit(_ context.Context, cmd *apdu.Command) (*ap
 func (t *selectiveTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
 	return nil, errors.New("not implemented")
 }
-func (*selectiveTransport) Close() error                          { return nil }
-func (*selectiveTransport) TrustBoundary() transport.TrustBoundary { return transport.TrustBoundaryUnknown }
+func (*selectiveTransport) Close() error { return nil }
+func (*selectiveTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
 
 func TestDiscoverISD_FirstCandidateMatches(t *testing.T) {
 	first := []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00}
@@ -174,8 +176,10 @@ func (t *abortingTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apd
 func (t *abortingTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
 	return nil, errors.New("not implemented")
 }
-func (*abortingTransport) Close() error                          { return nil }
-func (*abortingTransport) TrustBoundary() transport.TrustBoundary { return transport.TrustBoundaryUnknown }
+func (*abortingTransport) Close() error { return nil }
+func (*abortingTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
 
 // TestDiscoverISD_RealMockCardCompatible: end-to-end against the
 // SCP03+GP combined mock, which currently answers 9000 to any
@@ -224,7 +228,7 @@ func TestDiscoverISD_LockedSDProducesErrLockedISD(t *testing.T) {
 func TestDiscoverISD_6A87TreatedAsNotFound(t *testing.T) {
 	tr := &scriptedTransport{
 		responses: map[string]apdu.Response{
-			"select:A0000001510000": {SW1: 0x6A, SW2: 0x87}, // SmartJac "not found" variant
+			"select:A0000001510000":   {SW1: 0x6A, SW2: 0x87}, // SmartJac "not found" variant
 			"select:A000000003000000": {SW1: 0x90, SW2: 0x00}, // matches the second candidate
 		},
 	}
@@ -248,7 +252,7 @@ func TestDiscoverISD_6A87TreatedAsNotFound(t *testing.T) {
 func TestDiscoverISD_TraceCallbackInvokedPerAttempt(t *testing.T) {
 	tr := &scriptedTransport{
 		responses: map[string]apdu.Response{
-			"select:A0000001510000": {SW1: 0x6A, SW2: 0x82}, // not found
+			"select:A0000001510000":   {SW1: 0x6A, SW2: 0x82}, // not found
 			"select:A000000018434D00": {SW1: 0x6A, SW2: 0x87}, // 6A87 variant
 			"select:A000000003000000": {SW1: 0x90, SW2: 0x00}, // match
 		},
@@ -303,5 +307,7 @@ func (s *scriptedTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apd
 func (s *scriptedTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
 	return nil, fmt.Errorf("scriptedTransport: TransmitRaw not implemented")
 }
-func (s *scriptedTransport) Close() error                        { return nil }
-func (s *scriptedTransport) TrustBoundary() transport.TrustBoundary { return transport.TrustBoundaryUnknown }
+func (s *scriptedTransport) Close() error { return nil }
+func (s *scriptedTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}

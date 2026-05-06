@@ -157,11 +157,11 @@ func (e *PartialInstallError) CleanupRecipe() string {
 // Required fields:
 //   - LoadFileAID: AID of the load file (package AID from the CAP)
 //   - LoadImage:   bytes of the load file data block (concatenated
-//                  CAP components in the order GP §F.2 specifies)
+//     CAP components in the order GP §F.2 specifies)
 //   - ModuleAID:   AID of the applet's class within the package
 //   - AppletAID:   AID under which the instantiated applet is
-//                  registered (often equals ModuleAID for single-
-//                  class applets but not always)
+//     registered (often equals ModuleAID for single-
+//     class applets but not always)
 //
 // Optional fields:
 //   - SDAID:           target SD AID; empty means current SD (most common)
@@ -216,8 +216,8 @@ const defaultLoadBlockSize = 200
 // already a multiple of 16: the spec mandates a full 16-byte
 // padding block, plus the 8-byte MAC = 24 bytes. So:
 //
-//   max wrapped = max plaintext + 24
-//   max wrapped ≤ 255  =>  max plaintext ≤ 231
+//	max wrapped = max plaintext + 24
+//	max wrapped ≤ 255  =>  max plaintext ≤ 231
 //
 // At plaintext = 232..239 the padding shrinks (8..1 bytes) and
 // total wrapped stays at 248, fitting. At plaintext = 240, the

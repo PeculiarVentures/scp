@@ -42,9 +42,9 @@ type headerOpts struct {
 	pkgName        []byte // nil = no package_name_info; non-nil (incl. empty) = present
 	pkgMinor       byte
 	pkgMajor       byte
-	overrideMagic  *uint32  // non-nil = use this instead of capMagic
-	overrideAIDLen *byte    // non-nil = put this in the AID_length field instead of len(pkgAID)
-	trailing       []byte   // appended after package_name_info
+	overrideMagic  *uint32 // non-nil = use this instead of capMagic
+	overrideAIDLen *byte   // non-nil = put this in the AID_length field instead of len(pkgAID)
+	trailing       []byte  // appended after package_name_info
 }
 
 func buildHeaderPayload(o headerOpts) []byte {

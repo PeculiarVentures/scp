@@ -423,10 +423,10 @@ func TestSession_Install_RequiresAuthentication(t *testing.T) {
 // regardless of size, so the cap is purely host-side.
 func TestSession_Install_LoadBlockCount_Boundary(t *testing.T) {
 	cases := []struct {
-		name           string
-		blocks         int
-		wantErr        bool
-		wantLastSeq    int
+		name        string
+		blocks      int
+		wantErr     bool
+		wantLastSeq int
 	}{
 		{
 			name:        "255_blocks_just_below_limit",
@@ -514,7 +514,6 @@ func TestSession_Install_RejectsImageTooLargeForOneByteSeq(t *testing.T) {
 	}
 }
 
-
 // TestLoad_RefusesBlockSizeOverWrappedCap covers the LOAD wrapped-
 // size cap. Plaintext block sizes that fit on their own can fail
 // once SCP03 LevelFull wrapping adds up to 24 bytes (16 padding +
@@ -580,8 +579,10 @@ func (r *loadRecordingTransport) TransmitRaw(ctx context.Context, raw []byte) ([
 	return r.inner.TransmitRaw(ctx, raw)
 }
 
-func (r *loadRecordingTransport) Close() error                    { return r.inner.Close() }
-func (r *loadRecordingTransport) TrustBoundary() transport.TrustBoundary { return r.inner.TrustBoundary() }
+func (r *loadRecordingTransport) Close() error { return r.inner.Close() }
+func (r *loadRecordingTransport) TrustBoundary() transport.TrustBoundary {
+	return r.inner.TrustBoundary()
+}
 
 // TestLoad_WrappedAPDUStaysUnderShortLcCap measures actual wire
 // bytes by recording every transmitted APDU and asserting none

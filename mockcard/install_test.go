@@ -29,7 +29,6 @@ func dispatchUnsecured(t *testing.T, c *Card, ins, p1, p2 byte, data []byte) *ap
 	return resp
 }
 
-
 // buildInstallForLoadData wraps gp.BuildInstallForLoadPayload
 // for tests that don't carry hash/token. Hash and token are
 // zero-length here because the mock does not validate them.

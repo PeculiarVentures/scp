@@ -121,7 +121,7 @@ func TestGPCapInspect_TextOutput(t *testing.T) {
 		"PASS",
 		"D27600012401",      // package AID
 		"D276000124010101",  // applet AID
-		"package", "applet",  // summary words
+		"package", "applet", // summary words
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
@@ -514,7 +514,7 @@ func TestGPCapInspect_EmptyImports_NoJCVersion(t *testing.T) {
 
 	var parsed struct {
 		Data struct {
-			JavaCardVersion string `json:"java_card_version"`
+			JavaCardVersion string     `json:"java_card_version"`
 			Imports         []struct{} `json:"imports"`
 		} `json:"data"`
 	}
