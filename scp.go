@@ -53,9 +53,14 @@
 //
 // # Quick Start
 //
-//	// SCP11b with mock card (for testing):
+//	// SCP11b with mock card (for testing). Mock cards are not
+//	// real hardware; the trust posture is opted out explicitly so
+//	// the example is runnable. Production code MUST set
+//	// CardTrustPolicy or CardTrustAnchors instead.
 //	card, _ := mockcard.New()
-//	sess, _ := scp11.Open(ctx, card.Transport(), scp11.YubiKeyDefaultSCP11bConfig())
+//	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+//	cfg.InsecureSkipCardAuthentication = true
+//	sess, _ := scp11.Open(ctx, card.Transport(), cfg)
 //	defer sess.Close()
 //
 //	// SCP03 with static keys:
