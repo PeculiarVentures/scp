@@ -288,6 +288,13 @@ Output names the active profile (`yubikey-5.7.2`, `standard-piv`, or `probed:<in
 
 Opens an unauthenticated Security Domain session and reports the card's identity: parsed Card Recognition Data (issuer identification number, card image number, application provider, application version) plus the Key Information Template if available. No authentication, no state change.
 
+`--full` extends the report with a GP §11.4.2 GET STATUS walk across three scopes: ISD, Applications + SSDs, and Load Files + Modules. Each entry reports its AID, lifecycle (parsed for the scope's state machine), privilege bits set, and — for Load Files — version and module AIDs. Cards typically permit GET STATUS on the ISD without authentication but require auth for the other scopes; auth-required scopes appear as SKIP rather than FAIL, so an operator can see exactly which scopes need an authenticated session for a complete view. JSON output structures the registry under `data.registry.{isd, applications, load_files}` for programmatic consumers.
+
+```bash
+scpctl sd info --reader "YubiKey" --full
+scpctl sd info --reader "YubiKey" --full --json
+```
+
 ## Design notes worth knowing
 
 These are not v0-only constraints; they're intentional shape:
