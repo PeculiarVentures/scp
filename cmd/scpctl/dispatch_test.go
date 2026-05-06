@@ -263,6 +263,7 @@ func TestDispatch_SDSubcommandHelp(t *testing.T) {
 		"unlock",
 		"terminate",
 		"keys",
+		"allowlist",
 		"bootstrap-oce",
 		"bootstrap-scp11a",
 		"bootstrap-scp11a-sd",
@@ -332,6 +333,51 @@ func TestDispatch_SDKeysHelpContent(t *testing.T) {
 	// Help must go to stdout (not stderr) so 'cmd | less' works.
 	if strings.Contains(stderr, "list") || strings.Contains(stderr, "export") {
 		t.Errorf("help content leaked to stderr; stderr:\n%s", stderr)
+	}
+}
+
+// TestDispatch_SDAllowlistVerbs verifies that 'scpctl sd allowlist
+// <verb> -h' reaches the per-verb handler. Same shape as
+// TestDispatch_SDKeysVerbs.
+func TestDispatch_SDAllowlistVerbs(t *testing.T) {
+	verbs := []string{"set", "clear"}
+	for _, v := range verbs {
+		t.Run(v, func(t *testing.T) {
+			_, stderr, code := runScpctl(t, "sd", "allowlist", v, "-h")
+			if code != 0 && code != 1 && code != 2 {
+				t.Errorf("'sd allowlist %s -h' exit = %d, want 0/1/2; stderr=%s",
+					v, code, stderr)
+			}
+			if strings.Contains(stderr, "unknown subcommand") {
+				t.Errorf("dispatcher reported unknown subcommand for 'sd allowlist %s'; stderr:\n%s",
+					v, stderr)
+			}
+			if strings.Contains(stderr, "unknown allowlist subcommand") {
+				t.Errorf("'sd allowlist %s' reached the allowlist dispatcher but the verb was rejected; stderr:\n%s",
+					v, stderr)
+			}
+		})
+	}
+}
+
+// TestDispatch_SDAllowlistHelpContent pins that 'sd allowlist help'
+// exits 0 and stdout describes both verbs plus the no-get rationale.
+// The no-get note is operator-facing context that should not silently
+// regress out of the help text.
+func TestDispatch_SDAllowlistHelpContent(t *testing.T) {
+	stdout, stderr, code := runScpctl(t, "sd", "allowlist", "help")
+	if code != 0 {
+		t.Errorf("'sd allowlist help' exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"scpctl sd allowlist",
+		"set",
+		"clear",
+		"write-only", // the design note that there is no get verb
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("'sd allowlist help' stdout missing %q; got:\n%s", want, stdout)
+		}
 	}
 }
 

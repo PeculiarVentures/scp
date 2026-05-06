@@ -8,7 +8,8 @@
 //             key, cert, object, reset, provision) over the
 //             piv/session library
 //   - sd      Security Domain operations (info, reset, lock,
-//             unlock, terminate, keys, OCE/SCP11a bootstraps)
+//             unlock, terminate, keys, allowlist, OCE/SCP11a
+//             bootstraps)
 //   - oce     off-card OCE certificate diagnostics (host-only;
 //             does not touch a card)
 //
@@ -93,6 +94,7 @@ var sdCommands = map[string]func(ctx context.Context, env *runEnv, args []string
 	"unlock":              cmdSDUnlock,
 	"terminate":           cmdSDTerminate,
 	"keys":                cmdSDKeys,
+	"allowlist":           cmdSDAllowlist,
 	"bootstrap-oce":       cmdBootstrapOCE,
 	"bootstrap-scp11a":    cmdBootstrapSCP11a,
 	"bootstrap-scp11a-sd": cmdBootstrapSCP11aSD,
@@ -241,7 +243,8 @@ Groups:
 
   sd          Security Domain operations.
               Wired: info, reset, lock, unlock, terminate, keys,
-              bootstrap-oce, bootstrap-scp11a, bootstrap-scp11a-sd.
+              allowlist, bootstrap-oce, bootstrap-scp11a,
+              bootstrap-scp11a-sd.
 
   oce         Off-card OCE certificate diagnostics. Host-only;
               does not touch a card. Wired: verify, gen.
@@ -459,6 +462,20 @@ Subcommands:
                        one key reference to a file. PEM by default,
                        --der for raw concatenated DER. Read-only,
                        unauthenticated.
+  allowlist set        Install a certificate-serial-number allowlist
+                       for one SCP11 key reference. Replaces any
+                       existing allowlist wholesale (full-replace,
+                       not merge). Requires authenticated SCP03 and
+                       --confirm-write. Dry-run by default.
+  allowlist clear      Remove the allowlist for one key reference;
+                       the card then accepts any certificate signed
+                       by the associated CA. Requires authenticated
+                       SCP03 and --confirm-write. Dry-run by default.
+                       (No 'allowlist get' verb: on-card allowlist
+                       is write-only on YubiKey; the Yubico SDK does
+                       not implement read either. Operators keep the
+                       authoritative allowlist in their own systems
+                       and use 'set' to push it.)
   bootstrap-oce        Install an OCE public key (and optionally cert
                        chain + CA SKI) onto a card via SCP03. Day-1
                        provisioning step that enables SCP11a sessions.
