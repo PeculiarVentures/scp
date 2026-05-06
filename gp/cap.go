@@ -176,6 +176,17 @@ type CAPFile struct {
 	// nil; that is not an error.
 	Applets []CAPApplet
 
+	// Imports lists the packages this CAP depends on, parsed from
+	// Import.cap (JC VM Spec §6.5). Each entry carries the
+	// imported package's AID, its (major, minor) version, and the
+	// human-readable package name when the AID matches a known
+	// JC standard package or the /aid registry. Library CAPs
+	// commonly import only java.lang + javacard.framework;
+	// applet CAPs typically add javacard.security, javacardx.crypto,
+	// and org.globalplatform variants. Imports is nil when the
+	// CAP omits Import.cap (rare; only stripped CAPs).
+	Imports []CAPImport
+
 	// Components is the inventory of component files found in the
 	// CAP, in JC VM Spec load order. The parser populates this
 	// from whichever recognized components the ZIP contains; an
@@ -194,6 +205,30 @@ type CAPApplet struct {
 	// component identifying the applet's install() entry point.
 	// Stored for completeness; not used by gp cap inspect.
 	InstallMethodOffset uint16
+}
+
+// CAPImport describes one entry in the Import component (JC VM
+// Spec §6.5). Each imported package is identified by its AID and
+// declares a (major, minor) version that the loader matches
+// against the runtime's installed package version.
+type CAPImport struct {
+	// AID is the imported package's AID. Validated for length
+	// per ISO/IEC 7816-5 (5..16 bytes).
+	AID AID
+
+	// MajorVersion and MinorVersion are the package version this
+	// CAP was compiled against. The runtime will reject loading
+	// if the on-card package's major version differs from
+	// MajorVersion or if its minor version is less than
+	// MinorVersion.
+	MajorVersion byte
+	MinorVersion byte
+
+	// Name is the human-readable package name resolved from the
+	// AID. Empty when the AID is not in the standard JC table or
+	// in the /aid registry; the AID hex is still useful in that
+	// case for further investigation.
+	Name string
 }
 
 // CAPComponent is one component file's framing and bytes.
@@ -316,6 +351,16 @@ func ParseCAP(r io.ReaderAt, size int64) (*CAPFile, error) {
 			return nil, err
 		}
 		if err := decodeAppletPayload(payloadOf(appletComp), out); err != nil {
+			return nil, err
+		}
+	}
+
+	if importRaw, ok := entries[componentNameImport]; ok {
+		importComp, err := frameComponent(componentNameImport, importRaw)
+		if err != nil {
+			return nil, err
+		}
+		if err := decodeImportPayload(payloadOf(importComp), out); err != nil {
 			return nil, err
 		}
 	}

@@ -65,6 +65,8 @@ type gpCapInspectData struct {
 	PackageName       string                       `json:"package_name,omitempty"`
 	PackageNameSource string                       `json:"package_name_source"`
 	Applets           []gpCapInspectApplet         `json:"applets"`
+	Imports           []gpCapInspectImport         `json:"imports"`
+	JavaCardVersion   string                       `json:"java_card_version,omitempty"`
 	Components        []gpCapInspectComponentEntry `json:"components"`
 }
 
@@ -72,6 +74,12 @@ type gpCapInspectApplet struct {
 	AID                    string `json:"aid"`
 	InstallMethodOffset    int    `json:"install_method_offset"`
 	InstallMethodOffsetHex string `json:"install_method_offset_hex"`
+}
+
+type gpCapInspectImport struct {
+	AID     string `json:"aid"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version"`
 }
 
 type gpCapInspectComponentEntry struct {
@@ -133,6 +141,7 @@ func cmdGPCapInspect(ctx context.Context, env *runEnv, args []string) error {
 		// fields nil; the explicit initialization stabilizes the
 		// JSON shape regardless.
 		Applets:    []gpCapInspectApplet{},
+		Imports:    []gpCapInspectImport{},
 		Components: []gpCapInspectComponentEntry{},
 	}
 	if len(capFile.PackageName) > 0 {
@@ -144,6 +153,21 @@ func cmdGPCapInspect(ctx context.Context, env *runEnv, args []string) error {
 			InstallMethodOffset:    int(a.InstallMethodOffset),
 			InstallMethodOffsetHex: fmt.Sprintf("0x%04X", a.InstallMethodOffset),
 		})
+	}
+	for _, imp := range capFile.Imports {
+		data.Imports = append(data.Imports, gpCapInspectImport{
+			AID:     imp.AID.String(),
+			Name:    imp.Name,
+			Version: fmt.Sprintf("%d.%d", imp.MajorVersion, imp.MinorVersion),
+		})
+	}
+	if jc := capFile.JavaCardVersion(); jc != "" {
+		data.JavaCardVersion = jc
+		report.Pass("Java Card runtime", jc)
+	}
+	if len(capFile.Imports) > 0 {
+		report.Pass("imports",
+			fmt.Sprintf("%d package(s)", len(capFile.Imports)))
 	}
 	for _, c := range capFile.Components {
 		data.Components = append(data.Components, gpCapInspectComponentEntry{

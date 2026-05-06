@@ -373,3 +373,159 @@ func errorsAs(err error, target **usageError) bool {
 	}
 	return false
 }
+
+// writeSyntheticCAPWithImports is writeSyntheticCAP with a
+// configurable Import.cap payload. Lets tests verify that the
+// inspector surfaces imports + the inferred Java Card runtime
+// version. Single-applet CAP, fixed package name, hardcoded
+// component framing — only the Import payload differs.
+func writeSyntheticCAPWithImports(t *testing.T, path string, pkgAID, appletAID []byte, pkgName string, importPayload []byte) {
+	t.Helper()
+
+	frame := func(tag byte, payload []byte) []byte {
+		out := make([]byte, 3+len(payload))
+		out[0] = tag
+		binary.BigEndian.PutUint16(out[1:3], uint16(len(payload)))
+		copy(out[3:], payload)
+		return out
+	}
+
+	var header []byte
+	header = binary.BigEndian.AppendUint32(header, 0xDECAFFED)
+	header = append(header, 0x02, 0x02)
+	header = append(header, 0x00)
+	header = append(header, 0x00, 0x01)
+	header = append(header, byte(len(pkgAID)))
+	header = append(header, pkgAID...)
+	header = append(header, byte(len(pkgName)))
+	header = append(header, []byte(pkgName)...)
+
+	var applet []byte
+	if appletAID != nil {
+		applet = []byte{0x01}
+		applet = append(applet, byte(len(appletAID)))
+		applet = append(applet, appletAID...)
+		applet = append(applet, 0x00, 0x42)
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	put := func(name string, raw []byte) {
+		t.Helper()
+		w, err := zw.Create("com/example/javacard/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("Header.cap", frame(0x01, header))
+	if applet != nil {
+		put("Applet.cap", frame(0x03, applet))
+	}
+	put("Directory.cap", frame(0x02, nil))
+	put("Import.cap", frame(0x04, importPayload))
+	put("Class.cap", frame(0x06, nil))
+	put("Method.cap", frame(0x07, nil))
+	put("StaticField.cap", frame(0x08, nil))
+	put("ConstantPool.cap", frame(0x05, nil))
+	put("RefLocation.cap", frame(0x09, nil))
+	put("Descriptor.cap", frame(0x0B, nil))
+
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGPCapInspect_ReportsImportsAndJCVersion: a CAP that
+// imports javacard.framework 1.4 + javacardx.crypto 1.0
+// surfaces both packages and "JC 2.2.2" in the JSON output.
+func TestGPCapInspect_ReportsImportsAndJCVersion(t *testing.T) {
+	dir := t.TempDir()
+	capPath := filepath.Join(dir, "with-imports.cap")
+
+	// Hand-built Import payload: count=2, then two records.
+	// AIDs are the JC standard AIDs so the parser resolves names.
+	frameworkAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x62, 0x01, 0x01}
+	cryptoAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x62, 0x02, 0x01, 0x01}
+	imp := []byte{0x02} // count
+	imp = append(imp, 0x04, 0x01, byte(len(frameworkAID)))
+	imp = append(imp, frameworkAID...)
+	imp = append(imp, 0x00, 0x01, byte(len(cryptoAID)))
+	imp = append(imp, cryptoAID...)
+
+	pkgAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+	appletAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01, 0x01}
+	writeSyntheticCAPWithImports(t, capPath, pkgAID, appletAID, "com.example", imp)
+
+	out := runGPCapInspect(t, []string{"--json", capPath})
+
+	var parsed struct {
+		Data struct {
+			JavaCardVersion string `json:"java_card_version"`
+			Imports         []struct {
+				AID     string `json:"aid"`
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"imports"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if parsed.Data.JavaCardVersion != "JC 2.2.2" {
+		t.Errorf("java_card_version = %q, want JC 2.2.2", parsed.Data.JavaCardVersion)
+	}
+	if len(parsed.Data.Imports) != 2 {
+		t.Fatalf("imports = %d, want 2", len(parsed.Data.Imports))
+	}
+	if parsed.Data.Imports[0].Name != "javacard.framework" {
+		t.Errorf("imports[0].name = %q, want javacard.framework", parsed.Data.Imports[0].Name)
+	}
+	if parsed.Data.Imports[0].Version != "1.4" {
+		t.Errorf("imports[0].version = %q, want 1.4", parsed.Data.Imports[0].Version)
+	}
+	if parsed.Data.Imports[1].Name != "javacardx.crypto" {
+		t.Errorf("imports[1].name = %q, want javacardx.crypto", parsed.Data.Imports[1].Name)
+	}
+
+	// Text output should also mention the runtime version.
+	if !strings.Contains(out, "JC 2.2.2") {
+		t.Errorf("text output should mention JC version:\n%s", out)
+	}
+}
+
+// TestGPCapInspect_EmptyImports_NoJCVersion: a synthetic CAP
+// with empty Import.cap (no framework imported) -> no JC
+// runtime line in the JSON or text output.
+func TestGPCapInspect_EmptyImports_NoJCVersion(t *testing.T) {
+	dir := t.TempDir()
+	capPath := filepath.Join(dir, "no-imports.cap")
+
+	pkgAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+	appletAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01, 0x01}
+	writeSyntheticCAPWithImports(t, capPath, pkgAID, appletAID, "com.example", nil)
+
+	out := runGPCapInspect(t, []string{"--json", capPath})
+
+	var parsed struct {
+		Data struct {
+			JavaCardVersion string `json:"java_card_version"`
+			Imports         []struct{} `json:"imports"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if parsed.Data.JavaCardVersion != "" {
+		t.Errorf("java_card_version should be empty when no framework imported, got %q",
+			parsed.Data.JavaCardVersion)
+	}
+	if len(parsed.Data.Imports) != 0 {
+		t.Errorf("imports should be empty, got %v", parsed.Data.Imports)
+	}
+}
