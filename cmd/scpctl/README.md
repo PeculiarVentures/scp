@@ -276,7 +276,25 @@ Four command groups, non-overlapping purposes:
 
 `scpctl oce` is **off-card OCE certificate diagnostics**. `verify` validates a chain off-card; `gen` produces a fresh known-good chain. Host-only — does not touch a card.
 
-`scpctl gp` is the **operator surface for generic GlobalPlatform card-content management**, distinct from the YubiKey-flavored `sd` group. `probe` is functionally equivalent to the legacy top-level `probe` under a `gp probe` report label (unauthenticated SELECT, GET DATA tag 0x66 for CRD). `registry` opens an authenticated SCP03 session and walks the GP registry across three scopes (ISD, Applications, LoadFiles+Modules) via GET STATUS; per-scope failure policy reports SW=6A88 (no entries) as PASS, SW=6982/6A86/6D00 (auth required, unsupported P2 form, unsupported INS) as SKIP, and only OpenSCP03 itself failing as FAIL. `cap inspect` is host-only and reads a CAP file from disk to print package AID, package version, applet inventory, and component manifest. Destructive applet management (`install`, `delete`, `--dry-run` mode) is deferred to future work; it requires AES-CMAC key diversification for stock JCOP cards, a Java-built Echo applet CAP fixture, real JCOP hardware for validation, and a SCP03+GP combined simulator for end-to-end mock testing.
+`scpctl gp` is the **operator surface for generic GlobalPlatform card-content management**, distinct from the YubiKey-flavored `sd` group.
+
+`gp probe` is functionally equivalent to the legacy top-level `probe` under a `gp probe` report label (unauthenticated SELECT, GET DATA tag 0x66 for CRD).
+
+`gp registry` opens an authenticated SCP03 session and walks the GP registry across three scopes (ISD, Applications, LoadFiles+Modules) via GET STATUS. Per-scope failure policy reports SW=6A88 (no entries) as PASS and SW=6982 (auth required) as SKIP. The LoadFiles+Modules scope automatically falls back to LoadFiles-only when the card rejects the modules-included form (SW=6A86 or SW=6D00); the report flags this as "modules omitted" so the operator knows the data is partial because of card behavior, not a tool limitation.
+
+`gp install` loads and installs an applet from a CAP file. The flow runs INSTALL [for load], a sequence of LOAD chunks, then INSTALL [for install]; `--load-block-size` controls the chunk size (default 200, conservative for SM overhead within short-Lc encoding). Mid-flow failure surfaces as `PartialInstallError` with the stage, bytes loaded, and last sequence number, so the operator knows whether to clean up the load file, the install, or both. Dry-run by default; pass `--confirm-write` to transmit. Optional `--expected-card-id` pins the card's CIN (GET DATA 0x0045) before any destructive APDU so fleet automation cannot accidentally write to the wrong card.
+
+`gp delete` removes an applet or load file by AID. `--cascade` adds the cascade-delete flag (P2 high bit) to remove instances along with the load file. Same `--confirm-write` and `--expected-card-id` gates as install.
+
+`gp cap inspect` is host-only and reads a CAP file from disk to print package AID, package version, applet inventory, imported packages, the inferred Java Card runtime version (e.g. "JC 2.2.2" from `javacard.framework` 1.4), and the component manifest.
+
+Three flags are shared across the gp group:
+
+- `--sd-aid <hex>` overrides the Security Domain AID for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs). Default is the GP ISD AID `A000000151000000`.
+- `--discover-sd` (probe only) walks `gp.ISDDiscoveryAIDs` until one candidate AID returns 9000. Mutually exclusive with `--sd-aid`. The matched AID appears in the report so subsequent runs can pin it via `--sd-aid`.
+- `--expected-card-id <hex>` (install/delete only) aborts before any destructive APDU when the card's CIN does not match.
+
+The boundary against `sd`: `sd` is YubiKey-flavored Security Domain identity and bootstrap; `gp` is generic GP card-content management against any conformant card. End-to-end mock testing uses `mockcard.SCP03Card` (SCP03 + GP combined). Real-card validation against JCOP and SafeNet is the next step.
 
 ## `piv info` and `sd info`
 
