@@ -109,7 +109,11 @@ func (b *capBuilder) bytes(t *testing.T) []byte {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for name, raw := range b.files {
-		w, err := zw.Create(b.dir + "/" + name)
+		entryName := name
+		if b.dir != "" {
+			entryName = b.dir + "/" + name
+		}
+		w, err := zw.Create(entryName)
 		if err != nil {
 			t.Fatalf("zip.Create %s: %v", name, err)
 		}
@@ -175,6 +179,12 @@ func TestParseCAP_OneApplet_WithPackageName(t *testing.T) {
 	if got, want := string(cap.PackageName), "com.example"; got != want {
 		t.Errorf("PackageName = %q, want %q", got, want)
 	}
+	// Header carried package_name_info, so the source should be
+	// the header component, not the ZIP path. Distinguishes "the
+	// CAP told us its name" from "we inferred it from layout."
+	if got, want := cap.PackageNameSource, "header_component"; got != want {
+		t.Errorf("PackageNameSource = %q, want %q", got, want)
+	}
 	if len(cap.Applets) != 1 {
 		t.Fatalf("len(Applets) = %d, want 1", len(cap.Applets))
 	}
@@ -237,7 +247,7 @@ func TestParseCAP_LibraryPackage_NoApplet(t *testing.T) {
 	}
 }
 
-func TestParseCAP_NoPackageName(t *testing.T) {
+func TestParseCAP_NoPackageName_DerivedFromPath(t *testing.T) {
 	pkgAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
 	// pkgName: nil = omit package_name_info entirely (JC 2.1 style).
 	hp := buildHeaderPayload(headerOpts{pkgAID: pkgAID, pkgName: nil})
@@ -247,13 +257,20 @@ func TestParseCAP_NoPackageName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseCAP: %v", err)
 	}
-	if cap.PackageName != nil {
-		t.Errorf("PackageName = %q, want nil when package_name_info absent", cap.PackageName)
+	// Header omits package_name_info, but the default test fixture
+	// places components under com/example/javacard/ so the parser
+	// derives a name from the ZIP layout.
+	if got, want := string(cap.PackageName), "com.example"; got != want {
+		t.Errorf("PackageName = %q, want %q (derived from ZIP path)", got, want)
+	}
+	if got, want := cap.PackageNameSource, "zip_path"; got != want {
+		t.Errorf("PackageNameSource = %q, want %q", got, want)
 	}
 }
 
-func TestParseCAP_EmptyPackageName(t *testing.T) {
-	// Distinct from the absent case: name_length=0 with no bytes.
+func TestParseCAP_EmptyPackageName_DerivedFromPath(t *testing.T) {
+	// name_length=0 with no bytes. Like the absent case, parser
+	// falls through to ZIP path derivation.
 	pkgAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
 	hp := buildHeaderPayload(headerOpts{pkgAID: pkgAID, pkgName: []byte{}})
 	zipBytes := defaultCAP(hp, nil).bytes(t)
@@ -262,8 +279,11 @@ func TestParseCAP_EmptyPackageName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseCAP: %v", err)
 	}
-	if cap.PackageName != nil {
-		t.Errorf("PackageName = %q, want nil for name_length=0", cap.PackageName)
+	if got, want := string(cap.PackageName), "com.example"; got != want {
+		t.Errorf("PackageName = %q, want %q (derived from ZIP path)", got, want)
+	}
+	if got, want := cap.PackageNameSource, "zip_path"; got != want {
+		t.Errorf("PackageNameSource = %q, want %q", got, want)
 	}
 }
 
@@ -581,5 +601,102 @@ func TestParseCAP_UnknownBasename_Ignored(t *testing.T) {
 		if comp.Name == "VendorExtension.cap" {
 			t.Error("unknown basename appeared in Components manifest")
 		}
+	}
+}
+
+// TestParseCAP_NoPackageName_RootZipEntries_AbsentSource confirms
+// that when neither the Header carries package_name_info nor the
+// ZIP layout reveals a package directory (components at the ZIP
+// root), the parser correctly reports PackageNameSource="absent"
+// rather than fabricating a name. Defends against a regression
+// where derivePackageNameFromZipDirs accidentally returns a
+// non-empty string for the empty/root case.
+func TestParseCAP_NoPackageName_RootZipEntries_AbsentSource(t *testing.T) {
+	pkgAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+	hp := buildHeaderPayload(headerOpts{pkgAID: pkgAID, pkgName: nil})
+
+	// Build the CAP with components at the ZIP root rather than
+	// under any directory. defaultCAP() puts entries under
+	// "com/example/javacard/"; here we override the dir to "".
+	b := newCAPBuilder()
+	b.dir = "" // root-level entries
+	b.put(componentNameHeader, frameForComponent(ComponentTagHeader, hp))
+	b.put(componentNameDirectory, frameForComponent(ComponentTagDirectory, nil))
+	b.put(componentNameImport, frameForComponent(ComponentTagImport, nil))
+	b.put(componentNameClass, frameForComponent(ComponentTagClass, nil))
+	b.put(componentNameMethod, frameForComponent(ComponentTagMethod, nil))
+	b.put(componentNameStaticField, frameForComponent(ComponentTagStaticField, nil))
+	b.put(componentNameExport, frameForComponent(ComponentTagExport, nil))
+	b.put(componentNameConstantPool, frameForComponent(ComponentTagConstantPool, nil))
+	b.put(componentNameReferenceLocation, frameForComponent(ComponentTagReferenceLocation, nil))
+	b.put(componentNameDescriptor, frameForComponent(ComponentTagDescriptor, nil))
+	zipBytes := b.bytes(t)
+
+	cap, err := ParseCAP(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		t.Fatalf("ParseCAP: %v", err)
+	}
+	if cap.PackageName != nil {
+		t.Errorf("PackageName = %q, want nil when neither header nor path supply one",
+			cap.PackageName)
+	}
+	if got, want := cap.PackageNameSource, "absent"; got != want {
+		t.Errorf("PackageNameSource = %q, want %q", got, want)
+	}
+}
+
+// TestParseCAP_NoPackageName_DerivedFromBareDirectory exercises
+// the case where components are under a package directory but
+// without the Oracle "/javacard/" trailing segment. Some custom
+// builds and minimal CAPs follow this layout. The derivation
+// should still produce a useful name.
+func TestParseCAP_NoPackageName_DerivedFromBareDirectory(t *testing.T) {
+	pkgAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+	hp := buildHeaderPayload(headerOpts{pkgAID: pkgAID, pkgName: nil})
+
+	b := newCAPBuilder()
+	b.dir = "lib/foo" // no trailing /javacard
+	b.put(componentNameHeader, frameForComponent(ComponentTagHeader, hp))
+	b.put(componentNameDirectory, frameForComponent(ComponentTagDirectory, nil))
+	zipBytes := b.bytes(t)
+
+	cap, err := ParseCAP(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		t.Fatalf("ParseCAP: %v", err)
+	}
+	if got, want := string(cap.PackageName), "lib.foo"; got != want {
+		t.Errorf("PackageName = %q, want %q", got, want)
+	}
+	if got, want := cap.PackageNameSource, "zip_path"; got != want {
+		t.Errorf("PackageNameSource = %q, want %q", got, want)
+	}
+}
+
+// TestDerivePackageNameFromZipDirs_MixedDirectories verifies the
+// helper refuses to flatten components that live under different
+// directory paths. Mixed paths indicate a malformed or multi-
+// package CAP and should yield no derivation rather than guess.
+func TestDerivePackageNameFromZipDirs_MixedDirectories(t *testing.T) {
+	dirs := map[string]string{
+		componentNameHeader:    "com/example/javacard",
+		componentNameDirectory: "org/other/javacard",
+	}
+	got, ok := derivePackageNameFromZipDirs(dirs)
+	if ok {
+		t.Errorf("derivePackageNameFromZipDirs returned %q with ok=true; want ok=false on mixed dirs", got)
+	}
+}
+
+// TestDerivePackageNameFromZipDirs_TrailingJavacardOnly verifies
+// the corner case where every component is under "/javacard" with
+// no preceding package path. Stripping the suffix would leave an
+// empty string; the helper should return ok=false.
+func TestDerivePackageNameFromZipDirs_TrailingJavacardOnly(t *testing.T) {
+	dirs := map[string]string{
+		componentNameHeader: "javacard",
+	}
+	got, ok := derivePackageNameFromZipDirs(dirs)
+	if ok {
+		t.Errorf("derivePackageNameFromZipDirs(javacard-only) returned %q with ok=true; want ok=false", got)
 	}
 }

@@ -57,14 +57,15 @@ func cmdGPCap(ctx context.Context, env *runEnv, args []string) error {
 
 // gpCapInspectData is the JSON payload of 'gp cap inspect'.
 type gpCapInspectData struct {
-	File           string                       `json:"file"`
-	FileSize       int64                        `json:"file_size"`
-	CAPVersion     string                       `json:"cap_version"`
-	PackageVersion string                       `json:"package_version"`
-	PackageAID     string                       `json:"package_aid"`
-	PackageName    string                       `json:"package_name,omitempty"`
-	Applets        []gpCapInspectApplet         `json:"applets"`
-	Components     []gpCapInspectComponentEntry `json:"components"`
+	File              string                       `json:"file"`
+	FileSize          int64                        `json:"file_size"`
+	CAPVersion        string                       `json:"cap_version"`
+	PackageVersion    string                       `json:"package_version"`
+	PackageAID        string                       `json:"package_aid"`
+	PackageName       string                       `json:"package_name,omitempty"`
+	PackageNameSource string                       `json:"package_name_source"`
+	Applets           []gpCapInspectApplet         `json:"applets"`
+	Components        []gpCapInspectComponentEntry `json:"components"`
 }
 
 type gpCapInspectApplet struct {
@@ -117,11 +118,12 @@ func cmdGPCapInspect(ctx context.Context, env *runEnv, args []string) error {
 		capFile.PackageAID, len(capFile.Applets), len(capFile.Components)))
 
 	data := &gpCapInspectData{
-		File:           path,
-		FileSize:       st.Size(),
-		CAPVersion:     fmt.Sprintf("%d.%d", capFile.CAPVersionMajor, capFile.CAPVersionMinor),
-		PackageVersion: fmt.Sprintf("%d.%d", capFile.PackageVersionMajor, capFile.PackageVersionMinor),
-		PackageAID:     capFile.PackageAID.String(),
+		File:              path,
+		FileSize:          st.Size(),
+		CAPVersion:        fmt.Sprintf("%d.%d", capFile.CAPVersionMajor, capFile.CAPVersionMinor),
+		PackageVersion:    fmt.Sprintf("%d.%d", capFile.PackageVersionMajor, capFile.PackageVersionMinor),
+		PackageAID:        capFile.PackageAID.String(),
+		PackageNameSource: capFile.PackageNameSource,
 		// Initialize to empty slices rather than rely on append's
 		// nil-handling: a nil slice in Go marshals to JSON null,
 		// which forces script consumers to handle two distinct

@@ -153,13 +153,23 @@ type CAPFile struct {
 	// ISO/IEC 7816-5 5..16-byte length range during parsing.
 	PackageAID AID
 
-	// PackageName is the optional Java fully-qualified package
-	// name from Header.cap's package_name_info. JC 2.1 CAPs may
-	// omit it entirely. Nil when package_name_info is absent or
-	// has zero length; the parser collapses both into nil because
-	// the distinction has no practical use today and adding a
-	// PackageNamePresent bool would be unused-API noise.
+	// PackageName is the Java fully-qualified package name. Sourced
+	// from Header.cap's package_name_info when present (JC 2.2+);
+	// otherwise derived from the CAP's ZIP directory layout when
+	// possible (Oracle converter and most tooling place components
+	// under <package-path>/javacard/, e.g. com/example/javacard/).
+	// Nil only when neither source produces a name. PackageNameSource
+	// reports which source was used.
 	PackageName []byte
+
+	// PackageNameSource records how PackageName was determined.
+	// One of "header_component", "zip_path", or "absent".
+	// Useful for inspector output when the operator wants to
+	// distinguish a CAP that explicitly declares its package name
+	// from one whose name was inferred from directory layout (the
+	// inferred name can be wrong if a producer reorganized the ZIP
+	// after the converter ran).
+	PackageNameSource string
 
 	// Applets lists the applets declared in Applet.cap, in file
 	// order. Library packages have no Applet.cap and Applets is
@@ -203,9 +213,19 @@ type CAPComponent struct {
 
 	// Raw is the complete component file content: tag (1 byte) +
 	// size (2 bytes) + payload (DeclaredSize bytes). Total length
-	// is therefore 3 + DeclaredSize. Future LOAD command builders
-	// will concatenate Raw across components in load order; the
-	// MVP only reads len(Raw) for the inspector's size column.
+	// is therefore 3 + DeclaredSize. The MVP inspector reads
+	// len(Raw) for the size column and never concatenates.
+	//
+	// Future LOAD command builders (Appendix B) must NOT blindly
+	// concatenate Raw across every component in CAPFile.Components.
+	// Convention across Java Card converters and tooling excludes
+	// the Debug component (source line numbers, method names) and
+	// the Descriptor component (reflection metadata) from the on-
+	// card load image: neither is needed for execution, both waste
+	// EEPROM, and some card runtimes reject the load when they're
+	// included. The future LoadImage helper should accept an
+	// inclusion policy (default: exclude Debug and Descriptor)
+	// rather than treat Components as a flat byte stream.
 	Raw []byte
 }
 
@@ -256,7 +276,7 @@ func ParseCAP(r io.ReaderAt, size int64) (*CAPFile, error) {
 		return nil, fmt.Errorf("gp/cap: open zip: %w", err)
 	}
 
-	entries, err := indexComponents(zr)
+	entries, dirs, err := indexComponents(zr)
 	if err != nil {
 		return nil, err
 	}
@@ -274,6 +294,20 @@ func ParseCAP(r io.ReaderAt, size int64) (*CAPFile, error) {
 	}
 	if err := decodeHeaderPayload(payloadOf(headerComp), out); err != nil {
 		return nil, err
+	}
+
+	// Set PackageNameSource based on what decodeHeaderPayload did.
+	// decodeHeaderPayload only assigns out.PackageName when the
+	// Header component carried a non-empty package_name_info. If
+	// it stayed nil, fall back to ZIP directory derivation. If
+	// derivation also fails, mark as absent.
+	if out.PackageName != nil {
+		out.PackageNameSource = "header_component"
+	} else if derived, ok := derivePackageNameFromZipDirs(dirs); ok {
+		out.PackageName = []byte(derived)
+		out.PackageNameSource = "zip_path"
+	} else {
+		out.PackageNameSource = "absent"
 	}
 
 	if appletRaw, ok := entries[componentNameApplet]; ok {
@@ -302,18 +336,22 @@ func ParseCAP(r io.ReaderAt, size int64) (*CAPFile, error) {
 }
 
 // indexComponents walks the ZIP and returns recognized component
-// files indexed by basename. Duplicate basenames (the same
-// component appearing under two paths inside the ZIP) are rejected
-// because the right behavior is ambiguous: pick first? pick last?
-// merge? An error here surfaces a producer bug rather than picking
-// one and proceeding silently.
+// files indexed by basename, plus a parallel map from basename to
+// the directory the component lived under inside the ZIP. The
+// directory map is used downstream to derive a package name when
+// Header.cap's package_name_info is absent. Duplicate basenames
+// (the same component appearing under two paths inside the ZIP)
+// are rejected because the right behavior is ambiguous: pick
+// first? pick last? merge? An error here surfaces a producer bug
+// rather than picking one and proceeding silently.
 //
 // Files inside the ZIP that do not end in .cap or do not match a
 // recognized component name are ignored. Many real CAPs contain
 // Manifest.mf, .DS_Store, and Java debug auxiliary files; these
 // are not parser concerns.
-func indexComponents(zr *zip.Reader) (map[string][]byte, error) {
+func indexComponents(zr *zip.Reader) (map[string][]byte, map[string]string, error) {
 	out := make(map[string][]byte)
+	dirs := make(map[string]string)
 
 	for _, f := range zr.File {
 		base := path.Base(f.Name)
@@ -327,25 +365,85 @@ func indexComponents(zr *zip.Reader) (map[string][]byte, error) {
 			continue
 		}
 		if _, exists := out[base]; exists {
-			return nil, fmt.Errorf("gp/cap: duplicate component %q (multi-package CAPs unsupported)", base)
+			return nil, nil, fmt.Errorf("gp/cap: duplicate component %q (multi-package CAPs unsupported)", base)
 		}
 
 		rc, err := f.Open()
 		if err != nil {
-			return nil, fmt.Errorf("gp/cap: open %s in zip: %w", base, err)
+			return nil, nil, fmt.Errorf("gp/cap: open %s in zip: %w", base, err)
 		}
 		buf, err := io.ReadAll(rc)
 		_ = rc.Close()
 		if err != nil {
-			return nil, fmt.Errorf("gp/cap: read %s: %w", base, err)
+			return nil, nil, fmt.Errorf("gp/cap: read %s: %w", base, err)
 		}
 		if len(buf) == 0 {
-			return nil, fmt.Errorf("gp/cap: %s is empty", base)
+			return nil, nil, fmt.Errorf("gp/cap: %s is empty", base)
 		}
 		out[base] = buf
+		dirs[base] = path.Dir(f.Name)
 	}
 
-	return out, nil
+	return out, dirs, nil
+}
+
+// derivePackageNameFromZipDirs infers a Java package name from the
+// directory path inside the CAP's ZIP. Standard converters (Oracle
+// JC converter, ant-javacard, IDE plugins) place components under
+// <package-path>/javacard/, e.g. com/example/foo/javacard/Header.cap
+// for package com.example.foo. Some minimal builds drop the
+// trailing /javacard/ segment, putting components directly under
+// the package directory.
+//
+// The function returns the derived name (with slashes converted to
+// dots) and a bool indicating success. It only returns success
+// when every recognized component lives under the same directory:
+// mixed directories indicate a malformed or multi-package CAP and
+// should not be flattened into a single package name. Empty
+// directories or root-only ("." after path.Dir) yield no
+// derivation.
+//
+// This is a tooling-convention layer: the JC VM Spec does not
+// mandate where converters place components inside the JAR. The
+// derivation matches the convention used by the major converters
+// but cannot be relied upon for arbitrary producer output.
+func derivePackageNameFromZipDirs(dirs map[string]string) (string, bool) {
+	if len(dirs) == 0 {
+		return "", false
+	}
+	var common string
+	first := true
+	for _, d := range dirs {
+		if first {
+			common = d
+			first = false
+			continue
+		}
+		if d != common {
+			return "", false
+		}
+	}
+	if common == "" || common == "." {
+		return "", false
+	}
+
+	// Strip trailing "/javacard" if present (Oracle converter
+	// convention). Case-sensitive match: lowercase "javacard" is
+	// what the converter produces; preserving case-sensitivity
+	// avoids false positives on packages legitimately named
+	// "Javacard" or "JAVACARD" at the leaf.
+	if strings.HasSuffix(common, "/javacard") {
+		common = strings.TrimSuffix(common, "/javacard")
+	} else if common == "javacard" {
+		// Components under /javacard/ at the ZIP root with no
+		// preceding package path; nothing meaningful to derive.
+		return "", false
+	}
+
+	if common == "" {
+		return "", false
+	}
+	return strings.ReplaceAll(common, "/", "."), true
 }
 
 // loadOrder returns component basenames in JC VM Spec load order.

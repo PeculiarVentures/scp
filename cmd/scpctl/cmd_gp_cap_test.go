@@ -146,13 +146,14 @@ func TestGPCapInspect_JSONOutput(t *testing.T) {
 	var report struct {
 		Subcommand string `json:"subcommand"`
 		Data       struct {
-			File           string `json:"file"`
-			FileSize       int64  `json:"file_size"`
-			CAPVersion     string `json:"cap_version"`
-			PackageVersion string `json:"package_version"`
-			PackageAID     string `json:"package_aid"`
-			PackageName    string `json:"package_name"`
-			Applets        []struct {
+			File              string `json:"file"`
+			FileSize          int64  `json:"file_size"`
+			CAPVersion        string `json:"cap_version"`
+			PackageVersion    string `json:"package_version"`
+			PackageAID        string `json:"package_aid"`
+			PackageName       string `json:"package_name"`
+			PackageNameSource string `json:"package_name_source"`
+			Applets           []struct {
 				AID                    string `json:"aid"`
 				InstallMethodOffset    int    `json:"install_method_offset"`
 				InstallMethodOffsetHex string `json:"install_method_offset_hex"`
@@ -188,6 +189,12 @@ func TestGPCapInspect_JSONOutput(t *testing.T) {
 	}
 	if report.Data.PackageName != "com.example" {
 		t.Errorf("PackageName = %q, want com.example", report.Data.PackageName)
+	}
+	// Header carried package_name_info, so the source should be
+	// the header component (not derived from ZIP path).
+	if report.Data.PackageNameSource != "header_component" {
+		t.Errorf("PackageNameSource = %q, want header_component",
+			report.Data.PackageNameSource)
 	}
 	if len(report.Data.Applets) != 1 {
 		t.Fatalf("Applets count = %d, want 1", len(report.Data.Applets))

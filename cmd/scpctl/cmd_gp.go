@@ -52,7 +52,13 @@ Subcommands:
               scope failure policy: 6A88 (no entries) is PASS,
               6982/6A86/6D00 (auth required, unsupported P2 form,
               unsupported INS) is SKIP per scope, OpenSCP03 itself
-              failing is FAIL.
+              failing is FAIL. Like 'gp probe' above, this MVP
+              uses the default ISD AID; cards that require an
+              alternate ISD AID (some JCOP and SafeNet variants)
+              are not yet supported. Requires explicit SCP03 key
+              choice: --scp03-keys-default, --scp03-key with
+              --scp03-kvn, or --scp03-{enc,mac,dek} with
+              --scp03-kvn.
   cap         CAP file utilities (host-only):
                 inspect <path>  Print package AID and version,
                                 applet inventory, and component
