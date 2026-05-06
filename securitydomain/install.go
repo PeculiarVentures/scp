@@ -209,6 +209,34 @@ type InstallOptions struct {
 // know of and only adds a couple of round trips for typical CAPs.
 const defaultLoadBlockSize = 200
 
+// Short-Lc APDU framing tops out at 255 bytes of payload. The
+// LOAD payload after SCP03 LevelFull wrapping is plaintext +
+// PKCS#7-style padding (1..16 bytes to AES block boundary) +
+// 8-byte C-MAC. Worst case overhead is when the plaintext is
+// already a multiple of 16: the spec mandates a full 16-byte
+// padding block, plus the 8-byte MAC = 24 bytes. So:
+//
+//   max wrapped = max plaintext + 24
+//   max wrapped ≤ 255  =>  max plaintext ≤ 231
+//
+// At plaintext = 232..239 the padding shrinks (8..1 bytes) and
+// total wrapped stays at 248, fitting. At plaintext = 240, the
+// "already at boundary" rule forces a full 16-byte pad block
+// and wrapped = 264, which the card rejects with 6700 / 6982 /
+// transport error depending on implementation.
+//
+// Below LevelFull (LevelMAC, LevelNone) the overhead is smaller
+// or zero, but we set the upper bound assuming LevelFull because
+// that's the most common production posture and operators
+// tuning block size shouldn't have to reason about which level
+// their session opened with. The default of 200 has 31 bytes
+// of headroom which absorbs LevelFull worst case comfortably.
+const (
+	maxLoadBlockPlaintext = 231 // see derivation above
+	scp03FullSMOverhead   = 24  // 16 worst-case padding + 8 C-MAC
+	shortLcMaxPayload     = 255
+)
+
 // Install performs the full install chain (INSTALL [for load] →
 // LOAD → INSTALL [for install]) under the current SCP session,
 // returning nil on success or a *PartialInstallError describing
@@ -337,6 +365,20 @@ func (s *Session) loadImageInBlocks(ctx context.Context, opts InstallOptions) (b
 	if blockSize <= 0 {
 		blockSize = defaultLoadBlockSize
 	}
+	// Hard cap: the wrapped APDU after SCP03 LevelFull wrapping
+	// must fit in short-Lc framing. A plaintext block over
+	// maxLoadBlockPlaintext can wrap to >255 bytes, which the
+	// card rejects with a confusing SW (6700/6982/transport
+	// error depending on implementation) that operators can't
+	// easily map back to "you sized your blocks wrong."
+	//
+	// Refuse here with a clear, actionable error rather than
+	// emit and rely on the card to fail.
+	if blockSize > maxLoadBlockPlaintext {
+		return 0, -1, fmt.Errorf(
+			"load: block size %d exceeds safe maximum %d bytes (wrapped APDU would exceed %d-byte short-Lc cap after SCP03 LevelFull SM overhead of up to %d bytes); reduce --load-block-size",
+			blockSize, maxLoadBlockPlaintext, shortLcMaxPayload, scp03FullSMOverhead)
+	}
 	image := opts.LoadImage
 	totalBlocks := (len(image) + blockSize - 1) / blockSize
 	if totalBlocks == 0 {
@@ -399,9 +441,21 @@ func (s *Session) installForInstall(ctx context.Context, opts InstallOptions) er
 		return fmt.Errorf("INSTALL [for install]: %w", err)
 	}
 	cmd := &apdu.Command{
-		CLA:  clsGP,
-		INS:  0xE6,
-		P1:   0x04, // INSTALL [for install]
+		CLA: clsGP,
+		INS: 0xE6,
+		// P1=0x0C is the combined "INSTALL [for install]" +
+		// "INSTALL [for make selectable]" form per GP Card Spec
+		// v2.3.1 §11.5.2.1, table 11-49: bit 0x04 (install
+		// applet) OR-ed with bit 0x08 (make selectable). This is
+		// the standard one-shot path documented in §11.5.3.6 as
+		// "the most common installation scenario." Sending
+		// P1=0x04 alone leaves the applet registered but not
+		// selectable on real cards — operators see the install
+		// succeed and then SELECT fails with a confusing SW.
+		// The combined form has been compatible with every
+		// JCOP/SafeNet/YubiKey implementation observed in the
+		// reference traces this package was built against.
+		P1:   0x0C,
 		P2:   0x00,
 		Data: data,
 	}
@@ -409,7 +463,7 @@ func (s *Session) installForInstall(ctx context.Context, opts InstallOptions) er
 	if err != nil {
 		return err
 	}
-	return checkSW(resp, "INSTALL [for install]")
+	return checkSW(resp, "INSTALL [for install + make-selectable]")
 }
 
 // Delete removes a registered AID from the card. With related=true,

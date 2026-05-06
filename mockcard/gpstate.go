@@ -172,10 +172,29 @@ func (g *GPState) handleInstall(cmd *apdu.Command) *apdu.Response {
 	if cmd.P2 != 0x00 {
 		return mkSW(0x6A86)
 	}
+	// P1 per GP Card Spec v2.3.1 §11.5.2.1 table 11-49 is a
+	// bitmap; multiple INSTALL phases can be combined in a
+	// single APDU:
+	//
+	//   bit 0x02 — INSTALL [for load]
+	//   bit 0x04 — INSTALL [for install]
+	//   bit 0x08 — INSTALL [for make selectable]
+	//
+	// 0x0C (0x04 | 0x08) is the combined install + make
+	// selectable form — the standard one-shot path documented
+	// in §11.5.3.6. The mock accepts every bitmap that's
+	// well-formed against the spec; the install handler does
+	// the same registration work regardless of whether the
+	// make-selectable bit was set.
 	switch cmd.P1 {
 	case 0x02:
 		return g.handleInstallForLoad(cmd)
-	case 0x04:
+	case 0x04, 0x08, 0x0C:
+		// 0x04 install only; 0x08 make-selectable only; 0x0C
+		// combined. All three end up registering the applet
+		// in the mock's inventory; the mock does not model the
+		// "selectable" bit separately because none of the
+		// host-side test surface depends on it.
 		return g.handleInstallForInstall(cmd)
 	default:
 		return mkSW(0x6A86)

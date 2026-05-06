@@ -564,3 +564,66 @@ func TestGPInstall_LoadProgressSilentInJSONMode(t *testing.T) {
 		t.Errorf("JSON mode should not emit LOAD progress; stderr:\n%s", stderr.String())
 	}
 }
+
+// TestGPInstall_FinalInstallStageUsesCombinedP1 pins the GP §11.5.2.1
+// P1 encoding for the final INSTALL stage. P1 must be 0x0C
+// (0x04 install | 0x08 make-selectable), the combined form per
+// §11.5.3.6 which is the standard one-shot installation path.
+//
+// This is mock-invisible if the mock accepts P1=0x04 alone (it
+// did until commit 4254aa9... wait, this commit). The bug was:
+// production sent P1=0x04 alone, mock accepted it, but real
+// JCOP/SafeNet/YubiKey cards leave the applet not-selectable in
+// that case. The next SELECT against the applet AID would fail
+// with a confusing SW. Pinning the wire bytes here catches any
+// future regression.
+//
+// Recording transport captures every APDU; we filter for INS=0xE6
+// and find the entry whose P1 bit 0x04 is set (install-related),
+// then assert it's exactly 0x0C.
+func TestGPInstall_FinalInstallStageUsesCombinedP1(t *testing.T) {
+	capPath := writeFixtureCAP(t)
+
+	mc := mockcard.NewSCP03Card(scp03.DefaultKeys)
+	rec := newRecordingTransport(mc.Transport())
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) { return rec, nil },
+	}
+	if err := cmdGPInstall(context.Background(), env, []string{
+		"--reader", "fake",
+		"--cap", capPath,
+		"--applet-aid", "D2760001240101",
+		"--scp03-keys-default",
+		"--confirm-write",
+	}); err != nil {
+		t.Fatalf("cmdGPInstall: %v\n%s", err, buf.String())
+	}
+
+	// Recorded APDUs are post-SM but the headers (CLA/INS/P1/P2)
+	// pass through SCP03 wrapping unchanged for INSTALL.
+	var sawInstallForLoad, sawInstallForInstall bool
+	for _, c := range rec.cmds {
+		if c.INS != 0xE6 {
+			continue
+		}
+		switch {
+		case c.P1 == 0x02:
+			sawInstallForLoad = true
+		case c.P1&0x04 != 0:
+			sawInstallForInstall = true
+			if c.P1 != 0x0C {
+				t.Errorf("INSTALL [for install] P1 = 0x%02X, want 0x0C "+
+					"(combined install + make-selectable per GP §11.5.2.1)", c.P1)
+			}
+		}
+	}
+	if !sawInstallForLoad {
+		t.Error("no INSTALL [for load] (P1=0x02) recorded; install chain incomplete")
+	}
+	if !sawInstallForInstall {
+		t.Error("no INSTALL [for install] (P1 bit 0x04) recorded; install chain incomplete")
+	}
+}

@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/securitydomain"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 func openInstallSession(t *testing.T) (*securitydomain.Session, *mockcard.SCP03Card) {
@@ -410,5 +414,136 @@ func TestSession_Install_RejectsImageTooLargeForOneByteSeq(t *testing.T) {
 	}
 	if pe.Stage != securitydomain.StageLoad {
 		t.Errorf("Stage = %v, want StageLoad", pe.Stage)
+	}
+}
+
+
+// TestLoad_RefusesBlockSizeOverWrappedCap covers the LOAD wrapped-
+// size cap. Plaintext block sizes that fit on their own can fail
+// once SCP03 LevelFull wrapping adds up to 24 bytes (16 padding +
+// 8 MAC). The cap is host-side: refuse plaintext > 231 with a
+// clear error rather than emit the APDU and let the card reject
+// it with a confusing SW.
+//
+// Drives Install via the public API; the validation fires inside
+// loadImageInBlocks before any LOAD goes on the wire, so a
+// mockcard that doesn't validate block size still exercises the
+// host-side gate.
+func TestLoad_RefusesBlockSizeOverWrappedCap(t *testing.T) {
+	cases := []struct {
+		name       string
+		blockSize  int
+		wantRefuse bool
+	}{
+		{"default zero -> 200", 0, false},
+		{"explicit 200 (current default)", 200, false},
+		{"boundary 231 (exact max)", 231, false},
+		{"232 over conservative cap", 232, true},
+		{"247 typical user mistake", 247, true},
+		{"255 short-Lc max plaintext (no headroom)", 255, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sess, _ := openInstallSession(t)
+			loadAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+			err := sess.Install(context.Background(), securitydomain.InstallOptions{
+				LoadFileAID:   loadAID,
+				ModuleAID:     loadAID,
+				AppletAID:     loadAID,
+				LoadImage:     make([]byte, 1024),
+				LoadBlockSize: tc.blockSize,
+			})
+			refused := err != nil && strings.Contains(err.Error(), "exceeds safe maximum")
+			if refused != tc.wantRefuse {
+				t.Errorf("blockSize=%d refused=%v want=%v (err: %v)",
+					tc.blockSize, refused, tc.wantRefuse, err)
+			}
+		})
+	}
+}
+
+// loadRecordingTransport wraps a transport.Transport and captures
+// every command transmitted, so a test can inspect the post-SM
+// APDU bytes that actually go on the wire. Used by
+// TestLoad_WrappedAPDUStaysUnderShortLcCap to validate by
+// measurement, not just by arithmetic.
+type loadRecordingTransport struct {
+	inner transport.Transport
+	cmds  []apdu.Command // value copies so later mutations don't affect the record
+}
+
+func (r *loadRecordingTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	c := *cmd
+	c.Data = append([]byte(nil), cmd.Data...)
+	r.cmds = append(r.cmds, c)
+	return r.inner.Transmit(ctx, cmd)
+}
+
+func (r *loadRecordingTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+	return r.inner.TransmitRaw(ctx, raw)
+}
+
+func (r *loadRecordingTransport) Close() error                    { return r.inner.Close() }
+func (r *loadRecordingTransport) TrustBoundary() transport.TrustBoundary { return r.inner.TrustBoundary() }
+
+// TestLoad_WrappedAPDUStaysUnderShortLcCap measures actual wire
+// bytes by recording every transmitted APDU and asserting none
+// exceed the short-Lc 255-byte payload cap when wrapped at the
+// maximum permitted plaintext block size.
+//
+// At blockSize=200 (default) every wrapped LOAD APDU should be
+// well below 255. At blockSize=231 (the documented hard cap),
+// the worst-case wrapped size should still be under 255.
+func TestLoad_WrappedAPDUStaysUnderShortLcCap(t *testing.T) {
+	for _, blockSize := range []int{200, 231} {
+		t.Run(fmt.Sprintf("blockSize=%d", blockSize), func(t *testing.T) {
+			mc := mockcard.NewSCP03Card(scp03.DefaultKeys)
+			rec := &loadRecordingTransport{inner: mc.Transport()}
+			sess, err := securitydomain.OpenSCP03(context.Background(), rec, &scp03.Config{
+				Keys:          scp03.DefaultKeys,
+				KeyVersion:    0xFF,
+				SecurityLevel: channel.LevelFull,
+			})
+			if err != nil {
+				t.Fatalf("OpenSCP03: %v", err)
+			}
+			defer sess.Close()
+
+			loadAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+			image := make([]byte, 1024)
+			// Image content doesn't matter for this test — the mock
+			// will accept any bytes; we only care about wire size.
+			_ = sess.Install(context.Background(), securitydomain.InstallOptions{
+				LoadFileAID:   loadAID,
+				ModuleAID:     loadAID,
+				AppletAID:     loadAID,
+				LoadImage:     image,
+				LoadBlockSize: blockSize,
+			})
+
+			loadCount := 0
+			maxSeen := 0
+			for _, c := range rec.cmds {
+				if c.INS != 0xE8 { // LOAD
+					continue
+				}
+				loadCount++
+				// Wire size = 4-byte header + 1-byte Lc + Data.
+				// Lc encodes the data length in short form (single
+				// byte), so the data field itself must be ≤ 255.
+				if len(c.Data) > 255 {
+					t.Errorf("LOAD APDU %d data field %d bytes, exceeds short-Lc limit (255)",
+						loadCount, len(c.Data))
+				}
+				if len(c.Data) > maxSeen {
+					maxSeen = len(c.Data)
+				}
+			}
+			if loadCount == 0 {
+				t.Fatal("no LOAD APDUs recorded")
+			}
+			t.Logf("blockSize=%d: %d LOAD APDU(s), max wrapped data size=%d bytes",
+				blockSize, loadCount, maxSeen)
+		})
 	}
 }
