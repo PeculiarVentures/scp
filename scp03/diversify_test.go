@@ -49,11 +49,11 @@ func TestDiversify_Determinism(t *testing.T) {
 	master := DefaultKeys
 	csn, _ := hex.DecodeString("0102030405060708")
 
-	first, err := Diversify(master, csn)
+	first, err := DiversifySP800108v1(master, csn)
 	if err != nil {
 		t.Fatalf("Diversify call 1: %v", err)
 	}
-	second, err := Diversify(master, csn)
+	second, err := DiversifySP800108v1(master, csn)
 	if err != nil {
 		t.Fatalf("Diversify call 2: %v", err)
 	}
@@ -77,11 +77,11 @@ func TestDiversify_CSNIndependence(t *testing.T) {
 	cardA, _ := hex.DecodeString("0102030405060708")
 	cardB, _ := hex.DecodeString("0102030405060709") // last byte differs
 
-	keysA, err := Diversify(master, cardA)
+	keysA, err := DiversifySP800108v1(master, cardA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keysB, err := Diversify(master, cardB)
+	keysB, err := DiversifySP800108v1(master, cardB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestDiversify_RoleIndependence(t *testing.T) {
 	master := StaticKeys{ENC: same, MAC: same, DEK: same}
 	csn, _ := hex.DecodeString("01020304")
 
-	got, err := Diversify(master, csn)
+	got, err := DiversifySP800108v1(master, csn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestDiversify_DiversifiedKeysDifferFromMaster(t *testing.T) {
 	master := DefaultKeys
 	csn, _ := hex.DecodeString("00000000")
 
-	got, err := Diversify(master, csn)
+	got, err := DiversifySP800108v1(master, csn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestDiversify_AllAESVariants(t *testing.T) {
 			func(t *testing.T) {
 				k := bytes.Repeat([]byte{0xAA}, keyLen)
 				master := StaticKeys{ENC: k, MAC: k, DEK: k}
-				got, err := Diversify(master, csn)
+				got, err := DiversifySP800108v1(master, csn)
 				if err != nil {
 					t.Fatalf("Diversify (key length %d): %v", keyLen, err)
 				}
@@ -183,7 +183,7 @@ func TestDiversify_AllAESVariants(t *testing.T) {
 // vendor publishes exhaustive vectors for their proprietary
 // schemes), but it locks in the current implementation against
 // silent drift. The expected output was computed using the
-// current Diversify() implementation; any future change that
+// current DiversifySP800108v1() implementation; any future change that
 // alters the output will fail this test loudly so the change
 // can be reviewed for compatibility impact.
 //
@@ -199,7 +199,7 @@ func TestDiversify_KnownAnswerTest(t *testing.T) {
 	}
 	csn := divHex("0102030405060708")
 
-	got, err := Diversify(master, csn)
+	got, err := DiversifySP800108v1(master, csn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestDiversify_ErrorCases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Diversify(tt.master, tt.csn)
+			_, err := DiversifySP800108v1(tt.master, tt.csn)
 			if err == nil {
 				t.Fatal("Diversify accepted invalid input")
 			}
@@ -283,7 +283,7 @@ func TestDiversify_RoundTripWithMockCard(t *testing.T) {
 	master := DefaultKeys
 	csn, _ := hex.DecodeString("CAFEBABEDEADBEEF")
 
-	diversified, err := Diversify(master, csn)
+	diversified, err := DiversifySP800108v1(master, csn)
 	if err != nil {
 		t.Fatal(err)
 	}
