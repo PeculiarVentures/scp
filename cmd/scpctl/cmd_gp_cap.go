@@ -1,0 +1,150 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/PeculiarVentures/scp/gp"
+)
+
+// cap is a sub-group within the gp group: 'scpctl gp cap inspect'.
+// Today there is only the inspect subcommand; the sub-grouping
+// reserves namespace for future host-side CAP utilities (sign,
+// dump, diff) that would also be cardless and that don't naturally
+// belong as siblings of probe/registry.
+var gpCapCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
+	"inspect": cmdGPCapInspect,
+}
+
+func gpCapUsage(w io.Writer) {
+	fmt.Fprint(w, `scpctl gp cap - Java Card CAP file utilities (host-only)
+
+Usage:
+  scpctl gp cap <subcommand> [flags]
+
+Subcommands:
+  inspect <path>  Read a CAP file from disk and print its package
+                  AID, package version, applet inventory, and
+                  component sizes. Does NOT touch a card.
+
+Use "scpctl gp cap <subcommand> -h" for per-command flags.
+`)
+}
+
+// cmdGPCap dispatches the cap-subgroup. Mirrors the top-level
+// runGroup pattern used by gp/piv/sd/oce groups, scaled down: the
+// only subcommand today is inspect.
+func cmdGPCap(ctx context.Context, env *runEnv, args []string) error {
+	if len(args) == 0 {
+		gpCapUsage(env.out)
+		return &usageError{msg: "gp cap requires a subcommand"}
+	}
+	sub := args[0]
+	rest := args[1:]
+	if sub == "-h" || sub == "--help" || sub == "help" {
+		gpCapUsage(env.out)
+		return nil
+	}
+	handler, ok := gpCapCommands[sub]
+	if !ok {
+		gpCapUsage(env.out)
+		return &usageError{msg: fmt.Sprintf("unknown gp cap subcommand %q", sub)}
+	}
+	return handler(ctx, env, rest)
+}
+
+// gpCapInspectData is the JSON payload of 'gp cap inspect'.
+type gpCapInspectData struct {
+	File           string                       `json:"file"`
+	FileSize       int64                        `json:"file_size"`
+	CAPVersion     string                       `json:"cap_version"`
+	PackageVersion string                       `json:"package_version"`
+	PackageAID     string                       `json:"package_aid"`
+	PackageName    string                       `json:"package_name,omitempty"`
+	Applets        []gpCapInspectApplet         `json:"applets"`
+	Components     []gpCapInspectComponentEntry `json:"components"`
+}
+
+type gpCapInspectApplet struct {
+	AID                 string `json:"aid"`
+	InstallMethodOffset string `json:"install_method_offset"`
+}
+
+type gpCapInspectComponentEntry struct {
+	Name string `json:"name"`
+	Tag  string `json:"tag"`
+	Size int    `json:"size"`
+}
+
+// cmdGPCapInspect reads a CAP file from disk via gp.ParseCAPFile
+// and renders its metadata. Host-only: never connects to a reader.
+//
+// Argument shape: positional path. The CAP file path is the only
+// thing the command actually needs, and a positional arg reads
+// more naturally than '--cap <path>' for a single-input inspector.
+func cmdGPCapInspect(ctx context.Context, env *runEnv, args []string) error {
+	fs := newSubcommandFlagSet("gp cap inspect", env)
+	jsonMode := fs.Bool("json", false, "Emit JSON output.")
+	if err := fs.Parse(args); err != nil {
+		return &usageError{msg: err.Error()}
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return &usageError{msg: "gp cap inspect requires exactly one positional argument: the CAP file path"}
+	}
+	path := rest[0]
+
+	report := &Report{Subcommand: "gp cap inspect"}
+
+	st, err := os.Stat(path)
+	if err != nil {
+		report.Fail("stat CAP", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	report.Pass("stat CAP", fmt.Sprintf("%s (%d bytes)", path, st.Size()))
+
+	capFile, err := gp.ParseCAPFile(path)
+	if err != nil {
+		report.Fail("parse CAP", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	report.Pass("parse CAP", fmt.Sprintf("package %s, %d applet(s), %d component(s)",
+		capFile.PackageAID, len(capFile.Applets), len(capFile.Components)))
+
+	data := &gpCapInspectData{
+		File:           path,
+		FileSize:       st.Size(),
+		CAPVersion:     fmt.Sprintf("%d.%d", capFile.CAPVersionMajor, capFile.CAPVersionMinor),
+		PackageVersion: fmt.Sprintf("%d.%d", capFile.PackageVersionMajor, capFile.PackageVersionMinor),
+		PackageAID:     capFile.PackageAID.String(),
+	}
+	if len(capFile.PackageName) > 0 {
+		data.PackageName = string(capFile.PackageName)
+	}
+	for _, a := range capFile.Applets {
+		data.Applets = append(data.Applets, gpCapInspectApplet{
+			AID:                 a.AID.String(),
+			InstallMethodOffset: fmt.Sprintf("0x%04X", a.InstallMethodOffset),
+		})
+	}
+	for _, c := range capFile.Components {
+		data.Components = append(data.Components, gpCapInspectComponentEntry{
+			Name: c.Name,
+			Tag:  fmt.Sprintf("0x%02X", c.Tag),
+			Size: len(c.Raw),
+		})
+	}
+	report.Data = data
+
+	if err := report.Emit(env.out, *jsonMode); err != nil {
+		return err
+	}
+	if report.HasFailure() {
+		return fmt.Errorf("gp cap inspect reported failures")
+	}
+	return nil
+}
