@@ -87,6 +87,8 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		"Keep Descriptor.cap in the load image. Default excludes it.")
 	loadBlockSize := fs.Int("load-block-size", 0,
 		"LOAD chunk size in bytes (0 = default 200, conservative for SM overhead within short-Lc encoding).")
+	loadHashFlag := fs.String("load-hash", "none",
+		"Load file data block hash policy: none (no hash sent), sha1 (computed by host), sha256 (computed by host), or hex:<digest> for an operator-supplied digest sent verbatim. Some SD policies require a particular algorithm; some reject any hash. Default is none — set this when the target SD is known to require it.")
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	sdAIDHex := fs.String("sd-aid", "",
 		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
@@ -223,16 +225,25 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	data.PrivilegesHex = strings.ToUpper(hex.EncodeToString(privs))
 	report.Pass("privileges", "0x"+data.PrivilegesHex)
 
-	// Hash policy: today the CLI does not auto-compute a load
-	// hash. The Session.Install layer accepts whatever LoadHash
-	// the caller sets in InstallOptions; gp install passes nil
-	// today (no hash on the wire). Surface that explicitly so an
-	// operator who expects a hash to be sent knows it isn't, and
-	// so a future --load-hash flag has an obvious extension
-	// point. JSON consumers branching on this field will see
-	// "none" today.
-	data.LoadHashAlgorithm = "none"
-	report.Pass("load hash", "none (host does not auto-send a hash; some SD policies require one)")
+	// Hash policy: parse --load-hash. Default is none, in which
+	// case Session.Install passes nil and the wire carries a
+	// zero-length LV. Operators target a specific SD policy
+	// (sha1, sha256) or supply a precomputed digest (hex:...).
+	hashSpec, err := parseLoadHashFlag(*loadHashFlag)
+	if err != nil {
+		report.Fail("load hash", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return &usageError{msg: err.Error()}
+	}
+	loadHash := hashSpec.Resolve(loadImage)
+	data.LoadHashAlgorithm = hashSpec.Label()
+	hashDetail := hashSpec.Label()
+	if hashSpec.Algorithm != "none" && len(loadHash) > 0 {
+		hashDetail = fmt.Sprintf("%s — %s", hashSpec.Label(), strings.ToUpper(hex.EncodeToString(loadHash)))
+	} else {
+		hashDetail = "none (host does not auto-send a hash; some SD policies require one)"
+	}
+	report.Pass("load hash", hashDetail)
 
 	// 3. Dry-run gate.
 	if !*confirm {
@@ -289,10 +300,23 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	opts := securitydomain.InstallOptions{
 		LoadFileAID:   loadFileAID,
 		LoadImage:     loadImage,
+		LoadHash:      loadHash,
 		ModuleAID:     moduleAID,
 		AppletAID:     appletAID,
 		Privileges:    privs,
 		LoadBlockSize: *loadBlockSize,
+	}
+	// Block progress: print 'LOAD N/M' lines to stderr in text
+	// mode so an operator watching a long install sees progress
+	// rather than a silent stall. JSON mode skips the per-block
+	// chatter — JSON consumers branch on the final report's
+	// load_block_count field. The callback is observation-only;
+	// errors raised inside it are not surfaced to Install.
+	if !*jsonMode {
+		opts.OnLoadProgress = func(blockNum, totalBlocks, bytesLoaded, totalBytes int) {
+			fmt.Fprintf(env.errOut, "    LOAD %d/%d (%d/%d bytes)\n",
+				blockNum+1, totalBlocks, bytesLoaded, totalBytes)
+		}
 	}
 	if err := sd.Install(ctx, opts); err != nil {
 		recordInstallFailure(report, data, err)

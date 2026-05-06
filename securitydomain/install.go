@@ -187,6 +187,18 @@ type InstallOptions struct {
 	Privileges    []byte
 
 	LoadBlockSize int
+
+	// OnLoadProgress, if non-nil, is invoked after each LOAD
+	// APDU has been acknowledged by the card. Lets a CLI print
+	// 'block N of M' without coupling securitydomain to a
+	// logger. The callback runs on the same goroutine as
+	// Install; an expensive callback will throttle the LOAD
+	// chain. blockNum is 0-indexed (so the first ack passes 0);
+	// totalBlocks is the count the host plans to issue at the
+	// configured block size, fixed for the lifetime of the
+	// install. Errors returned by the callback are not surfaced
+	// — the callback is observation-only.
+	OnLoadProgress func(blockNum, totalBlocks, bytesLoaded, totalBytes int)
 }
 
 // defaultLoadBlockSize is conservative (~200 bytes) to fit short-Lc
@@ -368,6 +380,9 @@ func (s *Session) loadImageInBlocks(ctx context.Context, opts InstallOptions) (b
 		}
 		bytesLoaded = end
 		lastSeq = seq
+		if opts.OnLoadProgress != nil {
+			opts.OnLoadProgress(seq, totalBlocks, bytesLoaded, len(image))
+		}
 	}
 	return bytesLoaded, lastSeq, nil
 }
