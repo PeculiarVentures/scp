@@ -26,11 +26,23 @@ import (
 //     active.
 //
 // On Probe failure (transport error rather than just SW reporting
-// "no YubiKey object"), the helper logs a SKIP entry and falls
-// back to profile.YubiKey() — preserves backward compat for
-// callers running on stable YubiKey hardware where probe should
-// always succeed but a transient error shouldn't hard-fail
-// session setup.
+// "no YubiKey object"), the helper falls back to profile.Standard().
+//
+// The fallback used to default to profile.YubiKey() for
+// "backward compat," but the external review on feat/sd-keys-cli
+// flagged this as dangerous: the new generic SD commands (sd
+// keys list/export/delete/generate/import, sd allowlist) all use
+// this resolver, none of them are legacy YubiKey-only flows that
+// need that fallback, and silently treating a probe-failed card
+// as a YubiKey enables YubiKey-specific behavior (factory SCP03
+// keys, INS=0xF1) that's wrong for a non-YubiKey card.
+//
+// Standard-fallback is the safe choice: profile.Standard() refuses
+// every YubiKey-extension operation host-side with a clear error,
+// so a probe-glitched-but-actually-YubiKey card gets a diagnostic
+// the operator can act on (rerun with --profile=yubikey-sd to
+// confirm), while a genuinely-non-YubiKey card doesn't get
+// Yubico-only commands sent to it.
 //
 // Returns the resolved profile and its Name() string, suitable
 // for inclusion in JSON output.
@@ -50,13 +62,16 @@ func resolveProfile(
 	result, err := profile.Probe(ctx, t, nil)
 	if err != nil {
 		// Probe SELECT itself failed (transport error or no SD
-		// reachable). Fall back to YubiKey to preserve existing
-		// behavior; the SKIP message tells the operator what
-		// happened.
+		// reachable). Fall back to Standard rather than YubiKey
+		// — the safer default for a card we couldn't classify.
+		// See the function-level comment for rationale; this is
+		// the external-review fix that closes the YubiKey-via-
+		// fallback hole.
 		report.Skip("profile selection",
-			fmt.Sprintf("probe failed (%v); defaulting to yubikey-sd", err))
-		yk := profile.YubiKey()
-		return yk, yk.Name()
+			fmt.Sprintf("probe failed (%v); falling back to standard-sd "+
+				"(pin --profile=yubikey-sd if the card is a YubiKey)", err))
+		std := profile.Standard()
+		return std, std.Name()
 	}
 	report.Pass("profile selection",
 		fmt.Sprintf("auto-detected: %s", result.Profile.Name()))

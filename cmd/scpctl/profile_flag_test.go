@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/transport"
 )
@@ -237,3 +238,87 @@ func TestProfileFlag_AutoIsDefault(t *testing.T) {
 			err, buf.String())
 	}
 }
+
+// TestProfileFlag_AutoFallbackOnProbeFailureIsStandardNotYubiKey
+// pins resolveProfile's fallback when the auto-probe fails (the
+// SELECT SD APDU itself errors out at the transport layer —
+// transient reader glitch, mute card, gRPC relay drop).
+//
+// Pre-fix: probe failure → profile.YubiKey() fallback. The
+// rationale was "preserve backward compat for stable YubiKey
+// hardware where probe should always succeed but a transient
+// error shouldn't hard-fail session setup." But every caller of
+// resolveProfile is one of the new generic SD commands (sd keys
+// list/export/delete/generate/import, sd allowlist set/clear) —
+// none of which existed before this branch, so there was no
+// backward compat to preserve. The fallback enabled YubiKey-only
+// paths (factory SCP03 keys, INS=0xF1 GENERATE EC KEY) to fire
+// on probe-failed but actually non-YubiKey cards.
+//
+// Post-fix: probe failure → profile.Standard() fallback.
+// profile.Standard refuses YubiKey-extension operations
+// host-side with a clear error; a probe-glitched-but-actually-
+// YubiKey card surfaces the issue with an actionable diagnostic
+// (rerun with --profile=yubikey-sd) rather than silently
+// running Yubico-only commands against a generic GP card.
+//
+// The test drives a non-destructive read command (sd keys list)
+// through a transport whose first APDU returns a transport-level
+// error. resolveProfile falls back, then OpenSCP03 fails, but
+// the JSON output captures the resolved profile name in the
+// SKIP entry before that failure. We assert the message names
+// standard-sd, not yubikey-sd.
+func TestProfileFlag_AutoFallbackOnProbeFailureIsStandardNotYubiKey(t *testing.T) {
+	connect := func(_ context.Context, _ string) (transport.Transport, error) {
+		return &probeFailingTransport{}, nil
+	}
+	var buf bytes.Buffer
+	env := &runEnv{out: &buf, errOut: &buf, connect: connect}
+
+	// sd keys list with --json so the profile-selection report
+	// entry is captured in stdout. We expect the command to fail
+	// (the failing transport ensures no SD operation can succeed)
+	// but the SKIP entry for profile selection must show
+	// standard-sd as the fallback.
+	_ = cmdSDKeysList(context.Background(), env, []string{
+		"--reader", "fake",
+		"--json",
+	})
+	out := buf.String()
+
+	// The report includes a SKIP entry whose detail names the
+	// fallback profile. Assert standard-sd appears, yubikey-sd
+	// does not appear in fallback context.
+	if !strings.Contains(out, "standard-sd") {
+		t.Errorf("expected SKIP message to name standard-sd as fallback; full output:\n%s", out)
+	}
+	// Sentinel: the OLD behavior would emit "defaulting to yubikey-sd".
+	// If that string ever reappears, the regression sentinel fires.
+	if strings.Contains(out, "defaulting to yubikey-sd") {
+		t.Errorf("output contains old yubikey-sd fallback string — regression:\n%s", out)
+	}
+}
+
+// probeFailingTransport is a transport.Transport implementation
+// whose Transmit/TransmitRaw always return an error. Used to
+// drive profile.Probe's transport-error failure path in the test
+// above.
+type probeFailingTransport struct{}
+
+func (probeFailingTransport) Transmit(_ context.Context, _ *apdu.Command) (*apdu.Response, error) {
+	return nil, &probeFailureError{msg: "simulated transport failure (test)"}
+}
+
+func (probeFailingTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return nil, &probeFailureError{msg: "simulated transport failure (test)"}
+}
+
+func (probeFailingTransport) Close() error { return nil }
+
+func (probeFailingTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
+
+type probeFailureError struct{ msg string }
+
+func (e *probeFailureError) Error() string { return e.msg }
