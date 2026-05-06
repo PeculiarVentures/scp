@@ -148,4 +148,3 @@ func cmdPIVGroupReset(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("PIV reset", "applet returned to factory state (PIN=123456, PUK=12345678)")
 	return report.Emit(env.out, *jsonMode)
 }
-

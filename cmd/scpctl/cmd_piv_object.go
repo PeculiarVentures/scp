@@ -198,4 +198,3 @@ func cmdPIVObjectPut(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("write object", fmt.Sprintf("id=%s len=%d", id, len(data)))
 	return report.Emit(env.out, *jsonMode)
 }
-

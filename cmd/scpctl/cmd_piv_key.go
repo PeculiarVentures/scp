@@ -211,4 +211,3 @@ func cmdPIVKeyAttest(ctx context.Context, env *runEnv, args []string) error {
 	}
 	return report.Emit(env.out, *jsonMode)
 }
-

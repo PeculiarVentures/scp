@@ -152,4 +152,3 @@ func cmdPIVMgmtChangeKey(ctx context.Context, env *runEnv, args []string) error 
 	report.Pass("change mgmt key", fmt.Sprintf("now %s", newMK.Algorithm))
 	return report.Emit(env.out, *jsonMode)
 }
-

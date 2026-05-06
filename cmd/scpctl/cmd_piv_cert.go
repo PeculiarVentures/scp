@@ -267,4 +267,3 @@ func cmdPIVCertDelete(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("delete cert", fmt.Sprintf("slot=%s cleared", slot))
 	return report.Emit(env.out, *jsonMode)
 }
-
