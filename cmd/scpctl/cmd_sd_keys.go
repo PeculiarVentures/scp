@@ -289,4 +289,3 @@ func spkiFingerprint(c *x509.Certificate) string {
 	sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
 	return hexEncode(sum[:])
 }
-

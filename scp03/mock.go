@@ -658,4 +658,3 @@ func (t *MockTransport) Close() error { return nil }
 func (t *MockTransport) TrustBoundary() transport.TrustBoundary {
 	return transport.TrustBoundaryUnknown
 }
-
