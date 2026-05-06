@@ -113,6 +113,46 @@ func parseSerial(token string) (*big.Int, error) {
 	return n, nil
 }
 
+// requireSCP11AllowlistKID validates that --kid names a SCP11 SD
+// slot. The allowlist on-wire shape (A6 {83 {KID, KVN}} + 70 {93
+// serial...}) is meaningful only against SCP11 SD keys: the card
+// looks up the named KID/KVN, walks its allowlist for SCP11
+// authentication, and rejects unmatched cert serials at SCP11
+// session establishment. Pushing an allowlist against a non-SCP11
+// reference (e.g. SCP03 KID 0x01, OCE CA KID 0x10, KLCC KID
+// 0x20-0x2F) either silently does nothing useful or surfaces a
+// card-specific error that doesn't tell the operator the
+// reference was wrong.
+//
+// External review on feat/sd-keys-cli, Finding 5: 'sd allowlist
+// accepts arbitrary KIDs even though the command is SCP11-
+// specific.' Host-side validation gives a clean usage error
+// before any APDU is sent.
+//
+// Valid KIDs:
+//
+//	0x11 — SCP11a SD ENC private key (KeyIDSCP11a)
+//	0x13 — SCP11b SD ENC private key (KeyIDSCP11b)
+//	0x15 — SCP11c SD ENC private key (KeyIDSCP11c)
+//
+// per GP Amendment F §7.1.1.
+//
+// If a future profile declares additional allowlist-capable KIDs
+// (some custom JCOP installs use vendor-specific SD-key slots),
+// this check should be relaxed to consult the active profile
+// rather than the hardcoded set; today no profile in tree does
+// so.
+func requireSCP11AllowlistKID(kid byte) error {
+	switch kid {
+	case securitydomain.KeyIDSCP11a, securitydomain.KeyIDSCP11b, securitydomain.KeyIDSCP11c:
+		return nil
+	}
+	return fmt.Errorf(
+		"--kid 0x%02X: sd allowlist applies only to SCP11 SD keys (KID 0x11/0x13/0x15); "+
+			"got 0x%02X. Use --kid 0x11 (SCP11a), 0x13 (SCP11b), or 0x15 (SCP11c)",
+		kid, kid)
+}
+
 // cmdSDAllowlistSet pushes a certificate-serial-number allowlist to
 // the card for one SCP11 key reference. Wire shape per Yubico SDK:
 //
@@ -135,7 +175,7 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("sd allowlist set", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	kidStr := fs.String("kid", "", "Key ID, hex byte (e.g. 11). Required.")
+	kidStr := fs.String("kid", "", "SCP11 SD Key ID, hex byte. Must be 11 (SCP11a), 13 (SCP11b), or 15 (SCP11c). Required.")
 	kvnStr := fs.String("kvn", "", "Key Version Number, hex byte (e.g. 01). Required.")
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, sd allowlist set "+
@@ -156,6 +196,9 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 	kid, err := parseHexByte(*kidStr)
 	if err != nil {
 		return &usageError{msg: fmt.Sprintf("--kid: %v", err)}
+	}
+	if err := requireSCP11AllowlistKID(kid); err != nil {
+		return &usageError{msg: err.Error()}
 	}
 	kvn, err := parseHexByte(*kvnStr)
 	if err != nil {
@@ -253,7 +296,7 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 	fs := newSubcommandFlagSet("sd allowlist clear", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	kidStr := fs.String("kid", "", "Key ID, hex byte (e.g. 11). Required.")
+	kidStr := fs.String("kid", "", "SCP11 SD Key ID, hex byte. Must be 11 (SCP11a), 13 (SCP11b), or 15 (SCP11c). Required.")
 	kvnStr := fs.String("kvn", "", "Key Version Number, hex byte (e.g. 01). Required.")
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, sd allowlist clear "+
@@ -269,6 +312,9 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 	kid, err := parseHexByte(*kidStr)
 	if err != nil {
 		return &usageError{msg: fmt.Sprintf("--kid: %v", err)}
+	}
+	if err := requireSCP11AllowlistKID(kid); err != nil {
+		return &usageError{msg: err.Error()}
 	}
 	kvn, err := parseHexByte(*kvnStr)
 	if err != nil {

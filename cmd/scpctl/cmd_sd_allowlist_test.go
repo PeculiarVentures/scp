@@ -316,3 +316,108 @@ func TestParseSerial(t *testing.T) {
 		})
 	}
 }
+
+// TestSDAllowlist_RequiresSCP11KID pins host-side validation
+// that --kid is in {0x11, 0x13, 0x15} for both 'sd allowlist
+// set' and 'sd allowlist clear'. External review on
+// feat/sd-keys-cli, Finding 5: 'sd allowlist accepts arbitrary
+// KIDs even though the command is SCP11-specific.'
+//
+// The on-wire allowlist shape (A6 {83 {KID, KVN}} + 70 {93
+// serial...}) is meaningful only against SCP11 SD keys. Pushing
+// an allowlist against a non-SCP11 reference (SCP03 0x01, OCE
+// CA 0x10, KLCC 0x20-0x2F) either silently does nothing useful
+// or surfaces a card-specific error. Host-side validation gives
+// a clean usage error before any APDU is sent.
+func TestSDAllowlist_RequiresSCP11KID(t *testing.T) {
+	rejects := []struct {
+		name string
+		kid  string
+	}{
+		{"SCP03 default key (0x01)", "01"},
+		{"OCE CA (0x10)", "10"},
+		{"between SCP11a and SCP11b (0x12)", "12"},
+		{"between SCP11b and SCP11c (0x14)", "14"},
+		{"KLCC range start (0x20)", "20"},
+		{"KLCC range end (0x2F)", "2F"},
+		{"out of range high (0xFF)", "FF"},
+	}
+	accepts := []struct {
+		name string
+		kid  string
+	}{
+		{"SCP11a (0x11)", "11"},
+		{"SCP11b (0x13)", "13"},
+		{"SCP11c (0x15)", "15"},
+	}
+
+	verbs := []struct {
+		name string
+		fn   func(context.Context, *runEnv, []string) error
+		args func(kid string) []string
+	}{
+		{
+			name: "set",
+			fn:   cmdSDAllowlistSet,
+			args: func(kid string) []string {
+				return []string{"--reader", "fake", "--kid", kid, "--kvn", "03", "--serial", "0xABCD"}
+			},
+		},
+		{
+			name: "clear",
+			fn:   cmdSDAllowlistClear,
+			args: func(kid string) []string {
+				return []string{"--reader", "fake", "--kid", kid, "--kvn", "03"}
+			},
+		},
+	}
+
+	for _, v := range verbs {
+		v := v
+		t.Run("verb_"+v.name, func(t *testing.T) {
+			for _, rc := range rejects {
+				rc := rc
+				t.Run("rejects_"+rc.name, func(t *testing.T) {
+					mc, err := mockcard.New()
+					if err != nil {
+						t.Fatalf("mockcard.New: %v", err)
+					}
+					env, _ := envForMock(mc)
+					err = v.fn(context.Background(), env, v.args(rc.kid))
+					if err == nil {
+						t.Fatalf("expected usageError for kid=%s on %s, got nil", rc.kid, v.name)
+					}
+					if _, ok := err.(*usageError); !ok {
+						t.Fatalf("expected *usageError, got %T: %v", err, err)
+					}
+					if !strings.Contains(err.Error(), "SCP11") {
+						t.Errorf("error should mention SCP11; got %q", err.Error())
+					}
+				})
+			}
+			for _, ac := range accepts {
+				ac := ac
+				t.Run("accepts_"+ac.name, func(t *testing.T) {
+					mc, err := mockcard.New()
+					if err != nil {
+						t.Fatalf("mockcard.New: %v", err)
+					}
+					env, _ := envForMock(mc)
+					// Dry-run by default — KID validation should
+					// pass and the command should succeed without
+					// hitting the connect path. Asserting no
+					// usageError suffices.
+					err = v.fn(context.Background(), env, v.args(ac.kid))
+					if err != nil {
+						if _, ok := err.(*usageError); ok {
+							t.Errorf("kid=%s on %s should pass KID validation; got usageError: %v",
+								ac.kid, v.name, err)
+						}
+						// non-usage errors (e.g. dry-run-related)
+						// are fine; we're testing the KID gate.
+					}
+				})
+			}
+		})
+	}
+}
