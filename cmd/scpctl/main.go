@@ -1,5 +1,5 @@
 // Command scpctl is the unified administrative CLI for the
-// PeculiarVentures/scp library. It groups four layers of
+// PeculiarVentures/scp library. It groups five layers of
 // functionality:
 //
 //   - test    hardware regression checks (read-only smoke against
@@ -11,6 +11,9 @@
 //             unlock, terminate, OCE/SCP11a bootstraps)
 //   - oce     off-card OCE certificate diagnostics (host-only;
 //             does not touch a card)
+//   - gp      generic GlobalPlatform card-content management
+//             (probe, registry walk over arbitrary GP cards,
+//             host-side CAP file inspection)
 //
 // plus a small set of top-level utilities (readers, probe, version,
 // help) that do not belong to any group.
@@ -46,6 +49,7 @@
 //	scpctl piv  <subcommand>
 //	scpctl sd   <subcommand>
 //	scpctl oce  <subcommand>
+//	scpctl gp   <subcommand>
 //	scpctl version
 //	scpctl help
 //
@@ -111,6 +115,19 @@ var testCommands = map[string]func(ctx context.Context, env *runEnv, args []stri
 	"all":               cmdTest,
 }
 
+// gpCommands maps the gp-group subcommand names. The gp group is
+// the operator surface for generic GlobalPlatform card-content
+// management, distinct from the YubiKey-flavored sd group: probe
+// and registry are read-path operations on arbitrary GP cards;
+// cap is a host-side sub-grouping for CAP file utilities. Future
+// destructive applet-management commands (install, delete) land
+// here too once the Appendix B prerequisites are in place.
+var gpCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
+	"probe":    cmdGPProbe,
+	"registry": cmdGPRegistry,
+	"cap":      cmdGPCap,
+}
+
 // topLevelCommands maps top-level utility subcommands. These are
 // reader-discovery and unauthenticated-probe operations that don't
 // belong to any of the protocol or applet groups.
@@ -156,6 +173,9 @@ func main() {
 		return
 	case "oce":
 		runGroup(ctx, env, "oce", oceCommands, os.Args[2:], oceUsage)
+		return
+	case "gp":
+		runGroup(ctx, env, "gp", gpCommands, os.Args[2:], gpUsage)
 		return
 	}
 
@@ -244,6 +264,9 @@ Groups:
 
   oce         Off-card OCE certificate diagnostics. Host-only;
               does not touch a card. Wired: verify, gen.
+
+  gp          Generic GlobalPlatform card-content management.
+              Wired: probe, registry, cap inspect.
 
 Top-level utilities:
   readers     List PC/SC readers visible to the OS.

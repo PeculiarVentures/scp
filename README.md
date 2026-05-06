@@ -475,6 +475,9 @@ For end-to-end verification against an actual card, the [`cmd/scpctl`](./cmd/scp
 | `sd` | `reset` | Factory-reset SD key material. Destructive; `--confirm-reset-sd` gate (distinct from `--confirm-write` so SD reset and PIV reset can't be conflated). |
 | `sd` | `lock` / `unlock` | Toggle the ISD between SECURED and CARD_LOCKED via GP SET STATUS. Recoverable; `--confirm-write` gate. |
 | `sd` | `terminate` | IRREVERSIBLE: transition the ISD to TERMINATED. The card cannot be recovered by any operation after this. Gated by a distinct `--confirm-terminate-card` flag (NOT `--confirm-write`) so a careless invocation can't brick a card. |
+| `gp` | `probe` | Open an unauthenticated SD session and report Card Recognition Data, GP version, and supported SCPs. Same flow as the legacy top-level `probe` under a `gp probe` report label. Read-only. |
+| `gp` | `registry` | Open an authenticated SCP03 session and walk the GP registry (ISD, Applications, LoadFiles+Modules) via GET STATUS. JSON registry shape matches `sd info --full --json` so scripts can switch between the two unchanged. |
+| `gp` | `cap inspect` | Read a CAP file from disk and print its package AID, package version, applet inventory, and component manifest. Host-only; does not touch a card. |
 | `piv` | `provision` | Generate a PIV slot keypair, optionally install a cert and fetch attestation, all over an SCP11b session. Includes management-key mutual auth and cert-to-pubkey binding check. Destructive; `--confirm-write` gate. |
 | `piv` | `reset` | Block PIN and PUK, then send the YubiKey PIV reset APDU. Erases ALL 24 PIV slots, certs, and resets PIN/PUK/management key to factory defaults. Destructive; gated by `--confirm-write` AND `--confirm-reset-piv`. |
 | `piv` | `info` / `pin` / `puk` / `mgmt` / `key` / `cert` / `object` | Full PIV operator surface — see [`cmd/scpctl/README.md`](./cmd/scpctl/README.md). |
