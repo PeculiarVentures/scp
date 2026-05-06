@@ -77,6 +77,8 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs)
+	expectedCardID := fs.String("expected-card-id", "",
+		"If set, abort before any destructive APDU when the card's CIN (GET DATA 0x0045) does not match this hex value. Recommended for fleet automation: pin the CIN of the card you intended to install onto.")
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, gp install runs in dry-run mode (parses inputs, computes load image hashes, reports planned operations without transmitting writes).")
 
@@ -208,6 +210,14 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	defer sd.Close()
 	data.Protocol = sd.Protocol()
 	report.Pass("open SCP03 SD", scp03Keys.describeKeys(cfg))
+
+	// Optional CIN pin. If --expected-card-id was supplied,
+	// verify the card's CIN before sending any destructive APDU.
+	// Mismatch aborts the install with no card mutation.
+	if err := verifyExpectedCardID(ctx, sd, *expectedCardID, report); err != nil {
+		_ = report.Emit(env.out, *jsonMode)
+		return err
+	}
 
 	// 5. Install. Failure surfaces a PartialInstallError describing
 	//    the stage; we map that to per-stage check lines so the

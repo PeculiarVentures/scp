@@ -51,6 +51,8 @@ func cmdGPDelete(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs)
+	expectedCardID := fs.String("expected-card-id", "",
+		"If set, abort before sending DELETE when the card's CIN (GET DATA 0x0045) does not match this hex value.")
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, gp delete runs in dry-run mode (validates inputs and reports what would be sent without transmitting any APDU that mutates card state).")
 
@@ -110,6 +112,12 @@ func cmdGPDelete(ctx context.Context, env *runEnv, args []string) error {
 	defer sd.Close()
 	data.Protocol = sd.Protocol()
 	report.Pass("open SCP03 SD", scp03Keys.describeKeys(cfg))
+
+	// Optional CIN pin.
+	if err := verifyExpectedCardID(ctx, sd, *expectedCardID, report); err != nil {
+		_ = report.Emit(env.out, *jsonMode)
+		return err
+	}
 
 	if err := sd.Delete(ctx, aid, *related); err != nil {
 		var ae *securitydomain.APDUError

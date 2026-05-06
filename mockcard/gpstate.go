@@ -51,6 +51,21 @@ type GPState struct {
 	// INSTALL [for install] return this SW instead of 9000.
 	// Cleared after firing once.
 	FailNextInstallForInstall uint16
+
+	// IIN is the Issuer Identification Number per GP §B.3 (5
+	// bytes typical, ISO 7812 BCD). Returned by GET DATA tag
+	// 0x0042 when non-empty; an empty slice makes the mock
+	// return SW=6A88 ("referenced data not found"), matching
+	// real cards that don't expose IIN.
+	IIN []byte
+
+	// CIN is the Card Image Number per GP §B.4 (variable length,
+	// vendor-defined). Returned by GET DATA tag 0x0045 when
+	// non-empty; empty produces SW=6A88. CIN is the value the
+	// scpctl --expected-card-id flag pins so an operator can
+	// verify they're talking to the correct card before issuing
+	// destructive commands.
+	CIN []byte
 }
 
 // NewGPState returns a fresh GP state with empty registries and no
@@ -66,7 +81,12 @@ func NewGPState() *GPState { return &GPState{FailLoadAtSeq: -1} }
 // ok=true.
 //
 // Recognized INS bytes: 0xF2 GET STATUS, 0xF0 SET STATUS, 0xE6
-// INSTALL, 0xE8 LOAD, 0xE4 DELETE.
+// INSTALL, 0xE8 LOAD, 0xE4 DELETE. Plus, when the corresponding
+// field is non-empty, GET DATA (INS=0xCA) for tags 0x0042 (IIN)
+// and 0x0045 (CIN). If neither IIN nor CIN is configured, GET
+// DATA falls through to the default handler so the mock's CRD
+// (tag 0x66) and Key Information (tag 0xE0) responses still
+// work.
 func (g *GPState) HandleGPCommand(cmd *apdu.Command) (*apdu.Response, bool) {
 	switch cmd.INS {
 	case 0xF2:
@@ -79,6 +99,29 @@ func (g *GPState) HandleGPCommand(cmd *apdu.Command) (*apdu.Response, bool) {
 		return g.handleLoad(cmd), true
 	case 0xE4:
 		return g.handleDelete(cmd), true
+	case 0xCA:
+		// Only intercept the identity tags. Other GET DATA
+		// queries (CRD, Key Info) are answered by the embedding
+		// mock's default handler.
+		tag := uint16(cmd.P1)<<8 | uint16(cmd.P2)
+		switch tag {
+		case 0x0042:
+			if len(g.IIN) == 0 {
+				return mkSW(0x6A88), true
+			}
+			return &apdu.Response{
+				Data: append([]byte(nil), g.IIN...),
+				SW1:  0x90, SW2: 0x00,
+			}, true
+		case 0x0045:
+			if len(g.CIN) == 0 {
+				return mkSW(0x6A88), true
+			}
+			return &apdu.Response{
+				Data: append([]byte(nil), g.CIN...),
+				SW1:  0x90, SW2: 0x00,
+			}, true
+		}
 	}
 	return nil, false
 }
