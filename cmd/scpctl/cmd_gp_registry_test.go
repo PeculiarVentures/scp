@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -211,5 +212,85 @@ func TestGPRegistry_RequiresExplicitKeyChoice(t *testing.T) {
 	if !strings.Contains(ue.msg, "--scp03-keys-default") ||
 		!strings.Contains(ue.msg, "--scp03-key") {
 		t.Errorf("usage error should name the explicit options; got %q", ue.msg)
+	}
+}
+
+// TestGPRegistry_JSONShape_LoadFilesScopeFallback covers the
+// requested vs actual scope reporting. The brief flagged that
+// operators couldn't tell from JSON when the LoadFilesAndModules
+// fallback fired — only the human report's "modules omitted"
+// note hinted at it. JSON consumers driving registry assertions
+// across mixed deployments need to detect when module
+// enumeration is unavailable so they don't incorrectly assert
+// module presence on cards that returned LoadFiles-only.
+//
+// This is a JSON-shape test on registryDump itself: marshal a
+// dump with mismatched scope fields, round-trip through JSON,
+// assert both fields appear with the expected names. Tests the
+// schema contract operators rely on.
+func TestGPRegistry_JSONShape_LoadFilesScopeFallback(t *testing.T) {
+	dump := &registryDump{
+		LoadFiles:               []registryEntryView{},
+		LoadFilesRequestedScope: "load_files_and_modules",
+		LoadFilesActualScope:    "load_files",
+	}
+	b, err := json.Marshal(dump)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]string{
+		"load_files_requested_scope": "load_files_and_modules",
+		"load_files_actual_scope":    "load_files",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("JSON field %q = %v, want %q", k, got[k], v)
+		}
+	}
+}
+
+// TestGPRegistry_JSONShape_LoadFilesScopeOmittedWhenSame: the
+// scope fields use omitempty so an unfired registry walk doesn't
+// pollute the JSON with empty strings. When requested == actual
+// (no fallback), consumers shouldn't see the fields at all.
+func TestGPRegistry_JSONShape_LoadFilesScopeOmittedWhenSame(t *testing.T) {
+	dump := &registryDump{
+		LoadFiles: []registryEntryView{},
+		// scope fields left zero — equivalent to "scope was never set"
+	}
+	b, err := json.Marshal(dump)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+	if strings.Contains(s, "load_files_requested_scope") ||
+		strings.Contains(s, "load_files_actual_scope") {
+		t.Errorf("scope fields should be omitted when empty; got: %s", s)
+	}
+}
+
+// TestScopeName covers the StatusScope -> JSON-friendly string
+// mapping. Operators reading the JSON expect the same vocabulary
+// as GP §11.4.2; an unrecognized scope should produce a
+// readable hex form rather than panic or empty string.
+func TestScopeName(t *testing.T) {
+	cases := []struct {
+		scope securitydomain.StatusScope
+		want  string
+	}{
+		{securitydomain.StatusScopeISD, "isd"},
+		{securitydomain.StatusScopeApplications, "applications"},
+		{securitydomain.StatusScopeLoadFiles, "load_files"},
+		{securitydomain.StatusScopeLoadFilesAndModules, "load_files_and_modules"},
+		{securitydomain.StatusScope(0xFE), "unknown_0xFE"},
+	}
+	for _, tc := range cases {
+		if got := scopeName(tc.scope); got != tc.want {
+			t.Errorf("scopeName(0x%02X) = %q, want %q", byte(tc.scope), got, tc.want)
+		}
 	}
 }

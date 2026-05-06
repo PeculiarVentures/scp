@@ -113,7 +113,17 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	dump := &registryDump{}
 	dump.ISD = walkRegistry(ctx, sd, securitydomain.StatusScopeISD, "ISD", report)
 	dump.Applications = walkRegistry(ctx, sd, securitydomain.StatusScopeApplications, "Applications", report)
-	dump.LoadFiles = walkLoadFiles(ctx, sd, report)
+	dump.LoadFiles, dump.LoadFilesRequestedScope, dump.LoadFilesActualScope = walkLoadFiles(ctx, sd, report)
+	if dump.LoadFilesRequestedScope != dump.LoadFilesActualScope {
+		// Surface the scope mismatch as its own report line so
+		// text-mode operators see it without having to read the
+		// "modules omitted" note buried in the LoadFiles detail.
+		// JSON consumers see it via the load_files_requested_scope
+		// vs load_files_actual_scope fields on registryDump.
+		report.Pass("load files scope fallback",
+			fmt.Sprintf("requested %s, card returned %s",
+				dump.LoadFilesRequestedScope, dump.LoadFilesActualScope))
+	}
 	if dump.ISD != nil || dump.Applications != nil || dump.LoadFiles != nil {
 		data.Registry = dump
 	}

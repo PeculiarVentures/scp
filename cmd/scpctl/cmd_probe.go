@@ -52,10 +52,21 @@ type probeData struct {
 }
 
 // registryDump is the JSON shape of a --full GP registry walk.
+// LoadFilesRequestedScope and LoadFilesActualScope let consumers
+// detect when the LoadFilesAndModules->LoadFiles fallback fired:
+// 'requested' is always 'load_files_and_modules' (the preferred
+// path that includes module enumeration); 'actual' is whichever
+// scope the card actually returned. When they differ, the
+// returned LoadFiles entries lack module names, so JSON
+// consumers can branch on the mismatch to avoid asserting
+// module presence on cards that don't expose it.
 type registryDump struct {
 	ISD          []registryEntryView `json:"isd,omitempty"`
 	Applications []registryEntryView `json:"applications,omitempty"`
 	LoadFiles    []registryEntryView `json:"load_files,omitempty"`
+
+	LoadFilesRequestedScope string `json:"load_files_requested_scope,omitempty"`
+	LoadFilesActualScope    string `json:"load_files_actual_scope,omitempty"`
 }
 
 // registryEntryView is the JSON projection of a securitydomain.RegistryEntry.
@@ -321,7 +332,12 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		dump := &registryDump{}
 		dump.ISD = walkRegistry(ctx, sd, securitydomain.StatusScopeISD, "ISD", report)
 		dump.Applications = walkRegistry(ctx, sd, securitydomain.StatusScopeApplications, "Applications", report)
-		dump.LoadFiles = walkLoadFiles(ctx, sd, report)
+		dump.LoadFiles, dump.LoadFilesRequestedScope, dump.LoadFilesActualScope = walkLoadFiles(ctx, sd, report)
+		if dump.LoadFilesRequestedScope != dump.LoadFilesActualScope {
+			report.Pass("load files scope fallback",
+				fmt.Sprintf("requested %s, card returned %s",
+					dump.LoadFilesRequestedScope, dump.LoadFilesActualScope))
+		}
 		// Only attach Registry to Data if at least one scope produced
 		// or attempted output; otherwise the JSON has a meaningless
 		// empty registry object alongside the unrelated CRD fields.
@@ -403,18 +419,48 @@ func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securit
 // "modules omitted" when the card forced the fallback so the
 // operator can tell module names are absent from this card's
 // response rather than just absent from the data.
-func walkLoadFiles(ctx context.Context, sd *securitydomain.Session, report *Report) []registryEntryView {
-	return walkRegistryFetched("LoadFiles", report, func() ([]securitydomain.RegistryEntry, string, error) {
+//
+// Returns (entries, requested-scope, actual-scope). The two scope
+// strings let JSON consumers detect when the fallback fired:
+// requested is always "load_files_and_modules"; actual is whichever
+// scope the card returned. They differ on cards that reject
+// LoadFilesAndModules with SW=6A86 / 6D00.
+func walkLoadFiles(ctx context.Context, sd *securitydomain.Session, report *Report) ([]registryEntryView, string, string) {
+	requested := scopeName(securitydomain.StatusScopeLoadFilesAndModules)
+	actual := requested // overwritten by the fetcher below
+	views := walkRegistryFetched("LoadFiles", report, func() ([]securitydomain.RegistryEntry, string, error) {
 		res, err := sd.GetStatusLoadFiles(ctx)
 		if err != nil {
 			return nil, "", err
 		}
+		actual = scopeName(res.Scope)
 		var note string
 		if res.Scope == securitydomain.StatusScopeLoadFiles {
 			note = "modules omitted (card rejected LoadFilesAndModules; fell back to LoadFiles-only)"
 		}
 		return res.Entries, note, nil
 	})
+	return views, requested, actual
+}
+
+// scopeName returns the snake-case JSON-friendly name of a
+// StatusScope, used to populate registryDump's
+// LoadFilesRequestedScope / LoadFilesActualScope fields. The
+// names mirror the GP §11.4.2 scope identifiers so an operator
+// reading the JSON sees the same vocabulary as the spec.
+func scopeName(s securitydomain.StatusScope) string {
+	switch s {
+	case securitydomain.StatusScopeISD:
+		return "isd"
+	case securitydomain.StatusScopeApplications:
+		return "applications"
+	case securitydomain.StatusScopeLoadFiles:
+		return "load_files"
+	case securitydomain.StatusScopeLoadFilesAndModules:
+		return "load_files_and_modules"
+	default:
+		return fmt.Sprintf("unknown_0x%02X", byte(s))
+	}
 }
 
 // walkRegistryFetched is the shared shape for walkRegistry and
