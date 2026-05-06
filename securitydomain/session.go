@@ -589,12 +589,28 @@ func (s *Session) GetSupportedCaIdentifiers(ctx context.Context, kloc, klcc bool
 			return nil, fmt.Errorf("securitydomain: get CA identifiers: %w", err)
 		}
 		if !resp.IsSuccess() {
-			// Reference data not found is not an error — just means
-			// no identifiers of that type are configured.
-			if resp.StatusWord() == 0x6A88 {
+			// Treat "not present" SWs as empty — these indicate
+			// the optional DO simply isn't registered on this card.
+			// Treat all other failures as real errors so callers
+			// can distinguish "tag unsupported" (6D00) and "auth
+			// required" (6982) from "tag exists but empty." Prior
+			// behavior swallowed everything as empty, which made
+			// it impossible to tell an unauthenticated card with
+			// gated reads apart from a card with no KLOC/KLCC at
+			// all — both surfaced as silent empty results.
+			//
+			// 6A88 = Referenced data or reference data not found
+			//        (the addressed data object doesn't exist)
+			// 6A82 = File or application not found (some applets
+			//        return this for missing optional tags
+			//        instead of 6A88; semantically equivalent for
+			//        "not present" purposes)
+			sw := resp.StatusWord()
+			if sw == 0x6A88 || sw == 0x6A82 {
 				continue
 			}
-			continue
+			return nil, fmt.Errorf("securitydomain: get CA identifiers (tag 0x%04X): %w: %w",
+				entry.tag, ErrCardStatus, resp.Error())
 		}
 		ids, err := parseSupportedCaIdentifiers(resp.Data)
 		if err != nil {
