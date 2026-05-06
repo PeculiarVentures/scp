@@ -124,6 +124,26 @@ func cmdGPCapInspect(ctx context.Context, env *runEnv, args []string) error {
 	}
 	report.Pass("parse CAP", fmt.Sprintf("package %s, %d applet(s), %d component(s)",
 		capFile.PackageAID, len(capFile.Applets), len(capFile.Components)))
+	report.Pass("parse scope",
+		"host structural parse only (Header + Applet + Import); does not validate Method bytecode, ConstantPool offsets, install_method_offset references, or per-card load policy. A successful parse here is not a guarantee the CAP will load.")
+
+	// Surface the package-name provenance explicitly. The Header
+	// component is authoritative when it carries a non-empty
+	// package_name; the ZIP-path fallback can disagree if the
+	// archive was repackaged or built by a converter that places
+	// components in a directory that doesn't match the package.
+	// PartialInstallError-style stage hints depend on the operator
+	// trusting the inspector's metadata, so flag the inferred case.
+	switch capFile.PackageNameSource {
+	case "header_component":
+		// Authoritative; nothing to add.
+	case "zip_path":
+		report.Warn("package name source",
+			"derived from ZIP directory path; may be stale if the archive was repackaged. The Header component did not carry a package_name field. Verify against the source jar before using this name as a stable identifier.")
+	case "absent":
+		report.Warn("package name source",
+			"no package name found in either the Header component or the ZIP path; only the package AID is reliable.")
+	}
 
 	data := &gpCapInspectData{
 		File:              path,

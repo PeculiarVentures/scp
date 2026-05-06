@@ -33,14 +33,25 @@ func dispatchUnsecured(t *testing.T, c *Card, ins, p1, p2 byte, data []byte) *ap
 // buildInstallForLoadData wraps gp.BuildInstallForLoadPayload
 // for tests that don't carry hash/token. Hash and token are
 // zero-length here because the mock does not validate them.
+// Test fixtures pass AID-shaped small fields; an overflow here
+// would be a test-fixture bug, so we panic rather than thread
+// errors through every test setup.
 func buildInstallForLoadData(loadAID, sdAID, params []byte) []byte {
-	return gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)
+	b, err := gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)
+	if err != nil {
+		panic("test fixture: BuildInstallForLoadPayload: " + err.Error())
+	}
+	return b
 }
 
 // buildInstallForInstallData wraps gp.BuildInstallForInstallPayload
 // for tests that don't carry install params/token.
 func buildInstallForInstallData(loadAID, moduleAID, appletAID, privs []byte) []byte {
-	return gp.BuildInstallForInstallPayload(loadAID, moduleAID, appletAID, privs, nil, nil)
+	b, err := gp.BuildInstallForInstallPayload(loadAID, moduleAID, appletAID, privs, nil, nil)
+	if err != nil {
+		panic("test fixture: BuildInstallForInstallPayload: " + err.Error())
+	}
+	return b
 }
 
 // --- INSTALL [for load] -------------------------------------------------

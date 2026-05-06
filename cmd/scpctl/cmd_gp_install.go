@@ -23,10 +23,23 @@ type gpInstallData struct {
 	LoadImageSize int    `json:"load_image_size,omitempty"`
 	SHA256        string `json:"load_image_sha256,omitempty"`
 	SHA1          string `json:"load_image_sha1,omitempty"`
-	DryRun        bool   `json:"dry_run"`
-	Stage         string `json:"failed_stage,omitempty"`
-	BytesLoaded   int    `json:"bytes_loaded,omitempty"`
-	CleanupHint   string `json:"cleanup_hint,omitempty"`
+
+	// Preflight surfaces the host-side decisions the operator
+	// should review before authorizing a write. JSON consumers
+	// branching on these can compare a dry-run report against a
+	// confirm-write report to detect drift in the CAP, the
+	// component-exclusion policy, or the chunk plan between
+	// preview and execution.
+	LoadImageComponents []string `json:"load_image_components,omitempty"`
+	LoadBlockSize       int      `json:"load_block_size,omitempty"`
+	LoadBlockCount      int      `json:"load_block_count,omitempty"`
+	PrivilegesHex       string   `json:"privileges_hex,omitempty"`
+	LoadHashAlgorithm   string   `json:"load_hash_algorithm,omitempty"`
+
+	DryRun      bool   `json:"dry_run"`
+	Stage       string `json:"failed_stage,omitempty"`
+	BytesLoaded int    `json:"bytes_loaded,omitempty"`
+	CleanupHint string `json:"cleanup_hint,omitempty"`
 }
 
 // cmdGPInstall is the destructive applet-install operator command.
@@ -181,6 +194,45 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	data.SHA1 = strings.ToUpper(hex.EncodeToString(sha1Sum))
 	report.Pass("load image",
 		fmt.Sprintf("%d bytes, SHA-256=%s", data.LoadImageSize, data.SHA256))
+
+	// Preflight: surface the host-side decisions the operator
+	// should review before authorizing a write. Component list
+	// shows which CAP files actually went into the load image
+	// (Debug/Descriptor exclusion takes effect here unless
+	// --include-debug / --include-descriptor was set). Chunk
+	// plan shows how many LOAD APDUs the install will issue at
+	// the configured block size. Privileges hex shows the bytes
+	// going on the wire so an operator catches a mistyped
+	// privilege string before it lands on the card.
+	loadComponents := loadImageComponentNames(cap, policy)
+	data.LoadImageComponents = loadComponents
+	report.Pass("load image components",
+		fmt.Sprintf("%d files: %s", len(loadComponents), strings.Join(loadComponents, ", ")))
+
+	chunkSize := *loadBlockSize
+	if chunkSize == 0 {
+		chunkSize = 200 // matches securitydomain.InstallOptions default
+	}
+	chunkCount := (data.LoadImageSize + chunkSize - 1) / chunkSize
+	data.LoadBlockSize = chunkSize
+	data.LoadBlockCount = chunkCount
+	report.Pass("load block plan",
+		fmt.Sprintf("%d LOAD APDU(s) at %d bytes each (final block %d bytes)",
+			chunkCount, chunkSize, finalBlockBytes(data.LoadImageSize, chunkSize)))
+
+	data.PrivilegesHex = strings.ToUpper(hex.EncodeToString(privs))
+	report.Pass("privileges", "0x"+data.PrivilegesHex)
+
+	// Hash policy: today the CLI does not auto-compute a load
+	// hash. The Session.Install layer accepts whatever LoadHash
+	// the caller sets in InstallOptions; gp install passes nil
+	// today (no hash on the wire). Surface that explicitly so an
+	// operator who expects a hash to be sent knows it isn't, and
+	// so a future --load-hash flag has an obvious extension
+	// point. JSON consumers branching on this field will see
+	// "none" today.
+	data.LoadHashAlgorithm = "none"
+	report.Pass("load hash", "none (host does not auto-send a hash; some SD policies require one)")
 
 	// 3. Dry-run gate.
 	if !*confirm {
@@ -347,4 +399,34 @@ func stripWhitespace(s string) string {
 		out = append(out, c)
 	}
 	return string(out)
+}
+
+// loadImageComponentNames returns the names of CAP components
+// that survive the load-image policy filter, in load order. Used
+// to populate the dry-run preflight so an operator can verify
+// the Debug/Descriptor exclusion took effect before authorizing
+// the write.
+func loadImageComponentNames(cap *gp.CAPFile, policy gp.LoadImagePolicy) []string {
+	keep := cap.LoadImageComponents(policy)
+	names := make([]string, 0, len(keep))
+	for _, c := range keep {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+// finalBlockBytes returns the size of the last LOAD chunk given
+// the total image size and chunk size, used in the preflight
+// summary so an operator can spot a near-empty trailing block
+// (a sign the image size isn't aligned to the chunk size in a
+// way that would matter on cards with strict block alignment).
+func finalBlockBytes(total, chunk int) int {
+	if chunk <= 0 || total <= 0 {
+		return 0
+	}
+	rem := total % chunk
+	if rem == 0 {
+		return chunk
+	}
+	return rem
 }

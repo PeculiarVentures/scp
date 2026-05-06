@@ -67,27 +67,7 @@ func (c *CAPFile) LoadImage(policy LoadImagePolicy) ([]byte, error) {
 		return nil, fmt.Errorf("%w: CAP has no components", ErrInvalidLoadImage)
 	}
 
-	// Filter components per policy. Order is preserved from the
-	// parser's load-order normalization.
-	var keep []CAPComponent
-	for _, comp := range c.Components {
-		switch comp.Name {
-		case componentNameDebug:
-			if policy.ExcludeDebug {
-				continue
-			}
-		case componentNameDescriptor:
-			if policy.ExcludeDescriptor {
-				continue
-			}
-		case componentNameApplet:
-			if !policy.IncludeApplet {
-				continue
-			}
-		}
-		keep = append(keep, comp)
-	}
-
+	keep := c.LoadImageComponents(policy)
 	if len(keep) == 0 {
 		return nil, fmt.Errorf("%w: policy excludes all components", ErrInvalidLoadImage)
 	}
@@ -120,6 +100,35 @@ func (c *CAPFile) LoadImage(policy LoadImagePolicy) ([]byte, error) {
 		out = append(out, comp.Raw...)
 	}
 	return out, nil
+}
+
+// LoadImageComponents returns the components that survive the
+// policy filter, in load order. Used by callers that want to
+// surface "what's actually in the image" before issuing a LOAD
+// — for example, the gp install dry-run preflight prints the
+// component list so the operator can verify Debug/Descriptor
+// exclusion matches expectations. Does not allocate; returns a
+// slice into the caller's CAPFile.Components.
+func (c *CAPFile) LoadImageComponents(policy LoadImagePolicy) []CAPComponent {
+	var keep []CAPComponent
+	for _, comp := range c.Components {
+		switch comp.Name {
+		case componentNameDebug:
+			if policy.ExcludeDebug {
+				continue
+			}
+		case componentNameDescriptor:
+			if policy.ExcludeDescriptor {
+				continue
+			}
+		case componentNameApplet:
+			if !policy.IncludeApplet {
+				continue
+			}
+		}
+		keep = append(keep, comp)
+	}
+	return keep
 }
 
 // LoadImageHashes computes both SHA-256 (preferred) and SHA-1

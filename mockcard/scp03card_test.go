@@ -163,9 +163,17 @@ func TestSCP03Card_GetStatus_PreSeededRegistry(t *testing.T) {
 
 
 func buildInstallForLoad(loadAID, sdAID, params []byte) []byte {
-	return gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)
+	b, err := gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)
+	if err != nil {
+		panic("test fixture: BuildInstallForLoadPayload: " + err.Error())
+	}
+	return b
 }
 
 func buildInstallForInstall(loadAID, moduleAID, appletAID, privs []byte) []byte {
-	return gp.BuildInstallForInstallPayload(loadAID, moduleAID, appletAID, privs, nil, nil)
+	b, err := gp.BuildInstallForInstallPayload(loadAID, moduleAID, appletAID, privs, nil, nil)
+	if err != nil {
+		panic("test fixture: BuildInstallForInstallPayload: " + err.Error())
+	}
+	return b
 }

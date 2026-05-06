@@ -295,8 +295,11 @@ func validateAID(aid []byte, fieldName string) error {
 }
 
 func (s *Session) installForLoad(ctx context.Context, opts InstallOptions) error {
-	data := gp.BuildInstallForLoadPayload(
+	data, err := gp.BuildInstallForLoadPayload(
 		opts.LoadFileAID, opts.SDAID, opts.LoadHash, opts.LoadParams, opts.LoadToken)
+	if err != nil {
+		return fmt.Errorf("INSTALL [for load]: %w", err)
+	}
 	cmd := &apdu.Command{
 		CLA:  clsGP,
 		INS:  0xE6,
@@ -374,9 +377,12 @@ func (s *Session) installForInstall(ctx context.Context, opts InstallOptions) er
 	if len(privs) == 0 {
 		privs = []byte{0x00}
 	}
-	data := gp.BuildInstallForInstallPayload(
+	data, err := gp.BuildInstallForInstallPayload(
 		opts.LoadFileAID, opts.ModuleAID, opts.AppletAID, privs,
 		opts.InstallParams, opts.InstallToken)
+	if err != nil {
+		return fmt.Errorf("INSTALL [for install]: %w", err)
+	}
 	cmd := &apdu.Command{
 		CLA:  clsGP,
 		INS:  0xE6,
