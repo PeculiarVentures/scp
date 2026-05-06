@@ -31,6 +31,11 @@ import (
 func gpUsage(w io.Writer) {
 	fmt.Fprint(w, `scpctl gp - Generic GlobalPlatform card-content management
 
+Maturity: spec-implemented per GP Card Specification v2.3.1 and
+mock-validated against a YubiKey-shaped GP simulator. Not yet
+hardware-verified end to end against real cards; production use
+requires operator-side acceptance testing on the target card.
+
 Usage:
   scpctl gp <subcommand> [flags]
 
@@ -81,11 +86,12 @@ Subcommands:
               be absent.
 
 What is NOT in this group today (deferred to future work):
-  - SafeNet/Fusion exploratory probing.
-  - LoadFiles-only (P1=0x20) registry walk fallback for cards
-    that reject LoadFilesAndModules.
-  - Vendor-specific INSTALL parameter blocks (CIN/IIN binding,
-    NFC LCM bits) beyond the GP-spec minimum.
+  - SafeNet/Fusion exploratory probing beyond the discovery
+    candidate list with 6A87 fallthrough.
+  - Vendor-specific INSTALL parameter generators (CIN/IIN
+    binding, NFC LCM bits, JC platform-specific TLVs).
+    Operators can pass these as raw bytes via --install-params
+    / --load-params on 'gp install' if they have the spec.
 
 Use "scpctl gp <subcommand> -h" for per-command flags.
 `)
