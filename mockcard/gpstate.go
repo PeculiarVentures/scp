@@ -33,11 +33,31 @@ type GPState struct {
 	// populated by handleInstallForLoad and cleared by the final
 	// LOAD block.
 	loadCtx *installLoadContext
+
+	// FailNextInstallForLoad, if non-zero, makes the next
+	// INSTALL [for load] return this SW instead of 9000. Cleared
+	// after firing once. Used by Install failure-recovery tests
+	// to simulate card-side rejection at stage 1.
+	FailNextInstallForLoad uint16
+
+	// FailLoadAtSeq, if >= 0, makes the LOAD block with this
+	// sequence number return SW=6A84 (not enough memory).
+	// Default zero-value 0 would fail the very first block; set
+	// to -1 explicitly to disable. The handler decrements
+	// FailLoadAtSeq toward -1 internally so it fires only once.
+	FailLoadAtSeq int
+
+	// FailNextInstallForInstall, if non-zero, makes the next
+	// INSTALL [for install] return this SW instead of 9000.
+	// Cleared after firing once.
+	FailNextInstallForInstall uint16
 }
 
 // NewGPState returns a fresh GP state with empty registries and no
-// load in progress.
-func NewGPState() *GPState { return &GPState{} }
+// load in progress. FailLoadAtSeq is initialized to -1 (no
+// failure injection) so tests that don't opt into failure mode
+// don't accidentally trigger one.
+func NewGPState() *GPState { return &GPState{FailLoadAtSeq: -1} }
 
 // HandleGPCommand dispatches a GP card-content management APDU. It
 // returns (nil, false) if the INS byte is not a recognized GP
@@ -135,6 +155,11 @@ func (g *GPState) handleInstall(cmd *apdu.Command) *apdu.Response {
 }
 
 func (g *GPState) handleInstallForLoad(cmd *apdu.Command) *apdu.Response {
+	if g.FailNextInstallForLoad != 0 {
+		sw := g.FailNextInstallForLoad
+		g.FailNextInstallForLoad = 0
+		return mkSW(sw)
+	}
 	d := cmd.Data
 	loadAID, d, ok := readLV(d)
 	if !ok {
@@ -176,6 +201,11 @@ func (g *GPState) handleInstallForLoad(cmd *apdu.Command) *apdu.Response {
 }
 
 func (g *GPState) handleInstallForInstall(cmd *apdu.Command) *apdu.Response {
+	if g.FailNextInstallForInstall != 0 {
+		sw := g.FailNextInstallForInstall
+		g.FailNextInstallForInstall = 0
+		return mkSW(sw)
+	}
 	d := cmd.Data
 	loadAID, d, ok := readLV(d)
 	if !ok {
@@ -236,6 +266,10 @@ func (g *GPState) handleLoad(cmd *apdu.Command) *apdu.Response {
 	seq := cmd.P2
 	if seq != g.loadCtx.expectedSeq {
 		return mkSW(0x6A86)
+	}
+	if g.FailLoadAtSeq >= 0 && int(seq) == g.FailLoadAtSeq {
+		g.FailLoadAtSeq = -1 // fire once
+		return mkSW(0x6A84)  // not enough memory
 	}
 	g.loadCtx.bytesLoaded = append(g.loadCtx.bytesLoaded, cmd.Data...)
 	g.loadCtx.expectedSeq++
