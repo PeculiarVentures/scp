@@ -3,15 +3,15 @@
 // functionality:
 //
 //   - test    hardware regression checks (read-only smoke against
-//             real cards: scp03/scp11a/scp11b reads + PIN-verify)
+//     real cards: scp03/scp11a/scp11b reads + PIN-verify)
 //   - piv     user-facing PIV operations (info, PIN, PUK, mgmt,
-//             key, cert, object, reset, provision) over the
-//             piv/session library
+//     key, cert, object, reset, provision) over the
+//     piv/session library
 //   - sd      Security Domain operations (info, reset, lock,
-//             unlock, terminate, keys, allowlist, OCE/SCP11a
-//             bootstraps)
+//     unlock, terminate, keys, allowlist, OCE/SCP11a
+//     bootstraps)
 //   - oce     off-card OCE certificate diagnostics (host-only;
-//             does not touch a card)
+//     does not touch a card)
 //
 // plus a small set of top-level utilities (readers, probe, version,
 // help) that do not belong to any group.
@@ -474,14 +474,14 @@ Subcommands:
                        Authenticated SCP03; gated on --confirm-write.
                        Dry-run by default. Uses Yubico extension
                        INS=0xF1.
-  keys import          Install a key set or trust anchor at one key
-                       reference, dispatched by KID. Supports SCP03
-                       AES-128 (--kid 01) and SCP11 SD private key
-                       with optional cert chain (--kid 11/13/15);
-                       CA/OCE trust-anchor import (--kid 10/20-2F)
-                       is forthcoming (Phase 5c). Authenticated
-                       SCP03; gated on --confirm-write. Dry-run by
-                       default.
+  keys import          Install a key set, private key, or trust
+                       anchor at one key reference, dispatched by
+                       KID. Supports SCP03 AES-128 (--kid 01), SCP11
+                       SD private key with optional cert chain
+                       (--kid 11/13/15), and CA/OCE trust anchor
+                       with SKI registration (--kid 10/20-2F).
+                       Authenticated SCP03; gated on --confirm-write.
+                       Dry-run by default.
   allowlist set        Install a certificate-serial-number allowlist
                        for one SCP11 key reference. Replaces any
                        existing allowlist wholesale (full-replace,

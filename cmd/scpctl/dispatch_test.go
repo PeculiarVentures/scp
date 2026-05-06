@@ -329,8 +329,9 @@ func TestDispatch_SDKeysHelpContent(t *testing.T) {
 		"PEM",
 		"--der",
 		"--confirm-delete-key",
-		"INS=0xF1", // Yubico-extension transparency
-		"Phase 5c", // forthcoming work signal still visible to operators
+		"INS=0xF1",         // Yubico-extension transparency
+		"trust anchor",     // Phase 5c category visible in help
+		"SKI registration", // anchor flow described
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("'sd keys help' stdout missing %q; got:\n%s", want, stdout)

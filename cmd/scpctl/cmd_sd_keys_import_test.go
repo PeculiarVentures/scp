@@ -10,25 +10,24 @@ import (
 )
 
 // TestSDKeysImport_DispatchByKID verifies the KID-category dispatch:
-// each KID lands at the right handler, with the not-yet-implemented
-// categories returning a clear "Phase 5c" message rather than a
-// generic error. Phase 5a (SCP03) and Phase 5b (SCP11 SD) both reach
-// real handlers; only the CA/OCE category remains stubbed.
+// each KID lands at the right real handler. Phase 5c completes the
+// import verb — every recognized KID category now has a working
+// handler, no stubs remain. Asserts each KID hits its handler-level
+// usage error (proving dispatch landed) AND that no Phase tag leaks
+// into the error (proving we didn't hit a stub).
 func TestSDKeysImport_DispatchByKID(t *testing.T) {
 	cases := []struct {
 		name             string
 		kid              string
-		stillStubbed     bool   // true if this category hasn't landed yet
-		wantPhaseInErr   string // for stillStubbed: "5c"
-		wantInHandlerErr string // for !stillStubbed: distinguishing token
+		wantInHandlerErr string // distinguishing handler-level token
 	}{
-		{name: "scp03", kid: "01", stillStubbed: false, wantInHandlerErr: "new-scp03"},
-		{name: "scp11a-sd", kid: "11", stillStubbed: false, wantInHandlerErr: "--key-pem"},
-		{name: "scp11b-sd", kid: "13", stillStubbed: false, wantInHandlerErr: "--key-pem"},
-		{name: "scp11c-sd", kid: "15", stillStubbed: false, wantInHandlerErr: "--key-pem"},
-		{name: "oce", kid: "10", stillStubbed: true, wantPhaseInErr: "5c"},
-		{name: "klcc-low", kid: "20", stillStubbed: true, wantPhaseInErr: "5c"},
-		{name: "klcc-high", kid: "2F", stillStubbed: true, wantPhaseInErr: "5c"},
+		{name: "scp03", kid: "01", wantInHandlerErr: "new-scp03"},
+		{name: "scp11a-sd", kid: "11", wantInHandlerErr: "--key-pem"},
+		{name: "scp11b-sd", kid: "13", wantInHandlerErr: "--key-pem"},
+		{name: "scp11c-sd", kid: "15", wantInHandlerErr: "--key-pem"},
+		{name: "oce", kid: "10", wantInHandlerErr: "--key-pem"},
+		{name: "klcc-low", kid: "20", wantInHandlerErr: "--key-pem"},
+		{name: "klcc-high", kid: "2F", wantInHandlerErr: "--key-pem"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,28 +39,21 @@ func TestSDKeysImport_DispatchByKID(t *testing.T) {
 			args := []string{"--reader", "fake", "--kid", tc.kid, "--kvn", "01"}
 			err = cmdSDKeysImport(context.Background(), env, args)
 			if err == nil {
-				t.Fatalf("expected error from dispatch (stub or handler-level usage); got nil. output:\n%s", buf.String())
+				t.Fatalf("expected handler-level usageError; got nil. output:\n%s", buf.String())
 			}
 			if _, ok := err.(*usageError); !ok {
 				t.Errorf("err type = %T, want *usageError; err = %v", err, err)
 			}
-			switch tc.stillStubbed {
-			case true:
-				if !strings.Contains(err.Error(), "Phase "+tc.wantPhaseInErr) {
-					t.Errorf("stub error should name Phase %s; got %v", tc.wantPhaseInErr, err)
-				}
-			case false:
-				if !strings.Contains(err.Error(), tc.wantInHandlerErr) {
-					t.Errorf("handler-level error should mention %q (proves real handler was reached, not stub); got %v",
-						tc.wantInHandlerErr, err)
-				}
-				// And the message must NOT mention any Phase tag — that
-				// would mean we hit the stub instead of the real handler.
-				for _, phaseTag := range []string{"Phase 5a", "Phase 5b", "Phase 5c"} {
-					if strings.Contains(err.Error(), phaseTag) {
-						t.Errorf("dispatch hit a stub instead of the real handler (%s in error): %v",
-							phaseTag, err)
-					}
+			if !strings.Contains(err.Error(), tc.wantInHandlerErr) {
+				t.Errorf("handler-level error should mention %q (proves real handler was reached); got %v",
+					tc.wantInHandlerErr, err)
+			}
+			// No Phase tag should appear — the import verb has no
+			// remaining stubs after Phase 5c.
+			for _, phaseTag := range []string{"Phase 5a", "Phase 5b", "Phase 5c"} {
+				if strings.Contains(err.Error(), phaseTag) {
+					t.Errorf("dispatch hit a stub instead of the real handler (%s in error): %v",
+						phaseTag, err)
 				}
 			}
 		})
