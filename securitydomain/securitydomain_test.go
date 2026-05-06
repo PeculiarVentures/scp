@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -398,6 +399,152 @@ func TestStoreAllowlistData(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Error("expected non-empty data")
+	}
+}
+
+// TestStoreAllowlistData_ASN1IntegerEncoding pins the wire-byte
+// shape of allowlist serials against yubikit-python's _int2asn1
+// helper (ref: yubikit/securitydomain.py). The card matches
+// stored serials byte-exactly against the cert's ASN.1 INTEGER
+// representation, so a serial whose first byte is >= 0x80 must
+// carry a leading 0x00 prefix on the wire — otherwise an
+// allowlisted certificate is silently rejected at SCP11
+// verification with no diagnostic that points at the encoding.
+//
+// Each subtest pins a specific serial value to the bytes that
+// must appear inside the inner 93 TLV. The test compares against
+// hex-decoded byte literals rather than re-deriving the bytes
+// dynamically, so a future refactor that switches encoders sees
+// the contract failure immediately.
+func TestStoreAllowlistData_ASN1IntegerEncoding(t *testing.T) {
+	ref := NewKeyReference(KeyIDOCE, 0x03)
+
+	cases := []struct {
+		name           string
+		serial         *big.Int
+		wantSerialHex  string // bytes inside the inner 93 TLV value
+		comment        string
+	}{
+		{
+			name:           "high_bit_clear_no_prefix",
+			serial:         big.NewInt(0x7F),
+			wantSerialHex:  "7F",
+			comment:        "0x7F has high bit clear; no 0x00 prefix",
+		},
+		{
+			name:           "high_bit_set_single_byte_gets_prefix",
+			serial:         big.NewInt(0x80),
+			wantSerialHex:  "0080",
+			comment:        "0x80 has high bit set; prepend 0x00",
+		},
+		{
+			name:           "high_bit_set_multibyte_gets_prefix",
+			serial:         big.NewInt(0xFF12345678),
+			wantSerialHex:  "00FF12345678",
+			comment:        "high bit on first byte of multibyte serial; prepend 0x00",
+		},
+		{
+			name:           "high_bit_clear_multibyte_no_prefix",
+			serial:         big.NewInt(0x7F12345678),
+			wantSerialHex:  "7F12345678",
+			comment:        "high bit clear on first byte; no prefix",
+		},
+		{
+			name:           "second_byte_high_bit_irrelevant",
+			serial:         big.NewInt(0x01FFFFFFFF),
+			wantSerialHex:  "01FFFFFFFF",
+			comment:        "only first byte's high bit matters; later high bits don't trigger prefix",
+		},
+		{
+			name:           "zero_serial_renders_as_single_zero",
+			serial:         big.NewInt(0),
+			wantSerialHex:  "00",
+			comment:        "ASN.1 INTEGER 0 is single 0x00 byte; not zero-length",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := storeAllowlistData(ref, []*big.Int{tc.serial})
+			if err != nil {
+				t.Fatalf("storeAllowlistData: %v", err)
+			}
+			// Decode the outer envelope to find the 70 container,
+			// then the inner 93 serial TLV. We assert on the 93's
+			// value bytes rather than on the full outer payload
+			// so the test stays focused on the encoding behavior
+			// being pinned and doesn't flake on unrelated changes
+			// to the A6/83 wrapper layout.
+			gotHex := strings.ToUpper(hex.EncodeToString(extractFirstSerialBytes(t, data)))
+			wantHex := strings.ToUpper(tc.wantSerialHex)
+			if gotHex != wantHex {
+				t.Errorf("%s\n  serial 93 value = %s\n  want            = %s\n  rationale: %s",
+					tc.name, gotHex, wantHex, tc.comment)
+			}
+		})
+	}
+}
+
+// extractFirstSerialBytes pulls the value bytes of the first 93
+// (serial) TLV out of a storeAllowlistData payload. Test helper:
+// fails the test if the structure isn't shaped as expected.
+func extractFirstSerialBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	nodes, err := tlv.Decode(data)
+	if err != nil {
+		t.Fatalf("tlv.Decode: %v", err)
+	}
+	allowlist := tlv.Find(nodes, tagAllowList)
+	if allowlist == nil {
+		t.Fatal("no 70 (allowlist) container in encoded data")
+	}
+	// The 70 container's value contains a sequence of 93 TLVs.
+	// Decode that level to get the first one.
+	inner, err := tlv.Decode(allowlist.Value)
+	if err != nil {
+		t.Fatalf("tlv.Decode allowlist value: %v", err)
+	}
+	for _, n := range inner {
+		if n.Tag == tagSerialNum {
+			return n.Value
+		}
+	}
+	t.Fatal("no 93 (serial) TLV inside allowlist container")
+	return nil
+}
+
+// TestStoreAllowlistData_RoundTripWithASN1Encoding verifies the
+// encoder + parseAllowlist parser round-trip preserves the
+// numeric value across the wire shape, including for serials
+// with the high bit set. parseAllowlist uses big.Int.SetBytes on
+// the inner 93 value, which interprets the leading-zero-prefixed
+// bytes as the same unsigned integer the caller passed in — so
+// the round-trip is correct without parser changes.
+func TestStoreAllowlistData_RoundTripWithASN1Encoding(t *testing.T) {
+	ref := NewKeyReference(KeyIDOCE, 0x03)
+
+	original := []*big.Int{
+		big.NewInt(1),
+		big.NewInt(0x80),     // single-byte high-bit-set
+		big.NewInt(0xFFFFFF), // multibyte high-bit-set
+		big.NewInt(0x7F),     // high-bit-clear control
+	}
+	encoded, err := storeAllowlistData(ref, original)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	roundTripped, err := parseAllowlist(encoded)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(roundTripped) != len(original) {
+		t.Fatalf("count mismatch: got %d, want %d", len(roundTripped), len(original))
+	}
+	for i, want := range original {
+		if roundTripped[i].Cmp(want) != 0 {
+			t.Errorf("serial[%d]: got %s, want %s",
+				i, roundTripped[i].String(), want.String())
+		}
 	}
 }
 

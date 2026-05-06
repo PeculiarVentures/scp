@@ -382,13 +382,30 @@ func storeCaIssuerData(ref KeyReference, ski []byte) []byte {
 //
 // Format: A6{83{KID,KVN}} + 70{93{serial1} + 93{serial2} + ...}
 //
-// Each serial is encoded as the unsigned big-endian byte
-// representation of the *big.Int (big.Int.Bytes()), matching what
-// x509.Certificate.SerialNumber yields. Nil entries are rejected;
-// the empty allowlist (len(serials) == 0) is permitted and produces
-// the equivalent of ClearAllowlist.
+// Each serial is encoded as an ASN.1-INTEGER-style minimal unsigned
+// representation: big-endian bytes of the absolute value, with a
+// leading 0x00 prepended when the high bit of the first byte is set
+// (so that the value cannot be misread as a two's-complement
+// negative). This matches yubikit-python's `_int2asn1` helper used
+// by `store_allowlist`, which the YubiKey firmware compares
+// against byte-exactly. A serial like 0xFF12345678 from
+// x509.Certificate.SerialNumber.Bytes() is "FF 12 34 56 78"
+// (5 bytes, high bit set) on the host side; we send "00 FF 12 34
+// 56 78" (6 bytes) inside the 93 TLV so the card sees the same
+// representation it stored when the matching cert was issued.
 //
-// Ref: Python store_allowlist, C# StoreAllowlist.
+// Without the leading-zero rule, a serial whose first byte is
+// >= 0x80 would not match its certificate's actual on-the-wire
+// ASN.1 INTEGER serial bytes, and the card would silently
+// disallow the cert on SCP11 verification — exactly the kind of
+// false-negative that's hard to diagnose because nothing visible
+// fails until the real authentication.
+//
+// Nil entries are rejected; the empty allowlist (len(serials) == 0)
+// is permitted and produces the equivalent of ClearAllowlist.
+//
+// Ref: yubikit-python `_int2asn1` (yubikit/securitydomain.py),
+// C# StoreAllowlist.
 func storeAllowlistData(ref KeyReference, serials []*big.Int) ([]byte, error) {
 	keyRefTLV := tlv.BuildConstructed(tagControlRef,
 		tlv.Build(tagKeyID, []byte{ref.ID, ref.Version}),
@@ -408,7 +425,7 @@ func storeAllowlistData(ref KeyReference, serials []*big.Int) ([]byte, error) {
 		if n.Sign() < 0 {
 			return nil, fmt.Errorf("%w: serials[%d] is negative", ErrInvalidSerial, i)
 		}
-		serialTLV := tlv.Build(tagSerialNum, n.Bytes())
+		serialTLV := tlv.Build(tagSerialNum, asn1IntegerBytes(n))
 		serialData = append(serialData, serialTLV.Encode()...)
 	}
 
@@ -418,6 +435,40 @@ func storeAllowlistData(ref KeyReference, serials []*big.Int) ([]byte, error) {
 	data = append(data, keyRefTLV.Encode()...)
 	data = append(data, allowlistTLV.Encode()...)
 	return data, nil
+}
+
+// asn1IntegerBytes returns the ASN.1-INTEGER-style minimal unsigned
+// encoding of a non-negative *big.Int: big-endian bytes of the
+// absolute value, with a leading 0x00 prepended when the high bit
+// of the first byte is set.
+//
+// Caller has already verified n.Sign() >= 0; this helper does not
+// re-check, so passing a negative *big.Int produces wrong bytes.
+//
+//   - n = 0:           returns []byte{0x00}     (single zero byte)
+//   - n = 0x7F:        returns []byte{0x7F}     (high bit clear, no prefix)
+//   - n = 0x80:        returns []byte{0x00, 0x80} (high bit set, prefix)
+//   - n = 0xFF...FF:   returns []byte{0x00, 0xFF, ...} (prefix)
+//
+// Matches yubikit-python's `_int2asn1` byte-for-byte for all
+// non-negative inputs that yubikit accepts.
+func asn1IntegerBytes(n *big.Int) []byte {
+	bs := n.Bytes()
+	if len(bs) == 0 {
+		// big.Int.Bytes() returns empty for zero. ASN.1 INTEGER
+		// representation of 0 is a single 0x00 byte; produce
+		// that explicitly so a zero-valued serial doesn't yield
+		// a zero-length TLV value (which the card would
+		// interpret as malformed).
+		return []byte{0x00}
+	}
+	if bs[0]&0x80 != 0 {
+		out := make([]byte, len(bs)+1)
+		out[0] = 0x00
+		copy(out[1:], bs)
+		return out
+	}
+	return bs
 }
 
 // --- Response parsing ---
