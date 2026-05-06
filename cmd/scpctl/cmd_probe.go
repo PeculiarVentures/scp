@@ -2,13 +2,25 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/PeculiarVentures/scp/cardrecognition"
+	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/securitydomain"
 )
+
+// candidateAIDStr formats a gp.ISDCandidate's AID for human-
+// readable report lines: an empty (default-SELECT) AID becomes
+// "(default)", non-empty AIDs become uppercase hex.
+func candidateAIDStr(c gp.ISDCandidate) string {
+	if len(c.AID) == 0 {
+		return "(default)"
+	}
+	return strings.ToUpper(hex.EncodeToString(c.AID))
+}
 
 // probeData is the JSON-friendly payload of the probe report. Strings
 // for OIDs (decimal-dotted) so JSON output is human-readable without
@@ -114,6 +126,8 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	sdAIDHex := fs.String("sd-aid", "",
 		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
+	discoverSD := fs.Bool("discover-sd", false,
+		"Walk a curated list of candidate Security Domain AIDs (gp.ISDDiscoveryAIDs) and use the first one that responds 9000. Mutually exclusive with --sd-aid. Probes return SW=6A82 on absent AIDs; any other non-9000 SW aborts discovery. The chosen AID appears in the report so subsequent runs can pin it via --sd-aid.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	var fullMode *bool
 	if opts.allowFullStatus {
@@ -132,6 +146,9 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	if err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if *discoverSD && sdAID != nil {
+		return &usageError{msg: "--discover-sd and --sd-aid are mutually exclusive (pick one)"}
+	}
 
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
@@ -141,7 +158,20 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 
 	report := &Report{Subcommand: opts.reportLabel, Reader: *reader}
 
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t, sdAID)
+	var sd *securitydomain.Session
+	if *discoverSD {
+		var match gp.ISDCandidate
+		sd, match, err = securitydomain.DiscoverISD(ctx, t, gp.ISDDiscoveryAIDs)
+		if err != nil {
+			report.Fail("discover ISD", err.Error())
+			_ = report.Emit(env.out, *jsonMode)
+			return fmt.Errorf("discover ISD: %w", err)
+		}
+		report.Pass("discover ISD",
+			fmt.Sprintf("matched %s — %s", candidateAIDStr(match), match.Source))
+	} else {
+		sd, err = securitydomain.OpenUnauthenticated(ctx, t, sdAID)
+	}
 	if err != nil {
 		report.Fail("select ISD", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
