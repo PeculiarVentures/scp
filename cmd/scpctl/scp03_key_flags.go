@@ -57,7 +57,7 @@ func registerSCP03KeyFlags(fs *flag.FlagSet) *scp03KeyFlags {
 			"Explicit opt-in to YubiKey factory SCP03 keys (KVN=0xFF, well-known "+
 				"publicly documented values). Same as the implicit default; useful "+
 				"for scripts that want to be explicit. Mutually exclusive with the "+
-				"--scp03-{kvn,enc,mac,dek} custom-key flags."),
+				"--scp03-{kvn,enc,mac,dek} custom-key flags and the --scp03-key shorthand."),
 		kvn: fs.String("scp03-kvn", "",
 			"SCP03 key version number, hex byte (e.g. 01, FF). Required together "+
 				"with --scp03-enc, --scp03-mac, --scp03-dek for cards whose keys "+
@@ -73,6 +73,41 @@ func registerSCP03KeyFlags(fs *flag.FlagSet) *scp03KeyFlags {
 				"Common on GP cards provisioned with a single master key. Requires "+
 				"--scp03-kvn. Mutually exclusive with the split --scp03-{enc,mac,dek} flags."),
 	}
+}
+
+// explicitlyConfigured reports whether the operator made a
+// deliberate SCP03 key-set choice. True if --scp03-keys-default,
+// --scp03-key, or any of the custom split-key flags were set;
+// false if every flag is empty and the implicit YubiKey factory
+// default would apply.
+//
+// Used by commands whose audience may not be running a YubiKey —
+// notably 'gp registry', whose generic-GP posture would make
+// silently trying the public 404142...4F factory keys against an
+// unknown card surprising and potentially bad operator hygiene.
+// Such commands gate themselves on this helper and refuse to run
+// without an explicit choice; legacy YubiKey-flavored commands
+// keep the implicit default.
+func (kf *scp03KeyFlags) explicitlyConfigured() bool {
+	if kf.useDefault != nil && *kf.useDefault {
+		return true
+	}
+	if kf.kvn != nil && *kf.kvn != "" {
+		return true
+	}
+	if kf.enc != nil && *kf.enc != "" {
+		return true
+	}
+	if kf.mac != nil && *kf.mac != "" {
+		return true
+	}
+	if kf.dek != nil && *kf.dek != "" {
+		return true
+	}
+	if kf.key != nil && *kf.key != "" {
+		return true
+	}
+	return false
 }
 
 // applyToConfig builds a *scp03.Config matching the flag selection.

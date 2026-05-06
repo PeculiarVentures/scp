@@ -42,7 +42,7 @@ import (
 // returns nil.
 func TestGPRegistry_AuthSuccess_PlumbingPath(t *testing.T) {
 	mock := scp03.NewMockCard(scp03.DefaultKeys)
-	out := runGPRegistry(t, mock, []string{"--reader", "fake"})
+	out := runGPRegistry(t, mock, []string{"--reader", "fake", "--scp03-keys-default"})
 
 	for _, want := range []string{
 		"scpctl gp registry",
@@ -72,7 +72,7 @@ func TestGPRegistry_AuthSuccess_PlumbingPath(t *testing.T) {
 // have to guess whether that means "no entries" or "not walked."
 func TestGPRegistry_JSONShape_NoRegistryWhenAllSkipped(t *testing.T) {
 	mock := scp03.NewMockCard(scp03.DefaultKeys)
-	out := runGPRegistry(t, mock, []string{"--reader", "fake", "--json"})
+	out := runGPRegistry(t, mock, []string{"--reader", "fake", "--json", "--scp03-keys-default"})
 
 	var report struct {
 		Subcommand string `json:"subcommand"`
@@ -178,4 +178,38 @@ func runGPRegistry(t *testing.T, mock *scp03.MockCard, args []string) string {
 		t.Fatalf("cmdGPRegistry: %v\n--- output ---\n%s", err, buf.String())
 	}
 	return buf.String()
+}
+
+// TestGPRegistry_RequiresExplicitKeyChoice confirms gp registry
+// refuses to fall through to the YubiKey factory SCP03 keys
+// implicitly, unlike the legacy YubiKey-flavored commands. The
+// gp group's audience may be running a non-YubiKey GP card where
+// the public 404142...4F factory keys are meaningless, and
+// silently trying them is operator-hygiene surprising.
+//
+// Acceptable invocations (explicit) include: --scp03-keys-default,
+// --scp03-key with --scp03-kvn, or split --scp03-{enc,mac,dek}
+// with --scp03-kvn. This test verifies the bare invocation that
+// previous commands accepted is now a usage error.
+func TestGPRegistry_RequiresExplicitKeyChoice(t *testing.T) {
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			t.Fatal("connect should not be reached when key choice is missing")
+			return nil, nil
+		},
+	}
+	err := cmdGPRegistry(context.Background(), env, []string{"--reader", "fake"})
+	if err == nil {
+		t.Fatal("expected usage error for missing SCP03 key choice")
+	}
+	var ue *usageError
+	if !errorsAs(err, &ue) {
+		t.Fatalf("expected *usageError, got %T: %v", err, err)
+	}
+	if !strings.Contains(ue.msg, "--scp03-keys-default") ||
+		!strings.Contains(ue.msg, "--scp03-key") {
+		t.Errorf("usage error should name the explicit options; got %q", ue.msg)
+	}
 }

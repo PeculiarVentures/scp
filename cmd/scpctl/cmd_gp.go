@@ -35,10 +35,15 @@ Usage:
   scpctl gp <subcommand> [flags]
 
 Subcommands:
-  probe       Open an unauthenticated SD session and report Card
-              Recognition Data, GP version, and supported SCPs.
-              Functionally equivalent to 'scpctl probe' under a
-              gp-tagged report label. Read-only.
+  probe       Use the existing default ISD probe path: SELECT
+              with empty AID, GET DATA tag 0x66 for Card
+              Recognition Data. Reports GP version and supported
+              SCPs. Read-only. Functionally equivalent to
+              'scpctl probe' under a gp-tagged report label.
+              This MVP does not yet support alternate SD AID
+              probing or non-default SELECT, so cards that
+              require either (for example SafeNet/Fusion with a
+              custom ISD AID) will still fail with SW=6A82.
   registry    Open an authenticated SCP03 session and walk the GP
               registry across three scopes (ISD, Applications,
               LoadFiles+Modules) via GET STATUS. Output uses the

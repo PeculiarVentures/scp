@@ -231,6 +231,34 @@ func TestGPCapInspect_LibraryPackage(t *testing.T) {
 	}
 }
 
+// TestGPCapInspect_LibraryPackage_JSON_EmptyArrays verifies that
+// a library CAP (no Applet.cap) emits applets: [] and not
+// applets: null in JSON output. A nil slice in Go marshals to
+// JSON null which forces script consumers to handle two distinct
+// "no entries" representations; the empty-slice convention is
+// the cleaner contract.
+func TestGPCapInspect_LibraryPackage_JSON_EmptyArrays(t *testing.T) {
+	dir := t.TempDir()
+	capPath := filepath.Join(dir, "lib.cap")
+	pkgAID := []byte{0xA0, 0x00, 0x00, 0x06, 0x47, 0x2F, 0x00, 0x01}
+	writeSyntheticCAP(t, capPath, pkgAID, nil, "lib.pkg")
+
+	out := runGPCapInspect(t, []string{"--json", capPath})
+
+	// Verify raw JSON contains 'applets":[' rather than 'applets":null'.
+	// Looking at the rendered text rather than unmarshaling-then-checking
+	// because Go's json.Marshal on a nil slice writes 'null' verbatim,
+	// and the encoded form is what script consumers see.
+	if !strings.Contains(out, `"applets": []`) {
+		t.Errorf(`expected "applets": [] (empty array, not null); got:\n%s`, out)
+	}
+	// Components is populated for any valid CAP since Header is mandatory,
+	// but verify the field shape is an array regardless.
+	if strings.Contains(out, `"components": null`) {
+		t.Errorf(`components must never be null; got:\n%s`, out)
+	}
+}
+
 // TestGPCapInspect_MissingFile_PropagatesError confirms an absent
 // path produces a FAIL line and a returned error rather than a
 // silent zero-value report.

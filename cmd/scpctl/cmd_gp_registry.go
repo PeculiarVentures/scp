@@ -51,6 +51,21 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 		return &usageError{msg: err.Error()}
 	}
 
+	// Generic GP commands gate on an explicit SCP03 key-set choice
+	// rather than falling through to YubiKey factory defaults. The
+	// gp group's audience may be pointing at a JCOP, SafeNet, or
+	// other non-YubiKey GP card where 404142...4F is meaningless;
+	// silently trying it as a default is operator-hygiene
+	// surprising. Legacy YubiKey-flavored commands (test scp03-sd-
+	// read, sd lock/unlock/terminate, bootstrap-*) keep the implicit
+	// default for compatibility with their existing call sites.
+	if !scp03Keys.explicitlyConfigured() {
+		return &usageError{msg: "gp registry requires an explicit SCP03 key choice: pass " +
+			"--scp03-keys-default for YubiKey/test-card factory keys, " +
+			"--scp03-kvn with --scp03-key for single-key cards, or " +
+			"--scp03-kvn with --scp03-{enc,mac,dek} for split-key cards"}
+	}
+
 	cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
 		return err

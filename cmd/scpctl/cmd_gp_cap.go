@@ -122,6 +122,16 @@ func cmdGPCapInspect(ctx context.Context, env *runEnv, args []string) error {
 		CAPVersion:     fmt.Sprintf("%d.%d", capFile.CAPVersionMajor, capFile.CAPVersionMinor),
 		PackageVersion: fmt.Sprintf("%d.%d", capFile.PackageVersionMajor, capFile.PackageVersionMinor),
 		PackageAID:     capFile.PackageAID.String(),
+		// Initialize to empty slices rather than rely on append's
+		// nil-handling: a nil slice in Go marshals to JSON null,
+		// which forces script consumers to handle two distinct
+		// representations of "no entries". An empty slice marshals
+		// to []. Library CAPs (no Applet.cap) and minimal CAPs (no
+		// known components) both reach this path with capFile
+		// fields nil; the explicit initialization stabilizes the
+		// JSON shape regardless.
+		Applets:    []gpCapInspectApplet{},
+		Components: []gpCapInspectComponentEntry{},
 	}
 	if len(capFile.PackageName) > 0 {
 		data.PackageName = string(capFile.PackageName)
