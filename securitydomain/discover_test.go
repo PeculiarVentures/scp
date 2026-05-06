@@ -3,8 +3,10 @@ package securitydomain_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -79,6 +81,57 @@ func TestDiscoverISD_NoneMatch_ReturnsSentinel(t *testing.T) {
 	}
 	if !errors.Is(err, securitydomain.ErrNoISDFound) {
 		t.Errorf("err = %v, want wrap of ErrNoISDFound", err)
+	}
+}
+
+// TestDiscoverISD_NoneMatch_ErrorIncludesEachAID asserts the
+// exhaustion-path error message is operator-actionable: it
+// must list every AID that was attempted (so the operator
+// knows what was tried), include each AID's SW, and point to
+// --sd-aid as the next step. Reviewer item #4: "make the
+// failure message point directly to --sd-aid and include the
+// tried AIDs."
+//
+// We pin the literal phrases the operator would grep for in a
+// support transcript, plus a hex check on each AID. If a future
+// refactor changes the error wording, this test fails loudly so
+// the audit-log shape stays predictable.
+func TestDiscoverISD_NoneMatch_ErrorIncludesEachAID(t *testing.T) {
+	tt := &selectiveTransport{accept: nil}
+
+	_, _, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+
+	// Must mention --sd-aid by literal flag name so an operator
+	// reading the message knows the next step without consulting
+	// docs.
+	if !strings.Contains(msg, "--sd-aid") {
+		t.Errorf("error message must mention --sd-aid; got %q", msg)
+	}
+	// Must list each curated default AID by its hex
+	// representation. Iterates ISDDiscoveryAIDs so adding a new
+	// candidate in gp/discovery.go automatically extends what
+	// this test asserts.
+	for _, c := range gp.ISDDiscoveryAIDs {
+		if c.AID == nil {
+			// Empty SELECT should render as a recognizable token.
+			if !strings.Contains(msg, "(empty SELECT)") {
+				t.Errorf("error message must mention empty SELECT candidate; got %q", msg)
+			}
+			continue
+		}
+		hexStr := strings.ToUpper(hex.EncodeToString(c.AID))
+		if !strings.Contains(strings.ToUpper(msg), hexStr) {
+			t.Errorf("error message must include tried AID %s; got %q", hexStr, msg)
+		}
+	}
+	// Must announce the count up front — automation parsing
+	// the message can use this as an anchor.
+	if !strings.Contains(msg, "tried ") || !strings.Contains(msg, " AIDs") {
+		t.Errorf("error message must announce 'tried N AIDs'; got %q", msg)
 	}
 }
 

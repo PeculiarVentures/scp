@@ -78,7 +78,11 @@ type DiscoveryTrace func(DiscoveryAttempt)
 //     masking the real problem.
 //   - Transport errors: abort.
 //   - All candidates exhausted with 6A82/6A87: return
-//     ErrNoISDFound with the count and last SW.
+//     ErrNoISDFound. The error message lists each tried AID
+//     and the SW the card returned for it, plus an
+//     actionable hint pointing to --sd-aid (the CLI flag for
+//     supplying a vendor- or deployment-specific ISD AID
+//     that isn't on the curated default list).
 //
 // Pass gp.ISDDiscoveryAIDs for the curated default list, or a
 // custom slice when scripted automation has its own probe order.
@@ -88,6 +92,17 @@ type DiscoveryTrace func(DiscoveryAttempt)
 // caller's goroutine; an expensive callback throttles discovery.
 //
 // Caller owns the returned *Session; close it via Session.Close.
+// discoveryAttempt records what each SELECT probe returned, used
+// only to build the exhaustion-path error message. Distinct from
+// the public DiscoveryAttempt type, which is what the trace
+// callback receives — that type also includes the candidate's
+// Source citation and a Selected flag, neither of which the
+// final error message needs.
+type discoveryAttempt struct {
+	aid []byte
+	sw  uint16
+}
+
 func DiscoverISD(ctx context.Context, t transport.Transport, candidates []gp.ISDCandidate, trace DiscoveryTrace) (*Session, gp.ISDCandidate, error) {
 	if t == nil {
 		return nil, gp.ISDCandidate{}, errors.New("securitydomain: transport is required")
@@ -96,8 +111,14 @@ func DiscoverISD(ctx context.Context, t transport.Transport, candidates []gp.ISD
 		return nil, gp.ISDCandidate{}, errors.New("securitydomain: no candidates supplied")
 	}
 
+	// Track every attempt so the exhaustion-path error message
+	// can name each AID and SW. The trace callback already sees
+	// these per-attempt; this slice exists so the final error
+	// is self-contained for operators who don't capture the
+	// trace stream.
+	var attempts []discoveryAttempt
 	var lastErr error
-	var lastSW uint16
+
 	for _, c := range candidates {
 		sd, err := OpenUnauthenticated(ctx, t, c.AID)
 		if err == nil {
@@ -117,13 +138,13 @@ func DiscoverISD(ctx context.Context, t transport.Transport, candidates []gp.ISD
 		if trace != nil {
 			trace(DiscoveryAttempt{Candidate: c, SW: sw, Err: err})
 		}
+		attempts = append(attempts, discoveryAttempt{aid: c.AID, sw: sw})
 
 		switch sw {
 		case 0x6A82, 0x6A87:
 			// "Not found" signals (6A82 standard, 6A87 SmartJac /
 			// some SafeNet dispatchers). Try next candidate.
 			lastErr = err
-			lastSW = sw
 			continue
 		case 0x6283:
 			// "Selected but locked." The SD exists at this AID
@@ -138,8 +159,37 @@ func DiscoverISD(ctx context.Context, t transport.Transport, candidates []gp.ISD
 		return nil, gp.ISDCandidate{}, fmt.Errorf("DiscoverISD aborted at candidate %q: %w",
 			candidateLabel(c), err)
 	}
-	return nil, gp.ISDCandidate{}, fmt.Errorf("%w (tried %d AIDs, last SW=%04X, err=%v)",
-		ErrNoISDFound, len(candidates), lastSW, lastErr)
+	return nil, gp.ISDCandidate{}, fmt.Errorf("%w; %s; supply the AID for this card with --sd-aid (vendor documentation, card datasheet, or output of GET STATUS on a card with a known-working ISD): last error: %v",
+		ErrNoISDFound, formatExhaustedAttempts(attempts), lastErr)
+}
+
+// formatExhaustedAttempts builds the per-attempt diagnostic the
+// exhaustion-path error embeds. Each attempt renders as
+// "<AID-hex> SW=<hex>"; nil AID renders as "(empty SELECT)".
+// Anchored by the introductory phrase "tried N AIDs:" so a
+// single-line error remains parseable by automation.
+func formatExhaustedAttempts(attempts []discoveryAttempt) string {
+	if len(attempts) == 0 {
+		return "tried 0 AIDs"
+	}
+	parts := make([]string, 0, len(attempts))
+	for _, a := range attempts {
+		var aidStr string
+		if len(a.aid) == 0 {
+			aidStr = "(empty SELECT)"
+		} else {
+			aidStr = fmt.Sprintf("%X", a.aid)
+		}
+		parts = append(parts, fmt.Sprintf("%s SW=%04X", aidStr, a.sw))
+	}
+	out := fmt.Sprintf("tried %d AIDs: ", len(attempts))
+	for i, p := range parts {
+		if i > 0 {
+			out += ", "
+		}
+		out += p
+	}
+	return out
 }
 
 // candidateLabel formats a candidate for log/error messages.
