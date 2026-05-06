@@ -140,6 +140,20 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 		return &usageError{msg: "sd keys generate requires --out (the SPKI must be captured to a file; otherwise generation is not observable to the operator)"}
 	}
 
+	// Vendor profile gate: GENERATE EC KEY uses INS=0xF1, which is
+	// a Yubico extension to the GP spec. Generic GP cards return
+	// SW=6D00 (instruction not supported). Refuse here rather than
+	// emit the APDU and let the card error surface as
+	// hard-to-interpret noise — the operator named --vendor-profile
+	// generic explicitly, so they wanted the safety check.
+	if scp03Keys.VendorProfile() == "generic" {
+		return &usageError{msg: "sd keys generate requires --vendor-profile yubikey: " +
+			"GENERATE EC KEY (INS=0xF1) is a Yubico extension and is not part of the GP " +
+			"standard surface. Generic GP cards reject it with SW=6D00. To install an EC " +
+			"key on a non-YubiKey card, generate the keypair off-card and use sd keys " +
+			"import instead."}
+	}
+
 	scp03Cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
 		return err

@@ -77,9 +77,9 @@ Verbs:
   import    Install a key set, private key, or trust anchor at one
             key reference, dispatched by KID. Supports SCP03 AES-128
             (--kid 01), SCP11 SD private key with optional cert chain
-            (--kid 11/13/15), and CA/OCE trust anchor with SKI
-            registration (--kid 10/20-2F). Authenticated SCP03;
-            gated on --confirm-write. Dry-run by default.
+            (--kid 11/13/15), and CA/OCE trust anchor with SKI registration
+            (--kid 10/20-2F). Authenticated SCP03; gated on
+            --confirm-write. Dry-run by default.
 
 Use "scpctl sd keys <verb> -h" for per-verb flags.
 `)
@@ -272,7 +272,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 			KVN:        ki.Reference.Version,
 			KIDHex:     fmt.Sprintf("0x%02X", ki.Reference.ID),
 			KVNHex:     fmt.Sprintf("0x%02X", ki.Reference.Version),
-			Kind:       classifyKID(ki.Reference.ID),
+			Kind:       classifyKID(ki.Reference.ID, scp03Flags.VendorProfile()),
 			Components: projectComponents(ki.Components),
 		}
 		if ski, ok := caByRef[ki.Reference]; ok && len(ski) > 0 {
@@ -628,18 +628,41 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 // JSON output as the authoritative value. The KLOC/KLCC range covers
 // both the canonical 0x10 and the 0x20–0x2F extension Yubico uses for
 // additional CA references.
-func classifyKID(kid byte) string {
+//
+// vendor selects the labeling convention:
+//
+//   - "yubikey" (default): KIDs 0x11/0x13/0x15 are labeled
+//     scp11a-sd/scp11b-sd/scp11c-sd per Yubico's KeyReference
+//     namespace. This is the common case and matches what
+//     ykman/yubikit print.
+//   - "generic": those same KIDs are labeled "scp11-sd" without the
+//     variant letter, because generic GP cards don't promise that
+//     KID 0x11 maps to SCP11a specifically — that's a Yubico
+//     convention. The raw KID is preserved in the JSON's kid_hex
+//     field as the authoritative value.
+//
+// SCP03 (KID=0x01) and the OCE/CA-public range are GP-spec
+// conventions, not Yubico-specific, so their labels don't depend
+// on the vendor profile.
+func classifyKID(kid byte, vendor string) string {
 	switch {
 	case kid == securitydomain.KeyIDSCP03:
 		return "scp03"
 	case kid == securitydomain.KeyIDOCE, kid >= 0x20 && kid <= 0x2F:
 		return "ca-public"
-	case kid == securitydomain.KeyIDSCP11a:
-		return "scp11a-sd"
-	case kid == securitydomain.KeyIDSCP11b:
-		return "scp11b-sd"
-	case kid == securitydomain.KeyIDSCP11c:
-		return "scp11c-sd"
+	case kid == securitydomain.KeyIDSCP11a, kid == securitydomain.KeyIDSCP11b, kid == securitydomain.KeyIDSCP11c:
+		if vendor == "generic" {
+			return "scp11-sd"
+		}
+		switch kid {
+		case securitydomain.KeyIDSCP11a:
+			return "scp11a-sd"
+		case securitydomain.KeyIDSCP11b:
+			return "scp11b-sd"
+		case securitydomain.KeyIDSCP11c:
+			return "scp11c-sd"
+		}
+		return "scp11-sd"
 	default:
 		return "unknown"
 	}

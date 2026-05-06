@@ -48,6 +48,19 @@ type scp03KeyFlags struct {
 	enc        *string
 	mac        *string
 	dek        *string
+
+	// vendor profile: "yubikey" (default) or "generic". Affects:
+	//
+	//   - Whether --scp03-keys-default is acceptable (the
+	//     YubiKey factory keys are vendor-specific; on generic
+	//     cards the operator must pass the custom triple).
+	//   - Whether implicit factory-default fallback is acceptable
+	//     in required-auth mode (same reason).
+	//
+	// Verbs that have additional vendor-dependent behavior (e.g.
+	// sd keys generate emits Yubico INS=0xF1) read the vendor
+	// value via VendorProfile() and apply their own checks.
+	vendor *string
 }
 
 // scp03FlagMode selects the help-text wording for registerSCP03KeyFlags
@@ -106,6 +119,39 @@ func registerSCP03KeyFlags(fs *flag.FlagSet, mode scp03FlagMode) *scp03KeyFlags 
 			"SCP03 channel MAC key, hex; same length as --scp03-enc."),
 		dek: fs.String("scp03-dek", "",
 			"SCP03 data encryption key, hex; same length as --scp03-enc."),
+		vendor: fs.String("vendor-profile", "yubikey",
+			"Card vendor profile. 'yubikey' (default) assumes YubiKey "+
+				"conventions: factory SCP03 keys at KVN=0xFF, KIDs 0x11/0x13/0x15 "+
+				"named scp11a/b/c, GENERATE EC KEY (INS=0xF1) extension available. "+
+				"'generic' makes no vendor assumptions: --scp03-keys-default is "+
+				"rejected (operator must supply explicit keys), KIDs are reported "+
+				"by raw value rather than YubiKey labels, and verbs that depend on "+
+				"Yubico extensions refuse rather than silently emitting "+
+				"vendor-specific APDUs."),
+	}
+}
+
+// VendorProfile returns the parsed vendor-profile value
+// ("yubikey" or "generic"). Verbs with vendor-dependent behavior
+// beyond the factory-key check call this directly.
+func (kf *scp03KeyFlags) VendorProfile() string {
+	if kf == nil || kf.vendor == nil {
+		return "yubikey"
+	}
+	return *kf.vendor
+}
+
+// validateVendor returns a usageError if the vendor flag value
+// isn't recognized. Called from both applyToConfig variants so
+// the validation runs at the point of first SCP03 use.
+func (kf *scp03KeyFlags) validateVendor() error {
+	switch kf.VendorProfile() {
+	case "yubikey", "generic":
+		return nil
+	default:
+		return &usageError{msg: fmt.Sprintf(
+			"--vendor-profile: %q not recognized; valid values are 'yubikey', 'generic'",
+			*kf.vendor)}
 	}
 }
 
@@ -120,7 +166,16 @@ func registerSCP03KeyFlags(fs *flag.FlagSet, mode scp03FlagMode) *scp03KeyFlags 
 // applyToConfig directly; the implicit "no flags = factory" semantic
 // is preserved for them. Read-only commands call this method instead.
 func (kf *scp03KeyFlags) applyToConfigOptional() (*scp03.Config, error) {
-	if kf == nil || !kf.anyFlagSet() {
+	if kf == nil {
+		return nil, nil
+	}
+	// Validate vendor profile even when no SCP03 flags are set —
+	// operators can typo the vendor value and the unauth fallback
+	// shouldn't silently swallow that. validateVendor is cheap.
+	if err := kf.validateVendor(); err != nil {
+		return nil, err
+	}
+	if !kf.anyFlagSet() {
 		return nil, nil
 	}
 	return kf.applyToConfig()
@@ -145,10 +200,42 @@ func (kf *scp03KeyFlags) anyFlagSet() bool {
 // Returns a *usageError on conflict, partial-custom, or hex parse
 // failures.
 func (kf *scp03KeyFlags) applyToConfig() (*scp03.Config, error) {
+	if err := kf.validateVendor(); err != nil {
+		return nil, err
+	}
 	custom := kf.kvn != nil && (*kf.kvn != "" || *kf.enc != "" || *kf.mac != "" || *kf.dek != "")
 	if *kf.useDefault && custom {
 		return nil, &usageError{msg: "--scp03-keys-default and --scp03-{kvn,enc,mac,dek} are mutually exclusive"}
 	}
+
+	// Vendor profile gates: the YubiKey factory keys are
+	// vendor-specific (KVN=0xFF, well-known publicly documented
+	// AES-128 values from Yubico). On a generic GP card these
+	// keys are wrong by definition, so we refuse the
+	// factory-default path explicitly rather than emit an
+	// authenticated APDU that will fail in card-error noise.
+	//
+	// Two cases to reject:
+	//   1. --scp03-keys-default was set explicitly
+	//   2. No SCP03 flags were set, and we're in required-auth
+	//      mode (so the implicit fallback would be factory keys)
+	//
+	// Optional-auth verbs (sd keys list, sd keys export) handle
+	// case 2 via applyToConfigOptional, which short-circuits
+	// before this function runs when no flags are set; this
+	// function only sees the "auth was requested" path.
+	if kf.VendorProfile() == "generic" {
+		if *kf.useDefault {
+			return nil, &usageError{msg: "--scp03-keys-default is not valid with --vendor-profile generic " +
+				"(YubiKey factory keys don't apply to non-YubiKey cards). Pass the explicit " +
+				"--scp03-{kvn,enc,mac,dek} triple instead."}
+		}
+		if !custom {
+			return nil, &usageError{msg: "--vendor-profile generic requires explicit --scp03-{kvn,enc,mac,dek} " +
+				"(no implicit YubiKey factory-key fallback for non-YubiKey cards)."}
+		}
+	}
+
 	if !custom {
 		// Implicit or explicit factory default — same result.
 		return scp03.FactoryYubiKeyConfig(), nil
