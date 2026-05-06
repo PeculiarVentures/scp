@@ -1,6 +1,6 @@
 module demo
 
-go 1.23.4
+go 1.26.2
 
 replace github.com/PeculiarVentures/scp/transport/pcsc => ..
 

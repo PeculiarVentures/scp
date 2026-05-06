@@ -1,6 +1,6 @@
 module github.com/PeculiarVentures/scp/cmd/scpctl
 
-go 1.22
+go 1.26.2
 
 require (
 	github.com/PeculiarVentures/scp v0.0.0

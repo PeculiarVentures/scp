@@ -1,6 +1,6 @@
 module github.com/PeculiarVentures/scp/transport/grpc
 
-go 1.24.0
+go 1.26.2
 
 require (
 	github.com/PeculiarVentures/scp v0.4.0
