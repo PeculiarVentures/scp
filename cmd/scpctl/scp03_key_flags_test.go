@@ -252,6 +252,145 @@ func TestSCP03KeyFlags_RejectsInconsistentKeyLengths(t *testing.T) {
 	}
 }
 
+// TestSCP03KeyFlags_Shorthand_Success confirms --scp03-key produces
+// a Config with the same hex value used for ENC, MAC, and DEK.
+// Common configuration on GP cards provisioned with a single master
+// key.
+func TestSCP03KeyFlags_Shorthand_Success(t *testing.T) {
+	k := strings.Repeat("AB", 16)
+	wantBytes, _ := hex.DecodeString(k)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	kf := registerSCP03KeyFlags(fs)
+	if err := fs.Parse([]string{
+		"--scp03-kvn", "01",
+		"--scp03-key", k,
+	}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cfg, err := kf.applyToConfig()
+	if err != nil {
+		t.Fatalf("applyToConfig: %v", err)
+	}
+	if cfg.KeyVersion != 0x01 {
+		t.Errorf("KVN: got 0x%02X want 0x01", cfg.KeyVersion)
+	}
+	if !bytesEqualKey(cfg.Keys.ENC, wantBytes) {
+		t.Error("ENC bytes don't match shorthand value")
+	}
+	if !bytesEqualKey(cfg.Keys.MAC, wantBytes) {
+		t.Error("MAC bytes don't match shorthand value")
+	}
+	if !bytesEqualKey(cfg.Keys.DEK, wantBytes) {
+		t.Error("DEK bytes don't match shorthand value")
+	}
+}
+
+// TestSCP03KeyFlags_Shorthand_BytesAreIndependent confirms that
+// mutating one of ENC/MAC/DEK does not affect the others. Defends
+// the by-construction-copy invariant in applyToConfig — the scp03
+// layer is not expected to mutate, but the invariant should hold
+// before a downstream caller can rely on it.
+func TestSCP03KeyFlags_Shorthand_BytesAreIndependent(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	kf := registerSCP03KeyFlags(fs)
+	if err := fs.Parse([]string{
+		"--scp03-kvn", "01",
+		"--scp03-key", strings.Repeat("AB", 16),
+	}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cfg, err := kf.applyToConfig()
+	if err != nil {
+		t.Fatalf("applyToConfig: %v", err)
+	}
+	cfg.Keys.ENC[0] = 0x00
+	if cfg.Keys.MAC[0] == 0x00 {
+		t.Error("mutating ENC[0] corrupted MAC[0]; ENC and MAC share backing storage")
+	}
+	if cfg.Keys.DEK[0] == 0x00 {
+		t.Error("mutating ENC[0] corrupted DEK[0]; ENC and DEK share backing storage")
+	}
+}
+
+// TestSCP03KeyFlags_Shorthand_RequiresKVN confirms --scp03-key alone
+// (without --scp03-kvn) is a usage error. KVN is independent of the
+// key bytes — the card needs both to authenticate.
+func TestSCP03KeyFlags_Shorthand_RequiresKVN(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	kf := registerSCP03KeyFlags(fs)
+	if err := fs.Parse([]string{
+		"--scp03-key", strings.Repeat("AB", 16),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := kf.applyToConfig()
+	if err == nil {
+		t.Fatal("expected error for --scp03-key without --scp03-kvn")
+	}
+	if !strings.Contains(err.Error(), "scp03-kvn") {
+		t.Errorf("error should reference --scp03-kvn; got %v", err)
+	}
+}
+
+// TestSCP03KeyFlags_Shorthand_RejectsMixedWithSplit confirms
+// --scp03-key combined with any of --scp03-{enc,mac,dek} is a
+// usage error. Operator must pick one form or the other.
+func TestSCP03KeyFlags_Shorthand_RejectsMixedWithSplit(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"key + enc", []string{
+			"--scp03-kvn", "01",
+			"--scp03-key", strings.Repeat("AB", 16),
+			"--scp03-enc", strings.Repeat("11", 16),
+		}},
+		{"key + mac", []string{
+			"--scp03-kvn", "01",
+			"--scp03-key", strings.Repeat("AB", 16),
+			"--scp03-mac", strings.Repeat("22", 16),
+		}},
+		{"key + dek", []string{
+			"--scp03-kvn", "01",
+			"--scp03-key", strings.Repeat("AB", 16),
+			"--scp03-dek", strings.Repeat("33", 16),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			kf := registerSCP03KeyFlags(fs)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			_, err := kf.applyToConfig()
+			if err == nil {
+				t.Fatal("expected mutual-exclusion error")
+			}
+			if !strings.Contains(err.Error(), "mutually exclusive") {
+				t.Errorf("error should mention mutual exclusivity; got %v", err)
+			}
+		})
+	}
+}
+
+// TestSCP03KeyFlags_Shorthand_RejectsMixedWithDefault confirms
+// --scp03-key combined with --scp03-keys-default is a usage error.
+func TestSCP03KeyFlags_Shorthand_RejectsMixedWithDefault(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	kf := registerSCP03KeyFlags(fs)
+	if err := fs.Parse([]string{
+		"--scp03-keys-default",
+		"--scp03-key", strings.Repeat("AB", 16),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := kf.applyToConfig()
+	if err == nil {
+		t.Fatal("expected mutual-exclusion error")
+	}
+}
+
 // TestSCP03KeyFlags_RejectsBadHex covers the parse-failure path
 // for individual key flags.
 func TestSCP03KeyFlags_RejectsBadHex(t *testing.T) {
@@ -276,6 +415,14 @@ func TestSCP03KeyFlags_RejectsBadHex(t *testing.T) {
 			"--scp03-enc", strings.Repeat("11", 8),
 			"--scp03-mac", strings.Repeat("22", 8),
 			"--scp03-dek", strings.Repeat("33", 8),
+		}},
+		{"shorthand with bad hex", []string{
+			"--scp03-kvn", "01",
+			"--scp03-key", "ZZ",
+		}},
+		{"shorthand with unsupported length", []string{
+			"--scp03-kvn", "01",
+			"--scp03-key", strings.Repeat("AB", 8),
 		}},
 	}
 	for _, tc := range cases {
