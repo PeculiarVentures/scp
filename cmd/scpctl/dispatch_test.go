@@ -285,11 +285,11 @@ func TestDispatch_SDSubcommandHelp(t *testing.T) {
 
 // TestDispatch_SDKeysVerbs verifies that 'scpctl sd keys <verb> -h'
 // reaches the per-verb handler. This is the nested-dispatcher case:
-// 'sd' → 'keys' → 'list'/'export'/'delete'/'generate'. Each verb has
-// its own flag set, so '-h' produces flag usage output rather than
-// the bare-verb-list help that 'sd keys -h' produces.
+// 'sd' → 'keys' → 'list'/'export'/'delete'/'generate'/'import'. Each
+// verb has its own flag set, so '-h' produces flag usage output
+// rather than the bare-verb-list help that 'sd keys -h' produces.
 func TestDispatch_SDKeysVerbs(t *testing.T) {
-	verbs := []string{"list", "export", "delete", "generate"}
+	verbs := []string{"list", "export", "delete", "generate", "import"}
 	for _, v := range verbs {
 		t.Run(v, func(t *testing.T) {
 			_, stderr, code := runScpctl(t, "sd", "keys", v, "-h")
@@ -325,10 +325,12 @@ func TestDispatch_SDKeysHelpContent(t *testing.T) {
 		"export",
 		"delete",
 		"generate",
+		"import",
 		"PEM",
 		"--der",
 		"--confirm-delete-key",
 		"INS=0xF1", // Yubico-extension transparency
+		"Phase 5a", // import phase status visible to operators
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("'sd keys help' stdout missing %q; got:\n%s", want, stdout)

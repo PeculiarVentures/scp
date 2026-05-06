@@ -40,7 +40,7 @@ import (
 // have an established trust path or are inspecting a card.
 func cmdSDKeys(ctx context.Context, env *runEnv, args []string) error {
 	if len(args) == 0 {
-		return &usageError{msg: "scpctl sd keys <list|export|delete|generate> [flags]"}
+		return &usageError{msg: "scpctl sd keys <list|export|delete|generate|import> [flags]"}
 	}
 	switch args[0] {
 	case "list":
@@ -51,6 +51,8 @@ func cmdSDKeys(ctx context.Context, env *runEnv, args []string) error {
 		return cmdSDKeysDelete(ctx, env, args[1:])
 	case "generate":
 		return cmdSDKeysGenerate(ctx, env, args[1:])
+	case "import":
+		return cmdSDKeysImport(ctx, env, args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(env.out, `scpctl sd keys - Security Domain key inventory and certificate export
 
@@ -72,6 +74,11 @@ Verbs:
             wire; the SPKI is written to --out as a PEM PUBLIC KEY
             block. Authenticated SCP03; gated on --confirm-write.
             Dry-run by default. Uses Yubico extension INS=0xF1.
+  import    Install a key set or trust anchor at one key reference,
+            dispatched by KID. Phase 5a (this build) supports SCP03
+            AES-128 import (--kid 01); SCP11 SD key import and
+            CA/OCE trust-anchor import are forthcoming. Authenticated
+            SCP03; gated on --confirm-write. Dry-run by default.
 
 Use "scpctl sd keys <verb> -h" for per-verb flags.
 `)
