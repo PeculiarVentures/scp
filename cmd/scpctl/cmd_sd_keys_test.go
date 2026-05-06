@@ -659,7 +659,7 @@ func TestClassifyKID(t *testing.T) {
 		{0xFF, "unknown"},
 	}
 	for _, tc := range cases {
-		if got := classifyKID(tc.kid, "yubikey"); got != tc.kind {
+		if got := classifyKID(tc.kid, "yubikey-sd"); got != tc.kind {
 			t.Errorf("classifyKID(0x%02X, yubikey) = %q, want %q", tc.kid, got, tc.kind)
 		}
 	}

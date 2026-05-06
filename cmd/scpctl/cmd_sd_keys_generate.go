@@ -28,6 +28,7 @@ import (
 // was omitted.
 type sdKeysGenerateData struct {
 	Channel               string `json:"channel"`
+	Profile               string `json:"profile,omitempty"`
 	KIDHex                string `json:"kid_hex"`
 	KVNHex                string `json:"kvn_hex"`
 	ReplaceKVN            byte   `json:"replace_kvn"`
@@ -140,16 +141,18 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 		return &usageError{msg: "sd keys generate requires --out (the SPKI must be captured to a file; otherwise generation is not observable to the operator)"}
 	}
 
-	// Vendor profile gate: GENERATE EC KEY uses INS=0xF1, which is
-	// a Yubico extension to the GP spec. Generic GP cards return
-	// SW=6D00 (instruction not supported). Refuse here rather than
+	// Profile gate: GENERATE EC KEY uses INS=0xF1, which is a
+	// Yubico extension to the GP spec. Standard GP cards return
+	// SW=6D00 (instruction not supported). Refuse here when
+	// --profile=standard-sd was explicitly specified rather than
 	// emit the APDU and let the card error surface as
-	// hard-to-interpret noise — the operator named --vendor-profile
-	// generic explicitly, so they wanted the safety check.
-	if scp03Keys.VendorProfile() == "generic" {
-		return &usageError{msg: "sd keys generate requires --vendor-profile yubikey: " +
+	// hard-to-interpret noise. (For --profile=auto, the
+	// library-level Capabilities gate is the authoritative check
+	// once Probe has resolved the active profile.)
+	if scp03Keys.IsStandardSD() {
+		return &usageError{msg: "sd keys generate requires --profile yubikey-sd (or --profile auto on a YubiKey card): " +
 			"GENERATE EC KEY (INS=0xF1) is a Yubico extension and is not part of the GP " +
-			"standard surface. Generic GP cards reject it with SW=6D00. To install an EC " +
+			"standard surface. Standard GP cards reject it with SW=6D00. To install an EC " +
 			"key on a non-YubiKey card, generate the keypair off-card and use sd keys " +
 			"import instead."}
 	}
@@ -190,7 +193,7 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -199,6 +202,7 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 	defer sd.Close()
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
+	data.Profile = profName
 
 	checkName := fmt.Sprintf("GENERATE EC KEY (Yubico extension INS=0xF1) kid=0x%02X kvn=0x%02X", kid, kvn)
 	pub, err := sd.GenerateECKey(ctx, ref, replaceKvn)

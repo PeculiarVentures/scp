@@ -15,6 +15,7 @@ import (
 // Phase 2b/3b parallel).
 type sdKeysDeleteData struct {
 	Channel string `json:"channel"`
+	Profile string `json:"profile,omitempty"`
 	Mode    string `json:"mode"` // "single" or "all-at-kvn"
 	KIDHex  string `json:"kid_hex,omitempty"`
 	KVNHex  string `json:"kvn_hex"`
@@ -161,7 +162,7 @@ func cmdSDKeysDelete(ctx context.Context, env *runEnv, args []string) error {
 
 	// Destructive path.
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -170,6 +171,7 @@ func cmdSDKeysDelete(ctx context.Context, env *runEnv, args []string) error {
 	defer sd.Close()
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
+	data.Profile = profName
 
 	// Pre-flight orphan check. The foot-gun case: operator deletes
 	// the only SCP03 keyset on the card and locks themselves out

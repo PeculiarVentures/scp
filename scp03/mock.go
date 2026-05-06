@@ -245,10 +245,26 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0x50: // INITIALIZE UPDATE
 		return c.doInitializeUpdate(cmd)
-	case 0xCA: // GET DATA — allow tag 0x66 (CRD) unauthenticated;
-		// real cards typically permit CRD probe before any session.
-		// Other tags require secure messaging.
+	case 0xCA: // GET DATA — pre-session reads of operator-discoverable
+		// data objects. Real YubiKeys permit two paths without
+		// authentication:
+		//
+		//   - tag 0x0066 (Card Recognition Data per GP §H.2): the
+		//     pre-handshake "what kind of card is this" probe
+		//     scpctl uses for unauthenticated identification.
+		//   - tag 0x5FC1 (sub-tag 09 = firmware version): the
+		//     YubiKey version object the profile package's Probe
+		//     reads to distinguish YubiKey from standard GP
+		//     cards. Standard GP cards return 6A88 for this tag;
+		//     since this mock is YubiKey-shaped, it answers as a
+		//     YubiKey would.
+		//
+		// Other GET DATA tags require secure messaging and get
+		// SW=6982 here.
 		if cmd.P1 == 0x00 && cmd.P2 == 0x66 {
+			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
+		}
+		if cmd.P1 == 0x5F && cmd.P2 == 0xC1 {
 			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
 		}
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil // security status not satisfied
@@ -619,6 +635,26 @@ func (c *MockCard) doGetData(p1, p2 byte, requestBody []byte) (*apdu.Response, e
 			return &apdu.Response{SW1: 0x6A, SW2: 0x88}, nil
 		}
 		return &apdu.Response{Data: stored, SW1: 0x90, SW2: 0x00}, nil
+	case 0x5FC1:
+		// YubiKey firmware version object (tag 5FC109). The
+		// profile package's Probe sends GET DATA with P1=0x5F
+		// P2=0xC1 and reads the response as raw
+		// major.minor.patch — three bytes. Real YubiKey 5.x
+		// hardware advertises this; standard GP cards return
+		// 6A88 because the tag is a Yubico extension. The mock
+		// is a YubiKey-shaped simulator, so it should answer
+		// the way a YubiKey does: SW=9000 with three bytes.
+		// Without this case, profile.Probe defaults to
+		// StandardSDProfile against the mock, which then breaks
+		// any test that exercises GenerateECKey through the
+		// profile gate.
+		//
+		// Returning 5.7.1 specifically: the mock's behavior is
+		// modeled on YubiKey 5.7.x firmware (SCP11 support,
+		// AES-128 SCP03 key sets, etc.); 5.7.1 is the published
+		// version that matches that surface. Operators reading
+		// trace logs see a familiar version.
+		return &apdu.Response{Data: []byte{5, 7, 1}, SW1: 0x90, SW2: 0x00}, nil
 	default:
 		return &apdu.Response{SW1: 0x6A, SW2: 0x88}, nil // reference data not found
 	}

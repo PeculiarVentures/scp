@@ -32,6 +32,7 @@ import (
 // audit log captures the on-card commitment.
 type sdKeysImportData struct {
 	Channel    string `json:"channel"`
+	Profile    string `json:"profile,omitempty"`
 	Category   string `json:"category"`
 	KIDHex     string `json:"kid_hex"`
 	KVNHex     string `json:"kvn_hex"`
@@ -301,7 +302,7 @@ func cmdSDKeysImportSCP03(ctx context.Context, env *runEnv, args []string) error
 	}
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -310,6 +311,7 @@ func cmdSDKeysImportSCP03(ctx context.Context, env *runEnv, args []string) error
 	defer sd.Close()
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
+	data.Profile = profName
 
 	checkName := fmt.Sprintf("PUT KEY SCP03 AES-128 kid=0x%02X kvn=0x%02X", kid, kvn)
 	newKeys := scp03.StaticKeys{ENC: enc, MAC: mac, DEK: dek}
@@ -546,7 +548,7 @@ func cmdSDKeysImportSCP11SD(ctx context.Context, env *runEnv, args []string) err
 
 	// Active path.
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -555,6 +557,7 @@ func cmdSDKeysImportSCP11SD(ctx context.Context, env *runEnv, args []string) err
 	defer sd.Close()
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
+	data.Profile = profName
 
 	putKeyCheck := fmt.Sprintf("PUT KEY SCP11 P-256 private kid=0x%02X kvn=0x%02X", kid, kvn)
 	if err := sd.PutECPrivateKey(ctx, ref, privKey, replaceKvn); err != nil {
@@ -898,7 +901,7 @@ func cmdSDKeysImportTrustAnchor(ctx context.Context, env *runEnv, args []string)
 
 	// Active path.
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -907,6 +910,7 @@ func cmdSDKeysImportTrustAnchor(ctx context.Context, env *runEnv, args []string)
 	defer sd.Close()
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
+	data.Profile = profName
 
 	putKeyCheck := fmt.Sprintf("PUT KEY P-256 public (trust anchor) kid=0x%02X kvn=0x%02X", kid, kvn)
 	if err := sd.PutECPublicKey(ctx, ref, pubKey, replaceKvn); err != nil {

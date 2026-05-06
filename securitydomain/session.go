@@ -14,6 +14,7 @@ import (
 	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/securitydomain/profile"
 	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
 )
@@ -72,6 +73,16 @@ type Session struct {
 	// authenticate this session. Required for PUT KEY operations that
 	// encrypt key material before transmission. Nil for SCP11 sessions.
 	dek []byte
+
+	// profile gates vendor-extension operations against the
+	// active card profile. Set via SetProfile after Open*; nil
+	// means "no gating, send anything" (backward compat for
+	// callers that haven't adopted the profile package yet).
+	//
+	// Wired into GenerateECKey today; future vendor-extension
+	// methods will consult this field too. Set once at session
+	// open and never mutated for the session's lifetime.
+	profile profile.Profile
 }
 
 // dekProvider is the unexported capability interface that the SD
@@ -382,6 +393,26 @@ func (s *Session) Close() {
 // IsAuthenticated reports whether this session has a secure channel.
 func (s *Session) IsAuthenticated() bool { return s.authenticated }
 
+// SetProfile attaches a card profile for vendor-extension gating.
+// Operations that require a vendor-specific feature consult the
+// profile's Capabilities and return ErrUnsupportedByProfile if
+// the profile does not claim that feature.
+//
+// Pass nil to clear any previously-set profile (the session then
+// behaves as if no profile gating is in effect — equivalent to
+// the pre-profile-package default of "send any APDU the caller
+// requests").
+//
+// SetProfile is intended to be called once, immediately after
+// Open*, before any vendor-extension method. The profile is
+// captured by reference; mutating the underlying value after
+// SetProfile has unspecified effects.
+func (s *Session) SetProfile(p profile.Profile) { s.profile = p }
+
+// Profile returns the active profile, or nil if SetProfile was
+// never called or was called with nil.
+func (s *Session) Profile() profile.Profile { return s.profile }
+
 // OCEAuthenticated reports whether the off-card entity (host) was
 // authenticated to the card during the handshake. SCP03 mutual auth
 // and SCP11a/c return true; SCP11b (one-way card-to-host auth) and
@@ -662,9 +693,21 @@ func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.
 
 // GenerateECKey generates a new NIST P-256 key pair on the device.
 // The private key never leaves the device.
+//
+// Profile gating: when SetProfile has been called with a profile
+// whose Capabilities().GenerateECKey is false (e.g. the standard
+// GP profile), this method returns ErrUnsupportedByProfile
+// without sending any APDU. GENERATE EC KEY (INS=0xF1) is a
+// Yubico extension; standard GP cards reject it with SW=6D00.
+// The host-side check turns that round-trip into a clear typed
+// error.
 func (s *Session) GenerateECKey(ctx context.Context, ref KeyReference, replaceKvn byte) (*ecdsa.PublicKey, error) {
 	if err := s.requireOCEAuth(); err != nil {
 		return nil, err
+	}
+	if s.profile != nil && !s.profile.Capabilities().GenerateECKey {
+		return nil, fmt.Errorf("securitydomain: GenerateECKey: %w (profile %q)",
+			profile.ErrUnsupportedByProfile, s.profile.Name())
 	}
 
 	cmd := generateECKeyCmd(ref, replaceKvn)

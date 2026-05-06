@@ -101,6 +101,7 @@ Use "scpctl sd keys <verb> -h" for per-verb flags.
 // surfaces here so audit logs can distinguish the two paths.
 type sdKeysListData struct {
 	Channel string       `json:"channel"`
+	Profile string       `json:"profile,omitempty"`
 	Keys    []sdKeyEntry `json:"keys"`
 }
 
@@ -202,7 +203,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 
 	report := &Report{Subcommand: "sd keys list", Reader: *reader}
 
-	sd, channel, err := openSDForRead(ctx, t, scp03Flags, report)
+	sd, channel, profName, err := openSDForRead(ctx, t, scp03Flags, report)
 	if err != nil {
 		_ = report.Emit(env.out, *jsonMode)
 		return err
@@ -219,7 +220,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if len(keys) == 0 {
 		report.Skip("GET DATA tag 0x00E0 (KIT)", "card returned no key entries")
-		report.Data = &sdKeysListData{Channel: channel, Keys: []sdKeyEntry{}}
+		report.Data = &sdKeysListData{Channel: channel, Profile: profName, Keys: []sdKeyEntry{}}
 		return report.Emit(env.out, *jsonMode)
 	}
 	report.Pass("GET DATA tag 0x00E0 (KIT)", fmt.Sprintf("%d entries", len(keys)))
@@ -251,7 +252,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 	// are folded into the Checks stream as SKIP so a card that has a
 	// chain on some refs but not others still produces a complete
 	// inventory.
-	data := &sdKeysListData{Channel: channel, Keys: make([]sdKeyEntry, 0, len(keys))}
+	data := &sdKeysListData{Channel: channel, Profile: profName, Keys: make([]sdKeyEntry, 0, len(keys))}
 
 	// Stable order: sort by KID then KVN. The KIT response order is
 	// card-defined and not guaranteed; deterministic output makes
@@ -272,7 +273,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 			KVN:        ki.Reference.Version,
 			KIDHex:     fmt.Sprintf("0x%02X", ki.Reference.ID),
 			KVNHex:     fmt.Sprintf("0x%02X", ki.Reference.Version),
-			Kind:       classifyKID(ki.Reference.ID, scp03Flags.VendorProfile()),
+			Kind:       classifyKID(ki.Reference.ID, profName),
 			Components: projectComponents(ki.Components),
 		}
 		if ski, ok := caByRef[ki.Reference]; ok && len(ski) > 0 {
@@ -330,6 +331,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 // written to stdout as part of the report's text-mode rendering.
 type sdKeysExportData struct {
 	Channel      string          `json:"channel"`
+	Profile      string          `json:"profile,omitempty"`
 	KIDHex       string          `json:"kid_hex"`
 	KVNHex       string          `json:"kvn_hex"`
 	Format       string          `json:"format"` // "pem" or "der"
@@ -432,7 +434,7 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 
 	report := &Report{Subcommand: "sd keys export", Reader: *reader}
 
-	sd, channel, err := openSDForRead(ctx, t, scp03Flags, report)
+	sd, channel, profName, err := openSDForRead(ctx, t, scp03Flags, report)
 	if err != nil {
 		_ = report.Emit(env.out, *jsonMode)
 		return err
@@ -449,6 +451,7 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 
 	data := &sdKeysExportData{
 		Channel: channel,
+		Profile: profName,
 		KIDHex:  fmt.Sprintf("0x%02X", kid),
 		KVNHex:  fmt.Sprintf("0x%02X", kvn),
 		Format:  formatLabel(*derMode),
@@ -547,36 +550,46 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 //
 // Adding SCP11a fallback later means adding a parallel branch keyed
 // off SCP11a flag presence; the public signature stays.
+//
+// Returns: (session, channel-label, profile-name, error). The
+// channel-label is "scp03" or "unauthenticated"; the profile-name
+// is the resolved profile via resolveProfile (e.g. "yubikey-sd",
+// "standard-sd"). Both fields are passed through to the JSON
+// output so audit logs across deployments are unambiguous.
 func openSDForRead(
 	ctx context.Context,
 	t transport.Transport,
 	scp03Flags *scp03KeyFlags,
 	report *Report,
-) (*securitydomain.Session, string, error) {
+) (*securitydomain.Session, string, string, error) {
 	cfg, err := scp03Flags.applyToConfigOptional()
 	if err != nil {
 		report.Fail("parse SCP03 flags", err.Error())
-		return nil, "", err
+		return nil, "", "", err
 	}
+
+	prof, profName := resolveProfile(ctx, t, scp03Flags, report)
 
 	if cfg != nil {
 		report.Pass("SCP03 keys", scp03Flags.describeKeys(cfg))
 		sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
 		if err != nil {
 			report.Fail("open SCP03 session", err.Error())
-			return nil, "", fmt.Errorf("open SCP03: %w", err)
+			return nil, "", profName, fmt.Errorf("open SCP03: %w", err)
 		}
+		sd.SetProfile(prof)
 		report.Pass("open SCP03 session", "")
-		return sd, "scp03", nil
+		return sd, "scp03", profName, nil
 	}
 
 	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
 	if err != nil {
 		report.Fail("select ISD", err.Error())
-		return nil, "", fmt.Errorf("select ISD: %w", err)
+		return nil, "", profName, fmt.Errorf("select ISD: %w", err)
 	}
+	sd.SetProfile(prof)
 	report.Pass("select ISD", "")
-	return sd, "unauthenticated", nil
+	return sd, "unauthenticated", profName, nil
 }
 
 // writeFileAtomic writes data to path via a sibling temp file and a
@@ -629,29 +642,32 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 // both the canonical 0x10 and the 0x20–0x2F extension Yubico uses for
 // additional CA references.
 //
-// vendor selects the labeling convention:
+// profileName selects the labeling convention:
 //
-//   - "yubikey" (default): KIDs 0x11/0x13/0x15 are labeled
+//   - "yubikey-sd" or "auto": KIDs 0x11/0x13/0x15 are labeled
 //     scp11a-sd/scp11b-sd/scp11c-sd per Yubico's KeyReference
 //     namespace. This is the common case and matches what
-//     ykman/yubikit print.
-//   - "generic": those same KIDs are labeled "scp11-sd" without the
-//     variant letter, because generic GP cards don't promise that
-//     KID 0x11 maps to SCP11a specifically — that's a Yubico
+//     ykman/yubikit print. ("auto" labels as YubiKey because if
+//     auto-resolution lands on Standard at runtime, the JSON's
+//     active_profile field is the authoritative signal of which
+//     KID conventions apply; the kind label is human convenience.)
+//   - "standard-sd": those same KIDs are labeled "scp11-sd" without
+//     the variant letter, because standard GP cards don't promise
+//     that KID 0x11 maps to SCP11a specifically — that's a Yubico
 //     convention. The raw KID is preserved in the JSON's kid_hex
 //     field as the authoritative value.
 //
 // SCP03 (KID=0x01) and the OCE/CA-public range are GP-spec
 // conventions, not Yubico-specific, so their labels don't depend
-// on the vendor profile.
-func classifyKID(kid byte, vendor string) string {
+// on the profile.
+func classifyKID(kid byte, profileName string) string {
 	switch {
 	case kid == securitydomain.KeyIDSCP03:
 		return "scp03"
 	case kid == securitydomain.KeyIDOCE, kid >= 0x20 && kid <= 0x2F:
 		return "ca-public"
 	case kid == securitydomain.KeyIDSCP11a, kid == securitydomain.KeyIDSCP11b, kid == securitydomain.KeyIDSCP11c:
-		if vendor == "generic" {
+		if profileName == "standard-sd" {
 			return "scp11-sd"
 		}
 		switch kid {

@@ -24,23 +24,27 @@ Three modes, controlled by the same `--scp03-*` flag set on every verb:
 
 **Unauthenticated.** No `--scp03-*` flags. Read verbs only — write verbs require auth and will reject this combination at flag-parse time. Whether unauthenticated reads succeed depends on the card; YubiKeys allow CRD (tag 0066) but typically gate KIT (tag 00E0) and the cert store (tag BF21) behind authentication. If a read returns SW=6982 unauthenticated, switch to one of the authenticated modes.
 
-**Factory keys.** `--scp03-keys-default`. Authenticates with the well-known factory SCP03 keys (KVN=0xFF, AES-128, the values published in the YubiKey Security Domain SCP03 documentation). Use this for fresh cards or for read-only inspection of an unrotated card. Mutually exclusive with the custom-key flags. **Only valid on `--vendor-profile yubikey`** (the default); on `--vendor-profile generic`, this flag is rejected because the factory keys are vendor-specific.
+**Factory keys.** `--scp03-keys-default`. Authenticates with the well-known factory SCP03 keys (KVN=0xFF, AES-128, the values published in the YubiKey Security Domain SCP03 documentation). Use this for fresh cards or for read-only inspection of an unrotated card. Mutually exclusive with the custom-key flags. **Only valid when the active profile is `yubikey-sd`**; on `--profile standard-sd`, this flag is rejected because the factory keys are vendor-specific.
 
 **Custom triple.** `--scp03-kvn KVN --scp03-enc ENC --scp03-mac MAC --scp03-dek DEK`. All four required. KVN is a hex byte (e.g. `01`, `FE`); ENC, MAC, DEK are hex strings of equal length matching the AES variant (16 bytes for AES-128, 24 for AES-192, 32 for AES-256). Use this after the factory keys have been rotated, or on any non-YubiKey card.
 
 Pick one mode. The flags reject the combination of `--scp03-keys-default` and `--scp03-kvn`.
 
-### `--vendor-profile yubikey|generic`
+### `--profile auto|standard-sd|yubikey-sd`
 
-Every SCP03-aware verb accepts `--vendor-profile`. Default is `yubikey` — preserves all current behavior, factory keys recognized, KIDs labeled with YubiKey conventions.
+Every SCP03-aware verb accepts `--profile`. The flag selects which `securitydomain/profile.Profile` is attached to the session — that profile gates vendor-extension operations at the library level via `Capabilities()` checks.
 
-Pass `--vendor-profile generic` for non-YubiKey GP cards. Three behavioral changes apply:
+Default is `auto`. At session open, scpctl runs `profile.Probe` against the raw transport (SELECT ISD AID + GET DATA tag 5FC109 — the YubiKey firmware version object). Cards that answer SW=9000 with three or more bytes are YubiKey, everything else is standard GP. The detection is non-destructive and adds one extra APDU per session open.
+
+Three behavioral effects when the active profile is `standard-sd`:
 
 - `--scp03-keys-default` is rejected at parse time. Operator must supply explicit `--scp03-{kvn,enc,mac,dek}`. Required-auth verbs without any SCP03 flags are also rejected (no implicit factory-key fallback).
-- `sd keys generate` is rejected because GENERATE EC KEY (INS=0xF1) is a Yubico extension. To install an EC key on a non-YubiKey card, generate the keypair off-card and use `sd keys import` instead.
+- `sd keys generate` is rejected because GENERATE EC KEY (INS=0xF1) is a Yubico extension. The library-level `Session.GenerateECKey` enforces this with `ErrUnsupportedByProfile` even if the CLI gate is bypassed; the CLI fast-fails for clearer diagnostics. To install an EC key on a standard GP card, generate the keypair off-card and use `sd keys import` instead.
 - `sd keys list` relabels KIDs 0x11/0x13/0x15 as `scp11-sd` (without the variant letter). The raw KID is still in the JSON's `kid_hex` field as the authoritative value.
 
-The flag does not affect `sd keys export`, `sd keys delete`, or `sd allowlist set/clear` — those verbs use only GP-spec mechanics that don't depend on vendor.
+The active profile is reported in JSON output as `data.profile` for every SCP03-aware verb, so audit logs across YubiKey and non-YubiKey deployments are unambiguous about which gating was applied.
+
+Use `--profile yubikey-sd` to pin without probing (saves the round-trip on cards you know are YubiKey). Use `--profile standard-sd` when working with a standard GP card whose firmware happens to answer the YubiKey version probe (defensive override for false-positive auto-detect).
 
 ## Verbs
 
@@ -63,6 +67,7 @@ Schema (the `data` field of the standard Report envelope) — abbreviated; full 
 ```json
 {
   "channel": "scp03",
+  "profile": "yubikey-sd" | "standard-sd",
   "keys": [
     {
       "kid": 1, "kvn": 255,
@@ -199,6 +204,7 @@ The `checks` stream is the audit log — every step taken (open SCP03, GET DATA,
 ```json
 {
   "channel": "scp03" | "unauthenticated",
+  "profile": "yubikey-sd" | "standard-sd",
   "keys": [
     {
       "kid": 17,
@@ -230,6 +236,7 @@ The `checks` stream is the audit log — every step taken (open SCP03, GET DATA,
 ```json
 {
   "channel": "scp03" | "unauthenticated",
+  "profile": "yubikey-sd" | "standard-sd",
   "kid_hex": "0x11",
   "kvn_hex": "0x01",
   "format": "pem" | "der",
@@ -249,6 +256,7 @@ The `certificates` array carries metadata about every cert that was written to `
 ```json
 {
   "channel": "scp03",
+  "profile": "yubikey-sd" | "standard-sd",
   "kid_hex": "0x11",
   "kvn_hex": "0x01",
   "replace_kvn": 0,
@@ -265,6 +273,7 @@ The `certificates` array carries metadata about every cert that was written to `
 ```json
 {
   "channel": "scp03",
+  "profile": "yubikey-sd" | "standard-sd",
   "category": "scp03" | "scp11-sd" | "ca-trust-anchor",
   "kid_hex": "0x11",
   "kvn_hex": "0x01",
@@ -288,6 +297,7 @@ Fields are conditional on the import path:
 ```json
 {
   "channel": "scp03",
+  "profile": "yubikey-sd" | "standard-sd",
   "mode": "single" | "all-at-kvn",
   "kid_hex": "0x11",
   "kvn_hex": "0x01"
@@ -301,6 +311,7 @@ Fields are conditional on the import path:
 ```json
 {
   "channel": "scp03",
+  "profile": "yubikey-sd" | "standard-sd",
   "action": "set" | "clear",
   "kid_hex": "0x11",
   "kvn_hex": "0x01",

@@ -69,6 +69,7 @@ Use "scpctl sd allowlist <verb> -h" for per-verb flags.
 // pushed; clear leaves it empty.
 type sdAllowlistData struct {
 	Channel string   `json:"channel"`
+	Profile string   `json:"profile,omitempty"`
 	Action  string   `json:"action"` // "set" or "clear"
 	KIDHex  string   `json:"kid_hex"`
 	KVNHex  string   `json:"kvn_hex"`
@@ -205,7 +206,7 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -214,6 +215,7 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 	defer sd.Close()
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
+	data.Profile = profName
 
 	checkName := fmt.Sprintf("STORE DATA allowlist kid=0x%02X kvn=0x%02X", kid, kvn)
 	if err := sd.StoreAllowlist(ctx, ref, parsed); err != nil {
@@ -300,7 +302,7 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 	}
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -309,6 +311,7 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 	defer sd.Close()
 	report.Pass("open SCP03 session", "")
 	data.Channel = "scp03"
+	data.Profile = profName
 
 	checkName := fmt.Sprintf("STORE DATA allowlist clear kid=0x%02X kvn=0x%02X", kid, kvn)
 	if err := sd.ClearAllowlist(ctx, ref); err != nil {
