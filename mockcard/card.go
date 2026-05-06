@@ -81,7 +81,15 @@ type Card struct {
 	LegacySCP11bNoReceipt bool
 
 	staticKey *ecdsa.PrivateKey
-	certDER   []byte
+
+	// CertDER backs the GET DATA tag 0xBF21 (cert store) handler.
+	// New() seeds it with a freshly-generated self-signed cert so
+	// tests that read the cert store get a parseable response by
+	// default. Tests that want to exercise the "no chain stored"
+	// path (SD references with no STORE DATA cert blob) set it to
+	// nil or empty: a zero-length slice makes the handler return
+	// SW=6A88, mirroring the empty-RegistryISD convention.
+	CertDER []byte
 
 	// OCE static public key, received via PERFORM SECURITY OPERATION.
 	// Used for ShSes in SCP11a/c. Nil for SCP11b.
@@ -217,7 +225,7 @@ func New() (*Card, error) {
 
 	return &Card{
 		staticKey:     key,
-		certDER:       der,
+		CertDER:       der,
 		pivPIN:        []byte("123456"),
 		pivPUK:        []byte("12345678"),
 		pivPINCounter: 3,
@@ -678,8 +686,13 @@ func (c *Card) doGetData(cmd *apdu.Command) (*apdu.Response, error) {
 		// GetKeyInformation produces a non-empty result.
 		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
 	case 0xBF21:
-		// Certificate store — the original behavior of this method.
-		certNode := tlv.Build(tlv.TagCertificate, c.certDER)
+		// Certificate store. Empty CertDER → SW=6A88 (no chain
+		// stored), mirroring the empty-RegistryISD convention so
+		// tests can drive the "no chain" code path on the host.
+		if len(c.CertDER) == 0 {
+			return mkSW(0x6A88), nil
+		}
+		certNode := tlv.Build(tlv.TagCertificate, c.CertDER)
 		storeNode := tlv.BuildConstructed(tlv.TagCertStore, certNode)
 		return &apdu.Response{Data: storeNode.Encode(), SW1: 0x90, SW2: 0x00}, nil
 	default:

@@ -62,6 +62,38 @@ func registerSCP03KeyFlags(fs *flag.FlagSet) *scp03KeyFlags {
 	}
 }
 
+// applyToConfigOptional is the read-only-command counterpart to
+// applyToConfig. It returns (nil, nil) when no SCP03 key flag was
+// set — signalling "operator did not opt into authenticated reads,
+// caller should choose an unauthenticated open." When any flag is
+// set it dispatches to applyToConfig so factory / custom selection,
+// validation, and error messages are all single-sourced there.
+//
+// Bootstrap-style commands that always authenticate continue to call
+// applyToConfig directly; the implicit "no flags = factory" semantic
+// is preserved for them. Read-only commands call this method instead.
+func (kf *scp03KeyFlags) applyToConfigOptional() (*scp03.Config, error) {
+	if kf == nil || !kf.anyFlagSet() {
+		return nil, nil
+	}
+	return kf.applyToConfig()
+}
+
+// anyFlagSet reports whether any of the four custom-key fields is
+// non-empty or --scp03-keys-default was passed. Private helper for
+// applyToConfigOptional.
+func (kf *scp03KeyFlags) anyFlagSet() bool {
+	if kf.useDefault != nil && *kf.useDefault {
+		return true
+	}
+	for _, p := range []*string{kf.kvn, kf.enc, kf.mac, kf.dek} {
+		if p != nil && *p != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // applyToConfig builds a *scp03.Config matching the flag selection.
 // Returns a *usageError on conflict, partial-custom, or hex parse
 // failures.

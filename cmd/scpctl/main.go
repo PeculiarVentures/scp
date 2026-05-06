@@ -92,6 +92,7 @@ var sdCommands = map[string]func(ctx context.Context, env *runEnv, args []string
 	"lock":                cmdSDLock,
 	"unlock":              cmdSDUnlock,
 	"terminate":           cmdSDTerminate,
+	"keys":                cmdSDKeys,
 	"bootstrap-oce":       cmdBootstrapOCE,
 	"bootstrap-scp11a":    cmdBootstrapSCP11a,
 	"bootstrap-scp11a-sd": cmdBootstrapSCP11aSD,
@@ -449,6 +450,15 @@ Subcommands:
                        card flag (NOT --confirm-write) so a single
                        careless invocation can't brick a card.
                        Requires SCP03.
+  keys list            Inventory installed key references with
+                       optional certificate summaries. Composes
+                       GET DATA tag 0x00E0 (KIT), tags 0xFF33/0xFF34
+                       (KLOC/KLCC), and tag 0xBF21 per reference.
+                       Read-only, unauthenticated.
+  keys export          Write the certificate chain stored against
+                       one key reference to a file. PEM by default,
+                       --der for raw concatenated DER. Read-only,
+                       unauthenticated.
   bootstrap-oce        Install an OCE public key (and optionally cert
                        chain + CA SKI) onto a card via SCP03. Day-1
                        provisioning step that enables SCP11a sessions.
