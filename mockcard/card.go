@@ -709,6 +709,17 @@ func (c *Card) doGetData(cmd *apdu.Command) (*apdu.Response, error) {
 		certNode := tlv.Build(tlv.TagCertificate, c.CertDER)
 		storeNode := tlv.BuildConstructed(tlv.TagCertStore, certNode)
 		return &apdu.Response{Data: storeNode.Encode(), SW1: 0x90, SW2: 0x00}, nil
+	case 0x5FC1:
+		// YubiKey firmware-version object (5FC109). The mock claims
+		// to be a YubiKey-shaped GP card so the SD profile probe
+		// (securitydomain/profile.Probe) classifies it as
+		// yubikey-sd. Returning the version object honestly mirrors
+		// what real YubiKey hardware does. The 3-byte payload is
+		// major.minor.patch (5.7.2 here, matching the
+		// hardware-validated firmware in README's verified-profiles
+		// section). Tests that need standard-sd behavior pin
+		// --profile standard-sd explicitly to skip the probe.
+		return &apdu.Response{Data: []byte{0x05, 0x07, 0x02}, SW1: 0x90, SW2: 0x00}, nil
 	default:
 		return mkSW(0x6A88), nil // reference data not found
 	}

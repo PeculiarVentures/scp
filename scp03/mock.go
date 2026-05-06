@@ -246,7 +246,7 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 	case 0x50: // INITIALIZE UPDATE
 		return c.doInitializeUpdate(cmd)
 	case 0xCA: // GET DATA — pre-session reads of operator-discoverable
-		// data objects. Real YubiKeys permit two paths without
+		// data objects. Real YubiKeys permit several paths without
 		// authentication:
 		//
 		//   - tag 0x0066 (Card Recognition Data per GP §H.2): the
@@ -258,6 +258,12 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 		//     cards. Standard GP cards return 6A88 for this tag;
 		//     since this mock is YubiKey-shaped, it answers as a
 		//     YubiKey would.
+		//   - tag 0x00E0 (Key Information Template): YubiKey
+		//     permits unauthenticated reads of the KIT so
+		//     ykman/scpctl `sd keys list` and similar inventory
+		//     commands work without prompting for SCP03 keys.
+		//     Standard GP cards typically gate KIT behind the
+		//     ISD authenticated state and answer 6982 here.
 		//
 		// Other GET DATA tags require secure messaging and get
 		// SW=6982 here.
@@ -265,6 +271,9 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
 		}
 		if cmd.P1 == 0x5F && cmd.P2 == 0xC1 {
+			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
+		}
+		if cmd.P1 == 0x00 && cmd.P2 == 0xE0 {
 			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
 		}
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil // security status not satisfied
