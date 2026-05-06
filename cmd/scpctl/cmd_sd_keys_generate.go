@@ -172,12 +172,6 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 	}
 	report.Data = data
 
-	t, err := env.connect(ctx, *reader)
-	if err != nil {
-		return err
-	}
-	defer t.Close()
-
 	if !*confirm {
 		var planned string
 		if replaceKvn == 0 {
@@ -191,6 +185,17 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 		data.Channel = "dry-run"
 		return report.Emit(env.out, *jsonMode)
 	}
+
+	// Active path: connect to the reader. Dry-run above does
+	// not need card inventory and intentionally completes without
+	// a connect call so 'scpctl sd keys generate --kid X --kvn Y
+	// (no --confirm-write)' works in CI / preview contexts where
+	// no card is present.
+	t, err := env.connect(ctx, *reader)
+	if err != nil {
+		return err
+	}
+	defer t.Close()
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
 	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)

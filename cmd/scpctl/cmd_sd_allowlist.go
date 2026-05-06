@@ -190,12 +190,6 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 	}
 	report.Data = data
 
-	t, err := env.connect(ctx, *reader)
-	if err != nil {
-		return err
-	}
-	defer t.Close()
-
 	if !*confirm {
 		report.Skip("STORE DATA allowlist set",
 			fmt.Sprintf("dry-run; pass --confirm-write to push %d serial(s) "+
@@ -204,6 +198,16 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 		data.Channel = "dry-run"
 		return report.Emit(env.out, *jsonMode)
 	}
+
+	// Active path: connect to the reader. Dry-run above does not
+	// need card inventory and intentionally completes without a
+	// connect call so previews work in environments without a
+	// reader attached.
+	t, err := env.connect(ctx, *reader)
+	if err != nil {
+		return err
+	}
+	defer t.Close()
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
 	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
@@ -285,12 +289,6 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 	}
 	report.Data = data
 
-	t, err := env.connect(ctx, *reader)
-	if err != nil {
-		return err
-	}
-	defer t.Close()
-
 	if !*confirm {
 		report.Skip("STORE DATA allowlist clear",
 			fmt.Sprintf("dry-run; pass --confirm-write to remove the allowlist "+
@@ -300,6 +298,16 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 		data.Channel = "dry-run"
 		return report.Emit(env.out, *jsonMode)
 	}
+
+	// Active path: connect to the reader. Dry-run above does not
+	// need card inventory and intentionally completes without a
+	// connect call so previews work in environments without a
+	// reader attached.
+	t, err := env.connect(ctx, *reader)
+	if err != nil {
+		return err
+	}
+	defer t.Close()
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
 	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
