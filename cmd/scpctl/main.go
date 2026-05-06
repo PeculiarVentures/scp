@@ -7,8 +7,8 @@
 //   - piv     user-facing PIV operations (info, PIN, PUK, mgmt,
 //             key, cert, object, reset, provision) over the
 //             piv/session library
-//   - sd      Security Domain operations (info, reset, OCE/SCP11a
-//             bootstraps)
+//   - sd      Security Domain operations (info, reset, lock,
+//             unlock, terminate, OCE/SCP11a bootstraps)
 //   - oce     off-card OCE certificate diagnostics (host-only;
 //             does not touch a card)
 //
@@ -17,12 +17,26 @@
 //
 // # Safety
 //
-// All destructive operations require --confirm-write. SCP11 trust
-// validation is on by default; --lab-skip-scp11-trust opts out and
-// is visible in JSON output. Security Domain writes are never
-// attempted over SCP11b. Authentication lockouts are never used as
-// a recovery mechanism except by the explicit `piv reset` command
-// and only behind --confirm-write and --confirm-reset-piv.
+// Most destructive operations require --confirm-write. Two
+// exceptions where overloading a single confirm flag would be a
+// foot-gun get their own opt-in:
+//
+//   - sd reset uses --confirm-reset-sd. SD reset and PIV reset
+//     have different blast radii; sharing a flag would mean a
+//     single careless invocation could clear keys the operator
+//     didn't intend to touch.
+//   - sd terminate uses --confirm-terminate-card. Terminate is
+//     IRREVERSIBLE — a TERMINATED card cannot be recovered by any
+//     operation. Sharing the gate with reversible operations
+//     (lock, unlock, bootstraps) would mean a typo could brick
+//     a card.
+//
+// SCP11 trust validation is on by default; --lab-skip-scp11-trust
+// opts out and is visible in JSON output. Security Domain writes
+// are never attempted over SCP11b. Authentication lockouts are
+// never used as a recovery mechanism except by the explicit
+// `piv reset` command and only behind --confirm-write and
+// --confirm-reset-piv.
 //
 // # Subcommands
 //
@@ -75,6 +89,9 @@ var pivCommands = map[string]func(ctx context.Context, env *runEnv, args []strin
 var sdCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
 	"info":                cmdSDInfo,
 	"reset":               cmdSDReset,
+	"lock":                cmdSDLock,
+	"unlock":              cmdSDUnlock,
+	"terminate":           cmdSDTerminate,
 	"bootstrap-oce":       cmdBootstrapOCE,
 	"bootstrap-scp11a":    cmdBootstrapSCP11a,
 	"bootstrap-scp11a-sd": cmdBootstrapSCP11aSD,
@@ -222,8 +239,8 @@ Groups:
               reset, provision.
 
   sd          Security Domain operations.
-              Wired: info, reset, bootstrap-oce, bootstrap-scp11a,
-              bootstrap-scp11a-sd.
+              Wired: info, reset, lock, unlock, terminate,
+              bootstrap-oce, bootstrap-scp11a, bootstrap-scp11a-sd.
 
   oce         Off-card OCE certificate diagnostics. Host-only;
               does not touch a card. Wired: verify, gen.
@@ -417,6 +434,21 @@ Subcommands:
                        --confirm-reset-sd to mutate. Does NOT touch
                        PIV applet state — for that, see 'scpctl piv
                        reset'.
+  lock                 Transition the ISD to CARD_LOCKED via GP SET
+                       STATUS. Recoverable via 'sd unlock' from a
+                       key-holder. Dry-run by default; pass
+                       --confirm-write to mutate. Requires SCP03.
+  unlock               Transition the ISD from CARD_LOCKED back to
+                       SECURED. Inverse of 'sd lock'. Dry-run by
+                       default; pass --confirm-write to mutate.
+                       Requires SCP03.
+  terminate            IRREVERSIBLE: transition the ISD to
+                       TERMINATED. The card cannot be recovered by
+                       any operation after this. Dry-run by default;
+                       gated behind a distinct --confirm-terminate-
+                       card flag (NOT --confirm-write) so a single
+                       careless invocation can't brick a card.
+                       Requires SCP03.
   bootstrap-oce        Install an OCE public key (and optionally cert
                        chain + CA SKI) onto a card via SCP03. Day-1
                        provisioning step that enables SCP11a sessions.

@@ -315,6 +315,9 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 	case 0xF2: // GP §11.4.2 GET STATUS
 		return c.doGetStatus(cmd)
 
+	case 0xF0: // GP §11.1.10 SET STATUS
+		return c.doSetStatus(cmd)
+
 	case 0xE2: // GP §11.11 STORE DATA
 		// Mock just acknowledges — validating wire format is the
 		// securitydomain package's job, not the mock's. Mirrors what
