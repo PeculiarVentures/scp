@@ -126,6 +126,8 @@ var gpCommands = map[string]func(ctx context.Context, env *runEnv, args []string
 	"probe":    cmdGPProbe,
 	"registry": cmdGPRegistry,
 	"cap":      cmdGPCap,
+	"install":  cmdGPInstall,
+	"delete":   cmdGPDelete,
 }
 
 // topLevelCommands maps top-level utility subcommands. These are

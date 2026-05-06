@@ -63,13 +63,29 @@ Subcommands:
                 inspect <path>  Print package AID and version,
                                 applet inventory, and component
                                 manifest from a CAP file on disk.
+  install     Install an applet onto a card under SCP03. Parses
+              the CAP, builds the load image (Debug+Descriptor
+              excluded by default), opens an authenticated
+              session, and chains INSTALL [for load] -> LOAD ->
+              INSTALL [for install]. Destructive; gated behind
+              --confirm-write. Without that flag the command is
+              read-only: it parses the CAP, prints the load
+              image SHA-256/SHA-1, and reports what it would
+              send. Failure mid-chain surfaces a precise stage
+              + cleanup recipe.
+  delete      Remove a registered AID from the card. With
+              --related the delete cascades to applets
+              instantiated from the named load file. Destructive;
+              gated behind --confirm-write. SW=6A88 is reported
+              as FAIL with a hint that the object may already
+              be absent.
 
 What is NOT in this group today (deferred to future work):
-  - 'gp install' / 'gp delete' for destructive applet content
-    management. Gated on the AES-CMAC key diversification work,
-    a Java Card SDK build of an Echo applet fixture, real JCOP
-    cards for validation, and the SCP03+GP combined simulator.
   - SafeNet/Fusion exploratory probing.
+  - LoadFiles-only (P1=0x20) registry walk fallback for cards
+    that reject LoadFilesAndModules.
+  - Vendor-specific INSTALL parameter blocks (CIN/IIN binding,
+    NFC LCM bits) beyond the GP-spec minimum.
 
 Use "scpctl gp <subcommand> -h" for per-command flags.
 `)
