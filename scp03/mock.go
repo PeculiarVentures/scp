@@ -85,6 +85,58 @@ type MockCard struct {
 	// the wire originally; that round-trips cleanly through
 	// parseCertificates on the way back.
 	certStore map[uint16][]byte
+
+	// inventory tracks installed keys and shows up in the GET
+	// DATA tag 0x00E0 response (Key Information Template).
+	// Default state is one entry: the factory SCP03 key set at
+	// 0x01/0xFF, AES-128 — matching what the static
+	// syntheticKeyInfo blob used to advertise unconditionally.
+	//
+	// PUT KEY registers at (KID, new_KVN); DELETE KEY removes
+	// the targeted entries; GENERATE EC KEY registers the
+	// generated keypair. GET DATA tag 0x00E0 builds the response
+	// from this map, replacing the previously-static blob.
+	//
+	// Why this matters: tests that want to verify post-install
+	// state via sd keys list need the mock's KIT response to
+	// reflect what was just written. Without this, the mock
+	// returned the same fixed blob regardless of what had been
+	// installed — fine for APDU-emission-only tests, broken for
+	// round-trip workflow tests.
+	//
+	// Map key is (KID<<8 | KVN), same compact form as certStore.
+	// Entries are intentionally simple — a (KID, KVN) tuple plus
+	// a Components byte slice that gets emitted into the C0
+	// template body verbatim. We don't model lifecycle,
+	// privileges, or other registry fields here; tests that need
+	// those would use the GP §11.4.2 GET STATUS path which the
+	// mock still doesn't support (that's a separate gap, called
+	// out in the design doc — fix when a caller surfaces it).
+	inventory map[uint16]mockKeyEntry
+}
+
+// mockKeyEntry represents one installed key in the mock's
+// inventory. Intentionally minimal: the (KID, KVN) tuple plus a
+// Components byte slice that gets emitted into the C0 template
+// body during GET DATA tag 0x00E0 response synthesis.
+//
+// Components is encoded as pairs of bytes where each pair is
+// (algorithm_tag, length_id) per GP §11.3.3.1. Common values:
+//
+//	{0x88, 0x10}             -- AES-128 (SCP03)
+//	{0x88, 0x18}             -- AES-192 (SCP03 192-bit variant)
+//	{0x88, 0x20}             -- AES-256 (SCP03 256-bit variant)
+//	{0x88, 0x88}             -- ECC, P-256 (SCP11 family)
+//
+// These match the yubikit-go test fixtures and the values our own
+// parseKeyInformation expects to round-trip. Future component
+// shapes (multiple pairs per template, additional algorithm tags)
+// are accepted by the parser but not currently emitted by this
+// mock.
+type mockKeyEntry struct {
+	KID        byte
+	KVN        byte
+	Components []byte
 }
 
 type mockSession struct {
@@ -98,8 +150,23 @@ type mockSession struct {
 //
 // The returned MockCard is usable as a Transport via its Transport()
 // method, which produces something satisfying transport.Transport.
+//
+// Initial inventory: one entry for the SCP03 key set at KID=0x01,
+// KVN=0xFF, components {0x88, 0x10} (AES-128). This matches what
+// the previously-static syntheticKeyInfo blob advertised — every
+// test that asserted "GET DATA tag E0 returns a KIT showing the
+// factory key" continues to pass without modification. PUT KEY,
+// DELETE KEY, and GENERATE EC KEY operations mutate the inventory
+// from this baseline.
+//
+// To start with a different inventory (e.g. a card simulating a
+// post-rotation state), call MockCard.SetInventory after
+// construction.
 func NewMockCard(keys StaticKeys) *MockCard {
-	return &MockCard{Keys: keys}
+	c := &MockCard{Keys: keys}
+	c.inventory = make(map[uint16]mockKeyEntry)
+	c.registerKey(0x01, 0xFF, []byte{0x88, 0x10})
+	return c
 }
 
 // Transport returns a transport.Transport backed by this mock card.
@@ -419,6 +486,15 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 			// it returns false and we fall through to plain 9000.
 			c.tryStoreCertChain(data)
 		}
+		if ins == 0xE4 {
+			// DELETE KEY: parse D0{KID} and/or D2{KVN} from the
+			// body and remove matching inventory entries. Real
+			// cards are idempotent for "delete a key that doesn't
+			// exist" — they return 9000 either way; the mock
+			// matches that behavior. Only the inventory-side
+			// effect is conditional on the entry actually existing.
+			c.applyDeleteKeyToInventory(p2, data)
+		}
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0xD8:
 		// PUT KEY (GP §11.8). Three flavors land here, each with a
@@ -436,6 +512,12 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 		// and don't carry the KVN-then-tag pattern, so a single byte
 		// of lookahead is enough to disambiguate.
 		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		// Inventory side-effect: register the newly installed key
+		// (or replace an existing entry) before formulating the
+		// response. Errors here are non-fatal — the inventory
+		// model is a best-effort tracker, not a constraint on
+		// what bodies the mock accepts.
+		c.applyPutKeyToInventory(p1, p2, data)
 		if resp, ok := c.synthesizeSCP03KeySetPutKeyResponse(data); ok {
 			return &apdu.Response{Data: resp, SW1: 0x90, SW2: 0x00}, nil
 		}
@@ -463,7 +545,15 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 		// to "store"). Tests that care about specific keys
 		// generated by GENERATE KEY can either parse the response
 		// out of the recorded transmit or override this method.
+		//
+		// Inventory side-effect: register at (P2 & 0x7F, P1 if
+		// non-zero else body[0]) with EC components. The library's
+		// generateECKeyCmd places the new KVN in P1; we also fall
+		// through to body[0] for safety in case future surface
+		// shifts to a body-carried KVN (matches the PUT KEY EC
+		// path's convention).
 		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		c.applyGenerateKeyToInventory(p1, p2, data)
 		respData, err := synthesizeGenerateKeyResponse()
 		if err != nil {
 			// Crypto failure here would mean Go's stdlib RNG broke,
@@ -511,7 +601,14 @@ func (c *MockCard) doGetData(p1, p2 byte, requestBody []byte) (*apdu.Response, e
 	case 0x0066:
 		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
 	case 0x00E0:
-		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
+		// Key Information Template. Built dynamically from the
+		// inventory map so post-install state shows up in
+		// sd keys list output. Initial inventory is the factory
+		// SCP03 key at 0x01/0xFF, which marshals to the same bytes
+		// as the legacy syntheticKeyInfo blob — every existing
+		// test that asserted "GET DATA tag E0 returns the factory
+		// key" still passes unchanged.
+		return &apdu.Response{Data: c.buildKeyInfoResponse(), SW1: 0x90, SW2: 0x00}, nil
 	case 0xBF21:
 		// Cert store read: parse key reference from request body,
 		// look up against the persisted certStore map. The library
@@ -859,4 +956,289 @@ func extractKeyRefFromControlRef(nodes []*tlv.Node) (keyRef, bool) {
 		return keyRef{}, false
 	}
 	return keyRef{KID: keyID.Value[0], KVN: keyID.Value[1]}, true
+}
+
+// --- Inventory model: PUT KEY / DELETE KEY / GENERATE EC KEY
+//     register and unregister entries; GET DATA tag 0x00E0 reads
+//     them out as the Key Information Template the library expects.
+
+// registerKey adds or replaces an entry in the inventory. Idempotent
+// at the (KID, KVN) tuple level — re-registering an existing entry
+// updates its components in place.
+func (c *MockCard) registerKey(kid, kvn byte, components []byte) {
+	if c.inventory == nil {
+		c.inventory = make(map[uint16]mockKeyEntry)
+	}
+	c.inventory[uint16(kid)<<8|uint16(kvn)] = mockKeyEntry{
+		KID:        kid,
+		KVN:        kvn,
+		Components: append([]byte(nil), components...),
+	}
+}
+
+// unregisterKey removes a single (KID, KVN) entry. Idempotent —
+// removing a non-existent entry is a no-op, matching real-card
+// DELETE KEY semantics where deleting a key that isn't installed
+// returns 9000 (success, no-op).
+func (c *MockCard) unregisterKey(kid, kvn byte) {
+	if c.inventory == nil {
+		return
+	}
+	delete(c.inventory, uint16(kid)<<8|uint16(kvn))
+}
+
+// unregisterAllAtKVN removes every entry with the given KVN,
+// regardless of KID. Used by DELETE KEY when only a KVN is
+// specified — the real-card semantic for "delete the keyset at
+// this version" affects all keys at that version (e.g. an SCP03
+// keyset comprises ENC, MAC, DEK with the same KVN; deleting "the
+// keyset" deletes all three).
+func (c *MockCard) unregisterAllAtKVN(kvn byte) {
+	for k, e := range c.inventory {
+		if e.KVN == kvn {
+			delete(c.inventory, k)
+		}
+	}
+}
+
+// unregisterAllAtKID removes every entry with the given KID,
+// regardless of KVN. Used by DELETE KEY when only a KID is
+// specified — semantic is "delete all versions of this key" which
+// is rarer in practice but supported by the GP DELETE KEY surface.
+func (c *MockCard) unregisterAllAtKID(kid byte) {
+	for k, e := range c.inventory {
+		if e.KID == kid {
+			delete(c.inventory, k)
+		}
+	}
+}
+
+// SetInventory replaces the entire inventory. Useful for tests that
+// want to start from a non-default state — e.g. simulating a card
+// where the factory keys have been rotated and additional keys
+// installed.
+//
+// Pass an empty slice to clear the inventory entirely. The mock
+// will then advertise zero installed keys until something gets
+// registered.
+func (c *MockCard) SetInventory(entries []mockKeyEntry) {
+	c.inventory = make(map[uint16]mockKeyEntry, len(entries))
+	for _, e := range entries {
+		c.inventory[uint16(e.KID)<<8|uint16(e.KVN)] = mockKeyEntry{
+			KID:        e.KID,
+			KVN:        e.KVN,
+			Components: append([]byte(nil), e.Components...),
+		}
+	}
+}
+
+// applyPutKeyToInventory updates the inventory after a PUT KEY
+// command lands. Three flavors:
+//
+//   - SCP03 AES key set (body starts with KVN, then tag 0x88):
+//     register at (0x01, body[0]) with AES-128 components. If
+//     P1 is non-zero, the existing keyset at (0x01, P1) is
+//     unregistered first — that's the GP "replace" semantic.
+//   - EC private (body starts with KVN, then tag 0xA1 or 0xB1):
+//     register at (P2 & 0x7F, body[0]) with EC components.
+//   - EC public / trust anchor (body starts with KVN, then tag 0xB0):
+//     same registration as EC private.
+//
+// The inventory mutation is best-effort. A malformed body that
+// can't be classified just leaves the inventory untouched; the
+// APDU still records and the response still goes out. Tests that
+// want to verify post-install inventory state should drive PUT
+// KEY through the library's typed API, which produces well-formed
+// bodies.
+//
+// The 0x80 bit on P2 is the "multiple keys in this command" flag
+// per GP §11.8.2.2. We mask it off because the inventory tracks
+// the KID itself, not the wire flag.
+func (c *MockCard) applyPutKeyToInventory(p1, p2 byte, body []byte) {
+	if len(body) < 2 {
+		return
+	}
+	newKVN := body[0]
+	firstTag := body[1]
+	kid := p2 & 0x7F
+
+	var components []byte
+	switch firstTag {
+	case 0x88: // AES key set (SCP03)
+		// SCP03 always installs at KID=0x01 logically (the keyset
+		// is one entry from the host's KIT view, regardless of
+		// the three sub-KIDs ENC/MAC/DEK that the card creates
+		// internally). We register at 0x01 ignoring the P2 KID
+		// because for SCP03 the wire P2 also carries 0x01 with
+		// the multi-key flag set.
+		kid = 0x01
+		// AES-128 only (16-byte key). The mock's
+		// synthesizeSCP03KeySetPutKeyResponse already requires
+		// the body length match an AES-128 keyset shape, so
+		// bodies that get this far have been validated.
+		components = []byte{0x88, 0x10}
+	case 0xA1, 0xB1: // EC private (SCP11 SD slot installation)
+		components = []byte{0x88, 0x88}
+	case 0xB0: // EC public (CA/OCE trust anchor)
+		components = []byte{0x88, 0x88}
+	default:
+		// Unknown PUT KEY shape: don't touch inventory, but don't
+		// reject the APDU either (the response side already
+		// handles the EC-keyless / SCP03-keyless fallback case
+		// correctly).
+		return
+	}
+
+	// Replace semantic: if P1 is non-zero, the new key replaces
+	// an existing keyset at version P1. Unregister the old entry
+	// before adding the new one. For additive installs (P1=0x00)
+	// we just add.
+	if p1 != 0 {
+		c.unregisterKey(kid, p1)
+	}
+	c.registerKey(kid, newKVN, components)
+}
+
+// applyGenerateKeyToInventory registers an entry for a key just
+// generated on-card via GENERATE EC KEY (INS=0xF1). The library's
+// generateECKeyCmd places:
+//
+//   - the REPLACE KVN in P1 (0x00 = additive install)
+//   - the KID in P2
+//   - the NEW KVN as body[0]
+//   - F0 TLV (curve params) following body[0]
+//
+// On a non-zero P1 we also remove the old entry at (KID, P1) — the
+// GP "replace" semantic — before registering the new one.
+func (c *MockCard) applyGenerateKeyToInventory(p1, p2 byte, body []byte) {
+	if len(body) < 1 {
+		return
+	}
+	kid := p2 & 0x7F
+	newKVN := body[0]
+	if p1 != 0 {
+		c.unregisterKey(kid, p1)
+	}
+	c.registerKey(kid, newKVN, []byte{0x88, 0x88})
+}
+
+// applyDeleteKeyToInventory parses a DELETE KEY body and removes
+// matching entries. Body shape per GP §11.5:
+//
+//   - D0 LL KID  (delete all keys with this KID)
+//   - D2 LL KVN  (delete all keys with this KVN)
+//   - both       (delete the specific (KID, KVN) entry)
+//
+// At least one of D0 or D2 must be present per the library's
+// deleteKeyCmd validation; we mirror that precondition by simply
+// doing nothing if neither parses out (the APDU still records and
+// returns 9000, matching idempotent real-card behavior).
+//
+// The p2 byte (0x00 = "more deletes pending", 0x01 = "final
+// delete operation") is informational here; the inventory mutation
+// applies to whatever the body specifies regardless of pending-
+// state framing.
+func (c *MockCard) applyDeleteKeyToInventory(_ byte, body []byte) {
+	var kid, kvn byte
+	hasKID, hasKVN := false, false
+
+	// Walk D0/D2 TLVs out of the body. We don't use tlv.Decode
+	// here because these are raw single-byte length encodings
+	// without the BER context (D0/D2 are not BER-TLV constructed
+	// tags in this body shape — they're application-defined
+	// 1-byte tag + 1-byte length + 1-byte value units).
+	off := 0
+	for off+2 < len(body) {
+		tag := body[off]
+		length := body[off+1]
+		if off+2+int(length) > len(body) {
+			break
+		}
+		value := body[off+2 : off+2+int(length)]
+		switch tag {
+		case 0xD0:
+			if len(value) == 1 {
+				kid = value[0]
+				hasKID = true
+			}
+		case 0xD2:
+			if len(value) == 1 {
+				kvn = value[0]
+				hasKVN = true
+			}
+		}
+		off += 2 + int(length)
+	}
+
+	switch {
+	case hasKID && hasKVN:
+		c.unregisterKey(kid, kvn)
+	case hasKID:
+		c.unregisterAllAtKID(kid)
+	case hasKVN:
+		c.unregisterAllAtKVN(kvn)
+	default:
+		// No D0/D2 in the body — nothing to delete from the
+		// inventory. Real cards would reject with 6A80; we leave
+		// the response side unchanged (still returns 9000) for
+		// backward compat with tests that didn't model deletion
+		// pre-conditions.
+	}
+}
+
+// buildKeyInfoResponse marshals the current inventory into the
+// Key Information Template wire shape per GP §11.3.3.1:
+//
+//	E0 LL
+//	  C0 LL <KID> <KVN> <component_pairs...>
+//	  C0 LL <KID> <KVN> <component_pairs...>
+//	  ...
+//
+// Entries are sorted by (KID, KVN) so the response is deterministic
+// across runs and across map iteration order. The library's
+// parseKeyInformation walks C0 children in order; sd keys list
+// further sorts on the host side, so the wire order doesn't affect
+// CLI output, but a deterministic mock simplifies snapshot tests
+// and trace comparisons.
+//
+// An empty inventory marshals to E0 00 (zero-length container).
+// The library's parseKeyInformation handles that as "no keys
+// installed" — sd keys list reports "no key entries" and exits
+// successfully, mirroring what a freshly-erased card would show.
+func (c *MockCard) buildKeyInfoResponse() []byte {
+	if len(c.inventory) == 0 {
+		return []byte{0xE0, 0x00}
+	}
+	// Sort keys deterministically.
+	keys := make([]uint16, 0, len(c.inventory))
+	for k := range c.inventory {
+		keys = append(keys, k)
+	}
+	sortUint16s(keys)
+
+	var inner []byte
+	for _, k := range keys {
+		e := c.inventory[k]
+		body := append([]byte{e.KID, e.KVN}, e.Components...)
+		inner = append(inner, tlv.Build(tlv.Tag(0xC0), body).Encode()...)
+	}
+	return tlv.Build(tlv.Tag(0xE0), inner).Encode()
+}
+
+// sortUint16s is a small uint16 sort. We don't import sort because
+// the mock is on the hot path of every test that uses SCP03 and
+// adding a stdlib package for one call site is wasteful; the inner
+// loop here is O(n log n) on a list that's typically 1-5 entries
+// long.
+func sortUint16s(a []uint16) {
+	// Insertion sort — fine for the small N we deal with here.
+	for i := 1; i < len(a); i++ {
+		v := a[i]
+		j := i - 1
+		for j >= 0 && a[j] > v {
+			a[j+1] = a[j]
+			j--
+		}
+		a[j+1] = v
+	}
 }
