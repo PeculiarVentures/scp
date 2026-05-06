@@ -420,46 +420,46 @@ func TestStoreAllowlistData_ASN1IntegerEncoding(t *testing.T) {
 	ref := NewKeyReference(KeyIDOCE, 0x03)
 
 	cases := []struct {
-		name           string
-		serial         *big.Int
-		wantSerialHex  string // bytes inside the inner 93 TLV value
-		comment        string
+		name          string
+		serial        *big.Int
+		wantSerialHex string // bytes inside the inner 93 TLV value
+		comment       string
 	}{
 		{
-			name:           "high_bit_clear_no_prefix",
-			serial:         big.NewInt(0x7F),
-			wantSerialHex:  "7F",
-			comment:        "0x7F has high bit clear; no 0x00 prefix",
+			name:          "high_bit_clear_no_prefix",
+			serial:        big.NewInt(0x7F),
+			wantSerialHex: "7F",
+			comment:       "0x7F has high bit clear; no 0x00 prefix",
 		},
 		{
-			name:           "high_bit_set_single_byte_gets_prefix",
-			serial:         big.NewInt(0x80),
-			wantSerialHex:  "0080",
-			comment:        "0x80 has high bit set; prepend 0x00",
+			name:          "high_bit_set_single_byte_gets_prefix",
+			serial:        big.NewInt(0x80),
+			wantSerialHex: "0080",
+			comment:       "0x80 has high bit set; prepend 0x00",
 		},
 		{
-			name:           "high_bit_set_multibyte_gets_prefix",
-			serial:         big.NewInt(0xFF12345678),
-			wantSerialHex:  "00FF12345678",
-			comment:        "high bit on first byte of multibyte serial; prepend 0x00",
+			name:          "high_bit_set_multibyte_gets_prefix",
+			serial:        big.NewInt(0xFF12345678),
+			wantSerialHex: "00FF12345678",
+			comment:       "high bit on first byte of multibyte serial; prepend 0x00",
 		},
 		{
-			name:           "high_bit_clear_multibyte_no_prefix",
-			serial:         big.NewInt(0x7F12345678),
-			wantSerialHex:  "7F12345678",
-			comment:        "high bit clear on first byte; no prefix",
+			name:          "high_bit_clear_multibyte_no_prefix",
+			serial:        big.NewInt(0x7F12345678),
+			wantSerialHex: "7F12345678",
+			comment:       "high bit clear on first byte; no prefix",
 		},
 		{
-			name:           "second_byte_high_bit_irrelevant",
-			serial:         big.NewInt(0x01FFFFFFFF),
-			wantSerialHex:  "01FFFFFFFF",
-			comment:        "only first byte's high bit matters; later high bits don't trigger prefix",
+			name:          "second_byte_high_bit_irrelevant",
+			serial:        big.NewInt(0x01FFFFFFFF),
+			wantSerialHex: "01FFFFFFFF",
+			comment:       "only first byte's high bit matters; later high bits don't trigger prefix",
 		},
 		{
-			name:           "zero_serial_renders_as_single_zero",
-			serial:         big.NewInt(0),
-			wantSerialHex:  "00",
-			comment:        "ASN.1 INTEGER 0 is single 0x00 byte; not zero-length",
+			name:          "zero_serial_renders_as_single_zero",
+			serial:        big.NewInt(0),
+			wantSerialHex: "00",
+			comment:       "ASN.1 INTEGER 0 is single 0x00 byte; not zero-length",
 		},
 	}
 
