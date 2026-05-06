@@ -49,6 +49,8 @@ func cmdGPDelete(ctx context.Context, env *runEnv, args []string) error {
 	related := fs.Bool("related", false,
 		"Cascade delete: also remove applets instantiated from this load file. Use when deleting a load file rather than an applet.")
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
+	sdAIDHex := fs.String("sd-aid", "",
+		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs)
 	expectedCardID := fs.String("expected-card-id", "",
@@ -95,6 +97,16 @@ func cmdGPDelete(ctx context.Context, env *runEnv, args []string) error {
 	cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
 		return err
+	}
+	sdAID, err := decodeSDAIDFlag(*sdAIDHex)
+	if err != nil {
+		report.Fail("sd-aid", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return err
+	}
+	if sdAID != nil {
+		cfg.SelectAID = sdAID
+		report.Pass("sd-aid", strings.ToUpper(hex.EncodeToString(sdAID)))
 	}
 	t, err := env.connect(ctx, *reader)
 	if err != nil {

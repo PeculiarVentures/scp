@@ -45,6 +45,8 @@ type gpRegistryData struct {
 func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("gp registry", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
+	sdAIDHex := fs.String("sd-aid", "",
+		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -69,6 +71,13 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
 		return err
+	}
+	sdAID, err := decodeSDAIDFlag(*sdAIDHex)
+	if err != nil {
+		return &usageError{msg: err.Error()}
+	}
+	if sdAID != nil {
+		cfg.SelectAID = sdAID
 	}
 
 	t, err := env.connect(ctx, *reader)

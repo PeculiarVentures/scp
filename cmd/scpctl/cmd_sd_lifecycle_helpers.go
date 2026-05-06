@@ -23,7 +23,7 @@ import (
 // nil error as authoritative; an error means "couldn't read, proceed
 // with reduced safety."
 func readISDLifecycle(ctx context.Context, t transport.Transport) (securitydomain.LifecycleState, error) {
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+	sd, err := securitydomain.OpenUnauthenticated(ctx, t, nil)
 	if err != nil {
 		return 0, fmt.Errorf("open unauthenticated SD: %w", err)
 	}

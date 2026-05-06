@@ -75,6 +75,8 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	loadBlockSize := fs.Int("load-block-size", 0,
 		"LOAD chunk size in bytes (0 = default 200, conservative for SM overhead within short-Lc encoding).")
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
+	sdAIDHex := fs.String("sd-aid", "",
+		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs)
 	expectedCardID := fs.String("expected-card-id", "",
@@ -193,6 +195,16 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
 		return err
+	}
+	sdAID, err := decodeSDAIDFlag(*sdAIDHex)
+	if err != nil {
+		report.Fail("sd-aid", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return err
+	}
+	if sdAID != nil {
+		cfg.SelectAID = sdAID
+		report.Pass("sd-aid", strings.ToUpper(hex.EncodeToString(sdAID)))
 	}
 	t, err := env.connect(ctx, *reader)
 	if err != nil {

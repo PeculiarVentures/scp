@@ -112,6 +112,8 @@ type probeOptions struct {
 func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions) error {
 	fs := newSubcommandFlagSet(opts.flagSetName, env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
+	sdAIDHex := fs.String("sd-aid", "",
+		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	var fullMode *bool
 	if opts.allowFullStatus {
@@ -126,6 +128,11 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		return &usageError{msg: err.Error()}
 	}
 
+	sdAID, err := decodeSDAIDFlag(*sdAIDHex)
+	if err != nil {
+		return &usageError{msg: err.Error()}
+	}
+
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
 		return err
@@ -134,7 +141,7 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 
 	report := &Report{Subcommand: opts.reportLabel, Reader: *reader}
 
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+	sd, err := securitydomain.OpenUnauthenticated(ctx, t, sdAID)
 	if err != nil {
 		report.Fail("select ISD", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

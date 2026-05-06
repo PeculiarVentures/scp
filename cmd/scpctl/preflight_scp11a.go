@@ -29,7 +29,7 @@ import (
 // the source of truth for whether the card can or cannot complete
 // the handshake.
 func preflightSCP11aSDKey(ctx context.Context, t transport.Transport, sdKID, sdKVN byte, report *Report) bool {
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+	sd, err := securitydomain.OpenUnauthenticated(ctx, t, nil)
 	if err != nil {
 		report.Skip("SCP11a SD key preflight",
 			fmt.Sprintf("could not open unauthenticated SD: %v; proceeding to open anyway", err))

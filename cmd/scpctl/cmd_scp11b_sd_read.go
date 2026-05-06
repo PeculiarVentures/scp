@@ -142,7 +142,7 @@ func dumpSCP11bCertStore(
 	data *scp11bSDReadData,
 	report *Report,
 ) error {
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+	sd, err := securitydomain.OpenUnauthenticated(ctx, t, nil)
 	if err != nil {
 		return fmt.Errorf("open SD: %w", err)
 	}
@@ -157,7 +157,7 @@ func dumpSCP11bCertStore(
 
 	// Best-effort cert count for the report; failure here is not
 	// fatal — the hex dump is the primary diagnostic.
-	if certs, _ := securitydomain.OpenUnauthenticated(ctx, t); certs != nil {
+	if certs, _ := securitydomain.OpenUnauthenticated(ctx, t, nil); certs != nil {
 		certs.Close()
 	}
 	if list, err := sd.GetCertificates(ctx, ref); err == nil {

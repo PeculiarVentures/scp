@@ -197,7 +197,9 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 	// we override are scalars / nil-able pointers, so a shallow copy
 	// is enough to isolate the side effect.
 	local := *cfg
-	local.SelectAID = AIDSecurityDomain
+	if local.SelectAID == nil {
+		local.SelectAID = AIDSecurityDomain
+	}
 	local.SecurityLevel = channel.LevelFull
 
 	scpSess, err := scp03.Open(ctx, t, &local)
@@ -344,17 +346,25 @@ func validateDEK(dek []byte) error {
 }
 
 // OpenUnauthenticated opens a read-only session to the Security Domain.
-func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, error) {
+// OpenUnauthenticated opens a read-only session to the Security
+// Domain by SELECTing the named AID. Pass nil for sdAID to use
+// the GP-default ISD AID (AIDSecurityDomain). Pass a vendor- or
+// deployment-specific AID for cards that do not respond to the
+// default (some SafeNet/Fusion variants, custom JCOP installs).
+func OpenUnauthenticated(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
-	cmd := apdu.NewSelect(AIDSecurityDomain)
+	if len(sdAID) == 0 {
+		sdAID = AIDSecurityDomain
+	}
+	cmd := apdu.NewSelect(sdAID)
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("securitydomain: select SD: %w", resp.Error())
+		return nil, &APDUError{Operation: "SELECT SD", SW: resp.StatusWord()}
 	}
 	return &Session{transport: t, authenticated: false}, nil
 }
