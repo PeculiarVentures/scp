@@ -802,13 +802,22 @@ func reorderChain(certs []*x509.Certificate, order string) ([]*x509.Certificate,
 		out = append(out, certs[leafIdx])
 		return out, nil
 	case "leaf-first":
-		out := make([]*x509.Certificate, 0, len(certs))
-		out = append(out, certs[leafIdx])
-		for i, c := range certs {
-			if i == leafIdx {
-				continue
-			}
-			out = append(out, c)
+		// "Leaf-first" is semantically the reverse of "leaf-last":
+		// the chain is presented in validation order (leaf, then
+		// its direct issuer, then that issuer's issuer, ..., root).
+		// Easiest correct implementation: produce the leaf-last
+		// ordering and reverse it. Without this reversal, the leaf
+		// goes to position 0 but the rest stays in input order,
+		// producing e.g. [leaf, root, intermediate] from a leaf-last
+		// input — which is neither the input order nor a valid
+		// leaf-first chain.
+		leafLast, err := reorderChain(certs, "leaf-last")
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*x509.Certificate, len(leafLast))
+		for i, c := range leafLast {
+			out[len(leafLast)-1-i] = c
 		}
 		return out, nil
 	default:
