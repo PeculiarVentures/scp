@@ -139,7 +139,7 @@ scpctl sd keys import --kid 11 --kvn 01 \
   --confirm-write --scp03-keys-default
 ```
 
-**`--kid 10` or `--kid` in `0x20-0x2F` (CA/OCE trust anchor).** EC P-256 public key from `--key-pem`. The flag accepts either a PEM `PUBLIC KEY` block (PKIX SubjectPublicKeyInfo) OR a PEM `CERTIFICATE` block — when given a cert, the verb extracts the public key AND the SubjectKeyIdentifier extension. SKI source precedence: explicit `--ski` override > the cert's SubjectKeyIdentifier extension > computed SHA-1 of the SPKI per RFC 5280 §4.2.1.2 method 1. The `--certs` flag is REJECTED on this path (trust anchors don't carry chains; the chain-attaching flow is for SCP11 SD slots).
+**`--kid 10` or `--kid` in `0x20-0x2F` (CA/OCE trust anchor).** EC P-256 public key from `--key-pem`. The flag accepts either a PEM `PUBLIC KEY` block (PKIX SubjectPublicKeyInfo) OR a PEM `CERTIFICATE` block — when given a cert, the verb extracts the public key AND the SubjectKeyIdentifier extension. SKI source precedence: explicit `--ski` override > the cert's SubjectKeyIdentifier extension > computed per RFC 5280 §4.2.1.2 method 1, which hashes the BIT STRING value of `subjectPublicKey` (for an EC key, the SEC1 uncompressed point bytes) — NOT the full `SubjectPublicKeyInfo` encoding. The `--certs` flag is REJECTED on this path (trust anchors don't carry chains; the chain-attaching flow is for SCP11 SD slots).
 
 ```
 scpctl sd keys import --kid 10 --kvn 01 \
@@ -362,7 +362,7 @@ scpctl sd keys import --kid 10 --kvn 01 \
   --confirm-write --scp03-kvn FE ...
 ```
 
-The cert is parsed for SubjectKeyIdentifier; if not present, SKI is computed as SHA-1 of the SPKI per RFC 5280 §4.2.1.2 method 1. To override either source explicitly, add `--ski <40-hex>`.
+The cert is parsed for SubjectKeyIdentifier; if not present, SKI is computed per RFC 5280 §4.2.1.2 method 1 — SHA-1 of the BIT STRING value of `subjectPublicKey` (for an EC key, the SEC1 uncompressed point bytes), NOT SHA-1 of the full `SubjectPublicKeyInfo` encoding. To override either source explicitly, add `--ski <40-hex>`.
 
 ### Restrict which OCE certs the card will accept
 
