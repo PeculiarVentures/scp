@@ -68,8 +68,9 @@ type gpCapInspectData struct {
 }
 
 type gpCapInspectApplet struct {
-	AID                 string `json:"aid"`
-	InstallMethodOffset string `json:"install_method_offset"`
+	AID                    string `json:"aid"`
+	InstallMethodOffset    int    `json:"install_method_offset"`
+	InstallMethodOffsetHex string `json:"install_method_offset_hex"`
 }
 
 type gpCapInspectComponentEntry struct {
@@ -127,8 +128,9 @@ func cmdGPCapInspect(ctx context.Context, env *runEnv, args []string) error {
 	}
 	for _, a := range capFile.Applets {
 		data.Applets = append(data.Applets, gpCapInspectApplet{
-			AID:                 a.AID.String(),
-			InstallMethodOffset: fmt.Sprintf("0x%04X", a.InstallMethodOffset),
+			AID:                    a.AID.String(),
+			InstallMethodOffset:    int(a.InstallMethodOffset),
+			InstallMethodOffsetHex: fmt.Sprintf("0x%04X", a.InstallMethodOffset),
 		})
 	}
 	for _, c := range capFile.Components {

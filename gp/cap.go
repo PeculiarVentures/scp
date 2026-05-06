@@ -155,9 +155,10 @@ type CAPFile struct {
 
 	// PackageName is the optional Java fully-qualified package
 	// name from Header.cap's package_name_info. JC 2.1 CAPs may
-	// omit it entirely; nil distinguishes "absent" from "present
-	// and empty" (an empty name with name_length=0 is unusual but
-	// formally valid).
+	// omit it entirely. Nil when package_name_info is absent or
+	// has zero length; the parser collapses both into nil because
+	// the distinction has no practical use today and adding a
+	// PackageNamePresent bool would be unused-API noise.
 	PackageName []byte
 
 	// Applets lists the applets declared in Applet.cap, in file

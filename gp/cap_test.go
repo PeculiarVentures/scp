@@ -137,6 +137,7 @@ func defaultCAP(headerPayload, appletPayload []byte) *capBuilder {
 	b.put(componentNameClass, frameForComponent(ComponentTagClass, nil))
 	b.put(componentNameMethod, frameForComponent(ComponentTagMethod, nil))
 	b.put(componentNameStaticField, frameForComponent(ComponentTagStaticField, nil))
+	b.put(componentNameExport, frameForComponent(ComponentTagExport, nil))
 	b.put(componentNameConstantPool, frameForComponent(ComponentTagConstantPool, nil))
 	b.put(componentNameReferenceLocation, frameForComponent(ComponentTagReferenceLocation, nil))
 	b.put(componentNameDescriptor, frameForComponent(ComponentTagDescriptor, nil))
@@ -515,6 +516,70 @@ func TestParseCAP_ComponentsInLoadOrder(t *testing.T) {
 		if posOf[cap.Components[i].Name] <= posOf[cap.Components[i-1].Name] {
 			t.Errorf("Components not in load order: %s came after %s",
 				cap.Components[i].Name, cap.Components[i-1].Name)
+		}
+	}
+}
+
+// TestLoadOrder_ExplicitSequence pins the literal load order this
+// parser produces. Defends against a future change that "fixes" the
+// order into numeric tag order (1..12) — which would give Header,
+// Directory, Applet, Import, ConstantPool, Class, Method,
+// StaticField, ReferenceLocation, Export, Descriptor, Debug — and
+// is wrong for GP §11.6.2 LOAD construction. The correct load order
+// per the Java Card VM Spec puts Import before Applet, and
+// StaticField/Export before ConstantPool/RefLocation; numerically
+// shuffling the slice would break LOAD wire shape downstream
+// without breaking any existing test that only checks monotonicity.
+func TestLoadOrder_ExplicitSequence(t *testing.T) {
+	got := loadOrder()
+	want := []string{
+		componentNameHeader,
+		componentNameDirectory,
+		componentNameImport,
+		componentNameApplet,
+		componentNameClass,
+		componentNameMethod,
+		componentNameStaticField,
+		componentNameExport,
+		componentNameConstantPool,
+		componentNameReferenceLocation,
+		componentNameDescriptor,
+		componentNameDebug,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("loadOrder length = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("loadOrder[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+}
+
+// TestParseCAP_UnknownBasename_Ignored confirms that .cap files
+// inside the ZIP whose basename is not in the known component set
+// are silently ignored, not rejected. Producers occasionally
+// include vendor extensions or debug auxiliaries with .cap suffix;
+// ignoring keeps parsing tolerant for valid CAPs that happen to
+// carry extra content. Distinct from duplicate KNOWN basenames
+// (TestParseCAP_DuplicateComponent), which are an error.
+func TestParseCAP_UnknownBasename_Ignored(t *testing.T) {
+	pkgAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+	hp := buildHeaderPayload(headerOpts{pkgAID: pkgAID})
+
+	// Start with a valid CAP, then add an extra ZIP entry under a
+	// .cap basename the parser does not know.
+	b := defaultCAP(hp, nil)
+	b.put("VendorExtension.cap", []byte{0xFF, 0x00, 0x00})
+	zipBytes := b.bytes(t)
+
+	cap, err := ParseCAP(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		t.Fatalf("ParseCAP: %v (unknown basename should be ignored, not fatal)", err)
+	}
+	for _, comp := range cap.Components {
+		if comp.Name == "VendorExtension.cap" {
+			t.Error("unknown basename appeared in Components manifest")
 		}
 	}
 }

@@ -5,15 +5,13 @@
 //
 //   - AID parsing, validation, and length-value encoding.
 //   - CAP file inspection (ZIP-based parser for Header.cap and Applet.cap).
-//   - Install plan generation (host-side dry-run).
 //   - Trace event model for APDU debugging.
 //
 // What is NOT in this package:
 //
 //   - Registry data types. Use securitydomain.RegistryEntry,
 //     securitydomain.Privileges, securitydomain.LifecycleState, and
-//     securitydomain.StatusScope. The gp package depends on
-//     securitydomain, not the other way around.
+//     securitydomain.StatusScope.
 //   - GET STATUS construction. Use securitydomain.Session.GetStatus,
 //     which already handles continuation (SW=6310), the legacy/tagged
 //     P2 fallback (SW=6A86), and empty-scope (SW=6A88) cases.
@@ -23,13 +21,23 @@
 //     securitydomain.Session directly when added (Install, Delete);
 //     this package provides only the pure command builders they call.
 //
+// Dependency direction. The gp package is a leaf utility: it depends
+// only on the standard library. It does NOT import securitydomain.
+// When destructive applet management lands in future work,
+// securitydomain will import gp for CAPFile and command-builder
+// types. cmd/scpctl composes both layers for operator-facing
+// commands.
+//
 // # License posture
 //
 // Implementation is derived only from the GlobalPlatform Card
 // Specification v2.3.1, ISO/IEC 7816-4 and 7816-5, Java Card VM
 // specifications, and APDU traces independently captured against
-// our own test cards. Contributors do not consult the source code of
-// any GPL-licensed (or AGPL-licensed) GlobalPlatform implementation.
+// our own test cards. Contributors do not consult the source code,
+// comments, log formats, or test fixtures of any GPL-, AGPL-, or
+// LGPL-licensed GlobalPlatform implementation. This includes but
+// is not limited to GlobalPlatformPro (LGPL-3.0), jCardSim
+// (AGPL-3.0), and OpenSC GP modules (LGPL-2.1).
 package gp
 
 import (
@@ -125,22 +133,35 @@ func (a AID) String() string {
 
 // LV returns the length-value encoding of the AID: a single length
 // byte followed by the AID bytes. Used as a payload component in
-// every GP command that accepts an AID (INSTALL, DELETE, GET STATUS
-// match criteria). Single-byte length is sufficient because AIDs are
-// bounded at 16 bytes by ISO/IEC 7816-5; no BER long-form length
-// encoding is needed.
+// every GP command that requires an AID — INSTALL [for load],
+// INSTALL [for install], DELETE. Single-byte length is sufficient
+// because AIDs are bounded at 16 bytes by ISO/IEC 7816-5; no BER
+// long-form length encoding is needed.
 //
-// Returns nil when the AID is empty rather than a single zero byte;
-// callers passing the zero AID are almost always making a mistake
-// and a nil return surfaces it at the next concatenation site.
-func (a AID) LV() []byte {
-	if len(a) == 0 {
-		return nil
+// LV is fail-closed on an invalid AID. An empty AID (or an AID
+// outside the 5..16 byte range) returns an error rather than a
+// silently-malformed encoding. Callers that need the GP "no AID
+// match criterion" form (one-byte 0x00, used by GET STATUS as
+// "match all AIDs") must use EmptyAIDLV explicitly so the choice
+// is visible at the call site.
+func (a AID) LV() ([]byte, error) {
+	if err := ValidateAID(a); err != nil {
+		return nil, fmt.Errorf("aid LV: %w", err)
 	}
 	out := make([]byte, 1+len(a))
 	out[0] = byte(len(a))
 	copy(out[1:], a)
-	return out
+	return out, nil
+}
+
+// EmptyAIDLV returns the GP "no AID criterion" length-value
+// encoding: a single 0x00 byte representing AID_length=0 with no
+// AID bytes following. Used in GET STATUS as "match all entries
+// in this scope." Distinct from a nil slice or from AID.LV()
+// returning an error: the empty-LV form is a meaningful wire
+// value, not the absence of an AID.
+func EmptyAIDLV() []byte {
+	return []byte{0x00}
 }
 
 // Equal reports whether two AIDs have the same bytes. Provided for

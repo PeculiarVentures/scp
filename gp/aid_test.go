@@ -142,11 +142,6 @@ func TestAID_LV(t *testing.T) {
 		want []byte
 	}{
 		{
-			name: "empty AID returns nil",
-			aid:  AID{},
-			want: nil,
-		},
-		{
 			name: "5-byte AID",
 			aid:  AID{0xA0, 0x00, 0x00, 0x01, 0x51},
 			want: []byte{0x05, 0xA0, 0x00, 0x00, 0x01, 0x51},
@@ -165,11 +160,66 @@ func TestAID_LV(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.aid.LV()
+			got, err := tc.aid.LV()
+			if err != nil {
+				t.Fatalf("LV() error = %v, want nil", err)
+			}
 			if !bytes.Equal(got, tc.want) {
 				t.Errorf("LV() = %X, want %X", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAID_LV_RejectsInvalid pins the fail-closed contract: empty
+// or out-of-range AIDs cause LV to return an error rather than a
+// silently-malformed encoding. A caller doing
+//
+//	apdu.Data = append(apdu.Data, sd.LV()...)
+//
+// against an empty sd would otherwise produce a wire byte sequence
+// missing both the length and the AID, which would be diagnosed
+// only as "card returned weird SW" downstream.
+func TestAID_LV_RejectsInvalid(t *testing.T) {
+	cases := []struct {
+		name string
+		aid  AID
+	}{
+		{"empty (nil slice)", nil},
+		{"empty (zero-length non-nil)", AID{}},
+		{"too short (4 bytes)", AID{0xA0, 0x00, 0x00, 0x01}},
+		{"too long (17 bytes)", AID(bytes.Repeat([]byte{0xCC}, 17))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := tc.aid.LV()
+			if err == nil {
+				t.Fatalf("LV() = %X, want error", out)
+			}
+			if out != nil {
+				t.Errorf("LV() returned %X on error path, want nil", out)
+			}
+		})
+	}
+}
+
+// TestEmptyAIDLV pins the "no AID match criterion" wire encoding.
+// Distinct from AID.LV() returning an error on an empty AID: the
+// empty-LV form here is a meaningful wire value used by GP as
+// "match every entry in the scope," whereas LV()'s error path
+// catches programming errors where the caller meant to pass a
+// real AID and didn't.
+func TestEmptyAIDLV(t *testing.T) {
+	got := EmptyAIDLV()
+	want := []byte{0x00}
+	if !bytes.Equal(got, want) {
+		t.Errorf("EmptyAIDLV() = %X, want %X", got, want)
+	}
+	// Each call returns an independent slice so a caller mutating
+	// the returned slice cannot poison subsequent callers.
+	got[0] = 0xFF
+	if EmptyAIDLV()[0] != 0x00 {
+		t.Error("EmptyAIDLV() callers share backing storage; later mutation visible")
 	}
 }
 

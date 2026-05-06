@@ -153,8 +153,9 @@ func TestGPCapInspect_JSONOutput(t *testing.T) {
 			PackageAID     string `json:"package_aid"`
 			PackageName    string `json:"package_name"`
 			Applets        []struct {
-				AID                 string `json:"aid"`
-				InstallMethodOffset string `json:"install_method_offset"`
+				AID                    string `json:"aid"`
+				InstallMethodOffset    int    `json:"install_method_offset"`
+				InstallMethodOffsetHex string `json:"install_method_offset_hex"`
 			} `json:"applets"`
 			Components []struct {
 				Name string `json:"name"`
@@ -194,9 +195,13 @@ func TestGPCapInspect_JSONOutput(t *testing.T) {
 	if report.Data.Applets[0].AID != "D276000124010101" {
 		t.Errorf("Applet[0].AID = %q", report.Data.Applets[0].AID)
 	}
-	if report.Data.Applets[0].InstallMethodOffset != "0x0042" {
-		t.Errorf("Applet[0].InstallMethodOffset = %q, want 0x0042",
+	if report.Data.Applets[0].InstallMethodOffset != 0x42 {
+		t.Errorf("Applet[0].InstallMethodOffset = %d, want 66 (0x42)",
 			report.Data.Applets[0].InstallMethodOffset)
+	}
+	if report.Data.Applets[0].InstallMethodOffsetHex != "0x0042" {
+		t.Errorf("Applet[0].InstallMethodOffsetHex = %q, want 0x0042",
+			report.Data.Applets[0].InstallMethodOffsetHex)
 	}
 	if len(report.Data.Components) == 0 {
 		t.Error("Components is empty; expected at least Header")
