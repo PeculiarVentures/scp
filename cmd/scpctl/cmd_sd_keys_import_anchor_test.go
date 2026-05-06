@@ -5,8 +5,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1" //nolint:gosec // RFC 5280 §4.2.1.2 method 1 SKI
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
@@ -47,7 +49,7 @@ func writeCertWithSKI(t *testing.T, dir string, priv *ecdsa.PrivateKey, ski []by
 }
 
 // writeCertNoSKI builds a self-signed cert WITHOUT a
-// SubjectKeyIdentifier extension. Tests the "computed-sha1-spki"
+// SubjectKeyIdentifier extension. Tests the "computed-rfc5280-method1"
 // fallback origin path.
 func writeCertNoSKI(t *testing.T, dir string, priv *ecdsa.PrivateKey, name string) string {
 	t.Helper()
@@ -190,8 +192,19 @@ func TestSDKeysImportTrustAnchor_CertWithSKI_ExtensionPath(t *testing.T) {
 }
 
 // TestSDKeysImportTrustAnchor_CertNoSKI_FallbackPath: when the cert
-// lacks the extension, the SKI is computed as SHA-1 of the SPKI per
-// RFC 5280 §4.2.1.2 method 1. Origin is "computed-sha1-spki".
+// lacks the extension, the SKI is computed per RFC 5280 §4.2.1.2
+// method 1 — SHA-1 of the value of the BIT STRING subjectPublicKey
+// (i.e. the SEC1 uncompressed point bytes for an EC key), NOT the
+// full SubjectPublicKeyInfo encoding. Origin is
+// "computed-rfc5280-method1".
+//
+// The test pins both halves of that contract:
+//
+//  1. report.Data.SKIHex must equal SHA-1(SEC1 uncompressed point).
+//  2. report.Data.SKIHex must NOT equal SHA-1(full SPKI), which is
+//     the wrong-answer an earlier revision computed (PR #90 fixed
+//     it). The assertion makes any future regression to that bug
+//     loud rather than producing self-consistent wrong values.
 func TestSDKeysImportTrustAnchor_CertNoSKI_FallbackPath(t *testing.T) {
 	dir := t.TempDir()
 	priv := genP256TestKey(t)
@@ -216,12 +229,45 @@ func TestSDKeysImportTrustAnchor_CertNoSKI_FallbackPath(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if report.Data.SKIOrigin != "computed-sha1-spki" {
-		t.Errorf("ski_origin = %q, want computed-sha1-spki", report.Data.SKIOrigin)
+	if report.Data.SKIOrigin != "computed-rfc5280-method1" {
+		t.Errorf("ski_origin = %q, want computed-rfc5280-method1", report.Data.SKIOrigin)
 	}
-	// SHA-1 hex is 40 chars (20 bytes). Just sanity-check length.
+	// SHA-1 hex is 40 chars (20 bytes). Sanity-check length.
 	if len(report.Data.SKIHex) != 40 {
 		t.Errorf("ski_hex length = %d, want 40 (SHA-1 hex)", len(report.Data.SKIHex))
+	}
+
+	// Pin the right-answer bytes: SHA-1 of the EC point.
+	ecdhPub, err := priv.PublicKey.ECDH()
+	if err != nil {
+		t.Fatalf("ECDH conv: %v", err)
+	}
+	point := ecdhPub.Bytes()
+	if len(point) != 65 || point[0] != 0x04 {
+		t.Fatalf("expected 65-byte uncompressed point starting 0x04; got len=%d first=0x%02X",
+			len(point), point[0])
+	}
+	wantSum := sha1.Sum(point) //nolint:gosec // RFC 5280 method 1
+	wantHex := strings.ToUpper(hex.EncodeToString(wantSum[:]))
+	if !strings.EqualFold(report.Data.SKIHex, wantHex) {
+		t.Errorf("ski_hex mismatch:\n  got:  %s\n  want: %s (sha1 of SEC1 uncompressed point)",
+			report.Data.SKIHex, wantHex)
+	}
+
+	// Pin the wrong-answer negative: must NOT equal SHA-1(full
+	// SPKI). This is the bug PR #90 fixed; without this assertion
+	// a future revision could regress to it without a single
+	// existing test failing because it would still produce a
+	// 40-char hex string.
+	spki, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal SPKI: %v", err)
+	}
+	wrongSum := sha1.Sum(spki) //nolint:gosec
+	wrongHex := strings.ToUpper(hex.EncodeToString(wrongSum[:]))
+	if strings.EqualFold(report.Data.SKIHex, wrongHex) {
+		t.Errorf("ski_hex equals SHA-1(SPKI), which is the WRONG implementation per RFC 5280 method 1; got %s",
+			report.Data.SKIHex)
 	}
 }
 

@@ -58,7 +58,7 @@ type sdKeysImportData struct {
 	// ca-trust-anchor-only fields (Phase 5c). SKIHex is the SKI
 	// being registered against the public key reference; SKIOrigin
 	// records how it was derived: "cert-extension" (cert had a
-	// SubjectKeyId), "computed-sha1-spki" (cert lacked the
+	// SubjectKeyId), "computed-rfc5280-method1" (cert lacked the
 	// extension and we computed per RFC 5280 §4.2.1.2 method 1),
 	// or "explicit-override" (operator passed --ski). Operators
 	// auditing fleet provisioning need the origin to verify their
@@ -954,7 +954,7 @@ func isCATrustAnchorKID(kid byte) bool {
 // cmdSDKeysImportTrustAnchor.
 //
 // Returns the EC public key, the SKI bytes, and the origin tag
-// ("cert-extension" / "computed-sha1-spki" / "explicit-override")
+// ("cert-extension" / "computed-rfc5280-method1" / "explicit-override")
 // for audit-log shaping. All three are needed by both dry-run and
 // active paths.
 //
@@ -1003,7 +1003,7 @@ func loadTrustAnchorMaterial(keyPemPath, skiHexOverride string) (*ecdsa.PublicKe
 		}
 		// oceCASKI doesn't tell us which path it took, so we
 		// determine it here from the cert directly.
-		origin := "computed-sha1-spki"
+		origin := "computed-rfc5280-method1"
 		if len(cert.SubjectKeyId) > 0 {
 			origin = "cert-extension"
 		}

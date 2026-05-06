@@ -281,7 +281,7 @@ The `certificates` array carries metadata about every cert that was written to `
   "spki_fingerprint_sha256": "AB12...",
   "cert_count": 3,
   "ski_hex": "01234567...",
-  "ski_origin": "cert-extension" | "computed-sha1-spki" | "explicit-override"
+  "ski_origin": "cert-extension" | "computed-rfc5280-method1" | "explicit-override"
 }
 ```
 
