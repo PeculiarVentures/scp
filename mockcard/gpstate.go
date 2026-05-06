@@ -188,7 +188,7 @@ func (g *GPState) handleInstallForLoad(cmd *apdu.Command) *apdu.Response {
 	if !ok {
 		return mkSW(0x6A80)
 	}
-	if err := validateAIDLen(loadAID); err != nil {
+	if !validAIDLen(loadAID) {
 		return mkSW(0x6A80)
 	}
 	sdAID, d, ok := readLV(d)
@@ -196,7 +196,7 @@ func (g *GPState) handleInstallForLoad(cmd *apdu.Command) *apdu.Response {
 		return mkSW(0x6A80)
 	}
 	if len(sdAID) != 0 {
-		if err := validateAIDLen(sdAID); err != nil {
+		if !validAIDLen(sdAID) {
 			return mkSW(0x6A80)
 		}
 	}
@@ -229,21 +229,21 @@ func (g *GPState) handleInstallForInstall(cmd *apdu.Command) *apdu.Response {
 	if !ok {
 		return mkSW(0x6A80)
 	}
-	if err := validateAIDLen(loadAID); err != nil {
+	if !validAIDLen(loadAID) {
 		return mkSW(0x6A80)
 	}
 	moduleAID, d, ok := readLV(d)
 	if !ok {
 		return mkSW(0x6A80)
 	}
-	if err := validateAIDLen(moduleAID); err != nil {
+	if !validAIDLen(moduleAID) {
 		return mkSW(0x6A80)
 	}
 	appletAID, d, ok := readLV(d)
 	if !ok {
 		return mkSW(0x6A80)
 	}
-	if err := validateAIDLen(appletAID); err != nil {
+	if !validAIDLen(appletAID) {
 		return mkSW(0x6A80)
 	}
 	privs, d, ok := readLV(d)
@@ -317,7 +317,7 @@ func (g *GPState) handleDelete(cmd *apdu.Command) *apdu.Response {
 		return mkSW(0x6A80)
 	}
 	aid := d[2 : 2+aidLen]
-	if err := validateAIDLen(aid); err != nil {
+	if !validAIDLen(aid) {
 		return mkSW(0x6A80)
 	}
 

@@ -34,20 +34,14 @@ func readLV(b []byte) (val, rest []byte, ok bool) {
 	return b[1 : 1+n], b[1+n:], true
 }
 
-// validateAIDLen enforces ISO/IEC 7816-5 5..16 byte AID length.
-// Returns a sentinel-style error; callers map to SW=6A80.
-func validateAIDLen(aid []byte) error {
-	if len(aid) < 5 || len(aid) > 16 {
-		return errInvalidAIDLen
-	}
-	return nil
+// validAIDLen reports whether the slice is a syntactically valid
+// ISO/IEC 7816-5 AID (5..16 bytes). Callers that fail validation
+// surface SW=6A80 to the host; the predicate shape avoids the
+// alloc + interface dance an error sentinel would impose for what
+// is purely a length check.
+func validAIDLen(aid []byte) bool {
+	return len(aid) >= 5 && len(aid) <= 16
 }
-
-var errInvalidAIDLen = &installError{"invalid AID length"}
-
-type installError struct{ msg string }
-
-func (e *installError) Error() string { return e.msg }
 
 // versionFromLoadParams extracts a 2-byte version hint from the
 // INSTALL [for load] parameters block when present (tag 0xC8 in

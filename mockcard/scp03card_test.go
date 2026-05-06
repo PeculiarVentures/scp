@@ -55,7 +55,7 @@ func TestSCP03Card_GPInstallRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("INSTALL [for load]: %v", err)
 	}
-	if sw := swOf(resp); sw != 0x9000 {
+	if sw := resp.StatusWord(); sw != 0x9000 {
 		t.Fatalf("INSTALL [for load] SW=0x%04X, want 9000", sw)
 	}
 
@@ -67,7 +67,7 @@ func TestSCP03Card_GPInstallRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LOAD: %v", err)
 	}
-	if sw := swOf(resp); sw != 0x9000 {
+	if sw := resp.StatusWord(); sw != 0x9000 {
 		t.Fatalf("LOAD SW=0x%04X, want 9000", sw)
 	}
 
@@ -79,7 +79,7 @@ func TestSCP03Card_GPInstallRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("INSTALL [for install]: %v", err)
 	}
-	if sw := swOf(resp); sw != 0x9000 {
+	if sw := resp.StatusWord(); sw != 0x9000 {
 		t.Fatalf("INSTALL [for install] SW=0x%04X, want 9000", sw)
 	}
 
@@ -107,7 +107,7 @@ func TestSCP03Card_GPInstallRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DELETE: %v", err)
 	}
-	if sw := swOf(resp); sw != 0x9000 {
+	if sw := resp.StatusWord(); sw != 0x9000 {
 		t.Fatalf("DELETE SW=0x%04X, want 9000", sw)
 	}
 
@@ -150,7 +150,7 @@ func TestSCP03Card_GetStatus_PreSeededRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET STATUS: %v", err)
 	}
-	if sw := swOf(resp); sw != 0x9000 {
+	if sw := resp.StatusWord(); sw != 0x9000 {
 		t.Fatalf("GET STATUS SW=0x%04X, want 9000", sw)
 	}
 	if !bytes.Contains(resp.Data,
@@ -161,7 +161,6 @@ func TestSCP03Card_GetStatus_PreSeededRegistry(t *testing.T) {
 
 // --- test helpers -------------------------------------------------------
 
-func swOf(r *apdu.Response) uint16 { return uint16(r.SW1)<<8 | uint16(r.SW2) }
 
 func buildInstallForLoad(loadAID, sdAID, params []byte) []byte {
 	return gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)

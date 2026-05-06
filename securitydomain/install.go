@@ -1,6 +1,7 @@
 package securitydomain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -236,7 +237,7 @@ func (s *Session) Install(ctx context.Context, opts InstallOptions) error {
 	if err != nil {
 		return &PartialInstallError{
 			Stage:          StageLoad,
-			LoadFileAID:    cloneBytes(opts.LoadFileAID),
+			LoadFileAID:    bytes.Clone(opts.LoadFileAID),
 			BytesLoaded:    bytesLoaded,
 			TotalLoadBytes: len(opts.LoadImage),
 			LastBlockSeq:   lastSeq,
@@ -249,8 +250,8 @@ func (s *Session) Install(ctx context.Context, opts InstallOptions) error {
 	if err := s.installForInstall(ctx, opts); err != nil {
 		return &PartialInstallError{
 			Stage:          StageInstallForInstall,
-			LoadFileAID:    cloneBytes(opts.LoadFileAID),
-			AppletAID:      cloneBytes(opts.AppletAID),
+			LoadFileAID:    bytes.Clone(opts.LoadFileAID),
+			AppletAID:      bytes.Clone(opts.AppletAID),
 			BytesLoaded:    len(opts.LoadImage),
 			TotalLoadBytes: len(opts.LoadImage),
 			LastBlockSeq:   lastSeq,
@@ -450,13 +451,4 @@ func checkSW(resp *apdu.Response, operation string) error {
 		return nil
 	}
 	return &APDUError{Operation: operation, SW: sw}
-}
-
-func cloneBytes(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	out := make([]byte, len(b))
-	copy(out, b)
-	return out
 }

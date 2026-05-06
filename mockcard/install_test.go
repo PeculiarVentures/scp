@@ -29,7 +29,6 @@ func dispatchUnsecured(t *testing.T, c *Card, ins, p1, p2 byte, data []byte) *ap
 	return resp
 }
 
-func swOf(r *apdu.Response) uint16 { return uint16(r.SW1)<<8 | uint16(r.SW2) }
 
 // buildInstallForLoadData wraps gp.BuildInstallForLoadPayload
 // for tests that don't carry hash/token. Hash and token are
@@ -55,7 +54,7 @@ func TestInstallForLoad_HappyPath_StartsLoadContext(t *testing.T) {
 	sdAID := []byte{} // 0-length means "current SD"
 	resp := dispatchUnsecured(t, c, 0xE6, 0x02, 0x00,
 		buildInstallForLoadData(loadAID, sdAID, nil))
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("INSTALL [for load] SW = 0x%04X, want 0x9000", got)
 	}
 	if c.loadCtx == nil {
@@ -73,7 +72,7 @@ func TestInstallForLoad_RejectsBadP2(t *testing.T) {
 	c, _ := New()
 	resp := dispatchUnsecured(t, c, 0xE6, 0x02, 0xFF,
 		buildInstallForLoadData([]byte{1, 2, 3, 4, 5}, nil, nil))
-	if got := swOf(resp); got != 0x6A86 {
+	if got := resp.StatusWord(); got != 0x6A86 {
 		t.Errorf("SW = 0x%04X, want 0x6A86", got)
 	}
 }
@@ -83,7 +82,7 @@ func TestInstallForLoad_RejectsTruncatedAID(t *testing.T) {
 	// Length byte claims 8 bytes, but only 3 follow.
 	bad := []byte{0x08, 0x01, 0x02, 0x03}
 	resp := dispatchUnsecured(t, c, 0xE6, 0x02, 0x00, bad)
-	if got := swOf(resp); got != 0x6A80 {
+	if got := resp.StatusWord(); got != 0x6A80 {
 		t.Errorf("SW = 0x%04X, want 0x6A80 (wrong data)", got)
 	}
 }
@@ -93,7 +92,7 @@ func TestInstallForLoad_RejectsAIDOutOfRange(t *testing.T) {
 	tooShort := []byte{1, 2, 3, 4} // 4-byte AID < ISO 7816-5 minimum 5
 	resp := dispatchUnsecured(t, c, 0xE6, 0x02, 0x00,
 		buildInstallForLoadData(tooShort, nil, nil))
-	if got := swOf(resp); got != 0x6A80 {
+	if got := resp.StatusWord(); got != 0x6A80 {
 		t.Errorf("SW = 0x%04X, want 0x6A80", got)
 	}
 }
@@ -104,7 +103,7 @@ func TestInstallForLoad_RejectsTrailingBytes(t *testing.T) {
 		[]byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}, nil, nil)
 	resp := dispatchUnsecured(t, c, 0xE6, 0x02, 0x00,
 		append(good, 0xFF, 0xFF))
-	if got := swOf(resp); got != 0x6A80 {
+	if got := resp.StatusWord(); got != 0x6A80 {
 		t.Errorf("SW = 0x%04X, want 0x6A80 (trailing bytes)", got)
 	}
 }
@@ -120,12 +119,12 @@ func TestLoad_FullSequence_RegistersLoadFile(t *testing.T) {
 
 	// LOAD block 0: not last (P1=0x00).
 	resp := dispatchUnsecured(t, c, 0xE8, 0x00, 0x00, []byte{0xAA, 0xBB})
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("LOAD[0] SW = 0x%04X", got)
 	}
 	// LOAD block 1: last (P1 bit 7 set).
 	resp = dispatchUnsecured(t, c, 0xE8, 0x80, 0x01, []byte{0xCC, 0xDD})
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("LOAD[final] SW = 0x%04X", got)
 	}
 	if c.loadCtx != nil {
@@ -149,7 +148,7 @@ func TestLoad_FullSequence_RegistersLoadFile(t *testing.T) {
 func TestLoad_WithoutPriorInstall_Returns6985(t *testing.T) {
 	c, _ := New()
 	resp := dispatchUnsecured(t, c, 0xE8, 0x80, 0x00, []byte{0xAA})
-	if got := swOf(resp); got != 0x6985 {
+	if got := resp.StatusWord(); got != 0x6985 {
 		t.Errorf("SW = 0x%04X, want 0x6985 (conditions not satisfied)", got)
 	}
 }
@@ -162,7 +161,7 @@ func TestLoad_OutOfOrderSequence_Rejected(t *testing.T) {
 
 	// Skip seq 0; jump straight to seq 5.
 	resp := dispatchUnsecured(t, c, 0xE8, 0x00, 0x05, []byte{0xAA})
-	if got := swOf(resp); got != 0x6A86 {
+	if got := resp.StatusWord(); got != 0x6A86 {
 		t.Errorf("SW = 0x%04X, want 0x6A86 (incorrect P1/P2)", got)
 	}
 }
@@ -178,7 +177,7 @@ func TestInstallForInstall_HappyPath_RegistersApplet(t *testing.T) {
 
 	resp := dispatchUnsecured(t, c, 0xE6, 0x04, 0x00,
 		buildInstallForInstallData(loadAID, moduleAID, appletAID, privs))
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("SW = 0x%04X, want 0x9000", got)
 	}
 	if len(c.RegistryApps) != 1 {
@@ -208,7 +207,7 @@ func TestDelete_RemovesRegisteredApplet(t *testing.T) {
 
 	deleteData := append([]byte{0x4F, byte(len(appletAID))}, appletAID...)
 	resp := dispatchUnsecured(t, c, 0xE4, 0x00, 0x00, deleteData)
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("SW = 0x%04X, want 0x9000", got)
 	}
 	if len(c.RegistryApps) != 0 {
@@ -221,7 +220,7 @@ func TestDelete_NonexistentAID_Returns6A88(t *testing.T) {
 	missing := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 	deleteData := append([]byte{0x4F, byte(len(missing))}, missing...)
 	resp := dispatchUnsecured(t, c, 0xE4, 0x00, 0x00, deleteData)
-	if got := swOf(resp); got != 0x6A88 {
+	if got := resp.StatusWord(); got != 0x6A88 {
 		t.Errorf("SW = 0x%04X, want 0x6A88 (referenced data not found)", got)
 	}
 }
@@ -240,7 +239,7 @@ func TestDelete_WithRelatedFlag_CascadesToLinkedApps(t *testing.T) {
 	// P2 bit 0 = "delete related"
 	deleteData := append([]byte{0x4F, byte(len(loadAID))}, loadAID...)
 	resp := dispatchUnsecured(t, c, 0xE4, 0x00, 0x01, deleteData)
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("SW = 0x%04X, want 0x9000", got)
 	}
 	if len(c.RegistryLoadFiles) != 0 {
@@ -254,7 +253,7 @@ func TestDelete_WithRelatedFlag_CascadesToLinkedApps(t *testing.T) {
 func TestDelete_RejectsMalformedTLV(t *testing.T) {
 	c, _ := New()
 	resp := dispatchUnsecured(t, c, 0xE4, 0x00, 0x00, []byte{0x99, 0x01, 0xFF})
-	if got := swOf(resp); got != 0x6A80 {
+	if got := resp.StatusWord(); got != 0x6A80 {
 		t.Errorf("SW = 0x%04X, want 0x6A80 (tag != 0x4F)", got)
 	}
 }
@@ -277,7 +276,7 @@ func TestInstallEndToEnd_GetStatusReflectsInstalled(t *testing.T) {
 
 	// GET STATUS for load files (P1=0x20).
 	resp := dispatchUnsecured(t, c, 0xF2, 0x20, 0x02, []byte{0x4F, 0x00})
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("GET STATUS load files: SW = 0x%04X", got)
 	}
 	if !bytes.Contains(resp.Data, loadAID) {
@@ -286,7 +285,7 @@ func TestInstallEndToEnd_GetStatusReflectsInstalled(t *testing.T) {
 
 	// GET STATUS for applications (P1=0x40).
 	resp = dispatchUnsecured(t, c, 0xF2, 0x40, 0x02, []byte{0x4F, 0x00})
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("GET STATUS apps: SW = 0x%04X", got)
 	}
 	if !bytes.Contains(resp.Data, appletAID) {
@@ -311,7 +310,7 @@ func TestInstallThenDelete_RestoresEmptyState(t *testing.T) {
 	// and the linked applet.
 	deleteData := append([]byte{0x4F, byte(len(loadAID))}, loadAID...)
 	resp := dispatchUnsecured(t, c, 0xE4, 0x00, 0x01, deleteData)
-	if got := swOf(resp); got != 0x9000 {
+	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("DELETE related: SW = 0x%04X", got)
 	}
 	if len(c.RegistryLoadFiles) != 0 || len(c.RegistryApps) != 0 {
