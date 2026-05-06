@@ -75,10 +75,12 @@ Verbs:
             block. Authenticated SCP03; gated on --confirm-write.
             Dry-run by default. Uses Yubico extension INS=0xF1.
   import    Install a key set or trust anchor at one key reference,
-            dispatched by KID. Phase 5a (this build) supports SCP03
-            AES-128 import (--kid 01); SCP11 SD key import and
-            CA/OCE trust-anchor import are forthcoming. Authenticated
-            SCP03; gated on --confirm-write. Dry-run by default.
+            dispatched by KID. This build supports SCP03 AES-128
+            (--kid 01, Phase 5a) and SCP11 SD private key with
+            optional cert chain (--kid 11/13/15, Phase 5b). CA/OCE
+            trust-anchor import (--kid 10/20-2F) is forthcoming
+            (Phase 5c). Authenticated SCP03; gated on
+            --confirm-write. Dry-run by default.
 
 Use "scpctl sd keys <verb> -h" for per-verb flags.
 `)

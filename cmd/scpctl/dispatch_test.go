@@ -330,7 +330,7 @@ func TestDispatch_SDKeysHelpContent(t *testing.T) {
 		"--der",
 		"--confirm-delete-key",
 		"INS=0xF1", // Yubico-extension transparency
-		"Phase 5a", // import phase status visible to operators
+		"Phase 5c", // forthcoming work signal still visible to operators
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("'sd keys help' stdout missing %q; got:\n%s", want, stdout)

@@ -11,22 +11,24 @@ import (
 
 // TestSDKeysImport_DispatchByKID verifies the KID-category dispatch:
 // each KID lands at the right handler, with the not-yet-implemented
-// categories returning a clear "Phase 5b/5c" message rather than a
-// generic error.
+// categories returning a clear "Phase 5c" message rather than a
+// generic error. Phase 5a (SCP03) and Phase 5b (SCP11 SD) both reach
+// real handlers; only the CA/OCE category remains stubbed.
 func TestSDKeysImport_DispatchByKID(t *testing.T) {
 	cases := []struct {
-		name        string
-		kid         string
-		wantPhaseIn string // "5a" / "5b" / "5c"
-		wantUsage   bool   // true if dispatch should return *usageError
+		name             string
+		kid              string
+		stillStubbed     bool   // true if this category hasn't landed yet
+		wantPhaseInErr   string // for stillStubbed: "5c"
+		wantInHandlerErr string // for !stillStubbed: distinguishing token
 	}{
-		{name: "scp03", kid: "01", wantPhaseIn: "5a", wantUsage: false},
-		{name: "scp11a-sd", kid: "11", wantPhaseIn: "5b", wantUsage: true},
-		{name: "scp11b-sd", kid: "13", wantPhaseIn: "5b", wantUsage: true},
-		{name: "scp11c-sd", kid: "15", wantPhaseIn: "5b", wantUsage: true},
-		{name: "oce", kid: "10", wantPhaseIn: "5c", wantUsage: true},
-		{name: "klcc-low", kid: "20", wantPhaseIn: "5c", wantUsage: true},
-		{name: "klcc-high", kid: "2F", wantPhaseIn: "5c", wantUsage: true},
+		{name: "scp03", kid: "01", stillStubbed: false, wantInHandlerErr: "new-scp03"},
+		{name: "scp11a-sd", kid: "11", stillStubbed: false, wantInHandlerErr: "--key-pem"},
+		{name: "scp11b-sd", kid: "13", stillStubbed: false, wantInHandlerErr: "--key-pem"},
+		{name: "scp11c-sd", kid: "15", stillStubbed: false, wantInHandlerErr: "--key-pem"},
+		{name: "oce", kid: "10", stillStubbed: true, wantPhaseInErr: "5c"},
+		{name: "klcc-low", kid: "20", stillStubbed: true, wantPhaseInErr: "5c"},
+		{name: "klcc-high", kid: "2F", stillStubbed: true, wantPhaseInErr: "5c"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -37,25 +39,29 @@ func TestSDKeysImport_DispatchByKID(t *testing.T) {
 			env, buf := envForMock(mc)
 			args := []string{"--reader", "fake", "--kid", tc.kid, "--kvn", "01"}
 			err = cmdSDKeysImport(context.Background(), env, args)
-			if tc.wantUsage {
-				if err == nil {
-					t.Fatalf("expected usageError for not-yet-implemented category; got nil. output:\n%s", buf.String())
+			if err == nil {
+				t.Fatalf("expected error from dispatch (stub or handler-level usage); got nil. output:\n%s", buf.String())
+			}
+			if _, ok := err.(*usageError); !ok {
+				t.Errorf("err type = %T, want *usageError; err = %v", err, err)
+			}
+			switch tc.stillStubbed {
+			case true:
+				if !strings.Contains(err.Error(), "Phase "+tc.wantPhaseInErr) {
+					t.Errorf("stub error should name Phase %s; got %v", tc.wantPhaseInErr, err)
 				}
-				if _, ok := err.(*usageError); !ok {
-					t.Errorf("err type = %T, want *usageError; err = %v", err, err)
+			case false:
+				if !strings.Contains(err.Error(), tc.wantInHandlerErr) {
+					t.Errorf("handler-level error should mention %q (proves real handler was reached, not stub); got %v",
+						tc.wantInHandlerErr, err)
 				}
-				if !strings.Contains(err.Error(), "Phase "+tc.wantPhaseIn) {
-					t.Errorf("error should name Phase %s; got %v", tc.wantPhaseIn, err)
-				}
-			} else {
-				// SCP03 handler reached. Without the new-key flags
-				// this should produce a different usage error
-				// (missing required flags), not the dispatch error.
-				if err == nil {
-					t.Fatalf("expected SCP03 usage error (missing new-keys); got success")
-				}
-				if !strings.Contains(err.Error(), "new-scp03") {
-					t.Errorf("expected SCP03-handler usage error mentioning new-scp03 flags; got %v", err)
+				// And the message must NOT mention any Phase tag — that
+				// would mean we hit the stub instead of the real handler.
+				for _, phaseTag := range []string{"Phase 5a", "Phase 5b", "Phase 5c"} {
+					if strings.Contains(err.Error(), phaseTag) {
+						t.Errorf("dispatch hit a stub instead of the real handler (%s in error): %v",
+							phaseTag, err)
+					}
 				}
 			}
 		})
