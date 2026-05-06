@@ -67,7 +67,7 @@ Both binaries currently use insecure credentials; for a real deployment the exam
 
 - Wire protocol v1 stable for `Apdu` and `raw` round-trips.
 - Server-side handler tested end-to-end against the SCP-aware mock card via in-process bufconn.
-- Hardware testing planned alongside `cmd/scp-smoke` validation on YubiKey 5.7.2+.
+- Hardware testing planned alongside `cmd/scpctl` validation on YubiKey 5.7.2+.
 - mTLS configuration left to the caller deliberately — no library-defined defaults that could become the wrong default.
 
 Not yet:

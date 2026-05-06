@@ -1,6 +1,6 @@
 # APDU trace archive
 
-This directory holds wire-level APDU traces captured from real hardware sessions, archived as reference artifacts. Each trace is a complete record of one smoke-command run against a specific reader: every command sent, every response received, with timing.
+This directory holds wire-level APDU traces captured from real hardware sessions, archived as reference artifacts. Each trace is a complete record of one subcommand run against a specific reader: every command sent, every response received, with timing.
 
 ## What these are for
 
@@ -14,7 +14,7 @@ Three uses, in roughly the order we reach for them:
 
 ## Trace schema
 
-Traces are emitted by the `--apdu-trace <path>` flag on most `scpctl smoke` commands. The format is JSON with this shape:
+Traces are emitted by the `--apdu-trace <path>` flag on most `scpctl test` and `scpctl sd`/`scpctl piv` commands. The format is JSON with this shape:
 
 ```json
 {
@@ -42,7 +42,7 @@ Traces are emitted by the `--apdu-trace <path>` flag on most `scpctl smoke` comm
 Fields:
 
 - `schema` — version tag. Bump if the wire format changes incompatibly.
-- `profile` — which smoke command produced the trace; pairs with `reader` to identify the exact run.
+- `profile` — which subcommand produced the trace; pairs with `reader` to identify the exact run.
 - `notes` — context the operator captured this for (a bug being chased, a release validation, etc.).
 - `determinism` — reserved for flags that pin host-side randomness (host challenges, ephemeral keys) when reproducing a session is the goal. Empty in non-deterministic captures.
 - `exchanges[].command_hex` / `response_hex` — full APDU bytes including any 61xx GET RESPONSE chaining. Status word at the end of `response_hex` is also surfaced as `sw`.
@@ -59,10 +59,10 @@ OCE leaf certs sent on the wire are visible in plaintext within the PSO exchange
 ## Capturing new traces
 
 ```bash
-scpctl smoke <subcommand> ... --apdu-trace /tmp/<descriptive-name>.json
+scpctl test <subcommand> ... --apdu-trace /tmp/<descriptive-name>.json
 ```
 
-Any smoke command that touches the card supports `--apdu-trace`. The flag is non-destructive: it observes APDUs as they're sent and writes the JSON file at command exit. It does not change wire behavior or timing in a meaningful way (capture overhead is sub-microsecond per APDU on a modern Mac).
+Any subcommand that touches the card supports `--apdu-trace`. The flag is non-destructive: it observes APDUs as they're sent and writes the JSON file at command exit. It does not change wire behavior or timing in a meaningful way (capture overhead is sub-microsecond per APDU on a modern Mac).
 
 Add archived traces to this directory with a filename of the form:
 

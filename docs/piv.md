@@ -146,7 +146,7 @@ This is not paranoia. A wrong-cert provisioning that succeeds is a cert that has
 
 Destructive and credential-bearing `scpctl piv` commands require an explicit channel-mode choice: either `--scp11b` (with the trust flags `--trust-roots <pem>` or `--lab-skip-scp11-trust`) or `--raw-local-ok`. Specifying neither is a usage error; specifying both is a usage error.
 
-The fail-closed default exists because the predecessor smoke harness (`scp-smoke piv-provision` and `scp-smoke piv-reset`) used SCP11b unconditionally. An operator who copies a smoke command line to the new `scpctl piv` surface and forgets to type `--scp11b` should not silently get a downgraded raw session. Asking the operator to type one of two flags forces the channel-mode decision into every invocation.
+The fail-closed default exists to prevent a silent downgrade: a destructive PIV command run without `--scp11b` should produce a usage error, not silently fall through to a raw-mode session. Asking the operator to type one of two flags forces the channel-mode decision into every invocation.
 
 The threat model splits cleanly along the host-trust boundary:
 
