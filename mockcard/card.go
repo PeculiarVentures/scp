@@ -171,15 +171,13 @@ type Card struct {
 	// The SCP11b/SCP03 unwrap is unaffected — GET STATUS reaches the
 	// dispatch only when a session is open, so tests must establish
 	// authentication first.
-	RegistryISD       []MockRegistryEntry
-	RegistryApps      []MockRegistryEntry
-	RegistryLoadFiles []MockRegistryEntry
-
-	// loadCtx tracks in-flight INSTALL [for load] state across the
-	// LOAD command sequence. Nil when no load is in progress;
-	// populated by doInstallForLoad and cleared by the final LOAD
-	// block. See mockcard/install.go for the state machine.
-	loadCtx *installLoadContext
+	// GPState is the embedded GP card-content state (registries
+	// + in-flight INSTALL [for load] context). Embedding promotes
+	// RegistryISD/RegistryApps/RegistryLoadFiles for direct field
+	// access by tests; the actual GP command handlers are methods
+	// on *GPState defined in mockcard/gpstate.go and shared with
+	// the SCP03+GP combined mock (see scp03card.go).
+	*GPState
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -229,6 +227,7 @@ func New() (*Card, error) {
 		pivPINCounter: 3,
 		pivPUKCounter: 3,
 		pivObjects:    make(map[string][]byte),
+		GPState:       NewGPState(),
 	}, nil
 }
 
@@ -319,19 +318,19 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		return c.doGetData(cmd)
 
 	case 0xF2: // GP §11.4.2 GET STATUS
-		return c.doGetStatus(cmd)
+		return c.handleGetStatus(cmd), nil
 
 	case 0xF0: // GP §11.1.10 SET STATUS
-		return c.doSetStatus(cmd)
+		return c.handleSetStatus(cmd), nil
 
 	case 0xE6: // GP §11.5 INSTALL (for load + for install variants)
-		return c.doInstall(cmd)
+		return c.handleInstall(cmd), nil
 
 	case 0xE8: // GP §11.6 LOAD (CAP component bytes streamed in chunks)
-		return c.doLoad(cmd)
+		return c.handleLoad(cmd), nil
 
 	case 0xE4: // GP §11.2 DELETE
-		return c.doDelete(cmd)
+		return c.handleDelete(cmd), nil
 
 	case 0xE2: // GP §11.11 STORE DATA
 		// Mock just acknowledges — validating wire format is the

@@ -33,6 +33,24 @@ import (
 type MockCard struct {
 	Keys StaticKeys
 
+	// PlainHandler, if set, is invoked for every post-decrypt APDU
+	// before the built-in switch. Returning ok=true short-circuits
+	// dispatch with the supplied response; ok=false falls through
+	// to the default handlers (SELECT, GET DATA, PUT KEY, etc.).
+	//
+	// Used by mockcard.SCP03Card to compose the rich GP dispatch
+	// (INSTALL/LOAD/DELETE/GET STATUS) on top of this mock's SCP03
+	// handshake and secure-messaging layer. Without this hook, the
+	// GP dispatch and SCP03 handshake would have to be duplicated
+	// between two mock types; with it, the composition is trivial.
+	//
+	// The hook receives the post-decrypt command and decides
+	// whether to handle it. It is called BEFORE recorded-APDU
+	// capture, so a handler return of ok=true bypasses the
+	// recorded list — register-then-record yourself if you need
+	// both.
+	PlainHandler func(cmd *apdu.Command) (resp *apdu.Response, ok bool)
+
 	// Session state (nil until EXTERNAL AUTHENTICATE succeeds).
 	session *mockSession
 
@@ -365,6 +383,15 @@ func (c *MockCard) processSecure(cmd *apdu.Command) (*apdu.Response, error) {
 }
 
 func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, error) {
+	// Composition hook: let an embedding mock (mockcard.SCP03Card)
+	// handle GP card-content management commands before the
+	// SCP03-specific switch. Returning ok=true short-circuits.
+	if c.PlainHandler != nil {
+		cmd := &apdu.Command{INS: ins, P1: p1, P2: p2, Data: data}
+		if resp, ok := c.PlainHandler(cmd); ok {
+			return resp, nil
+		}
+	}
 	switch ins {
 	case 0xA4: // SELECT
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
