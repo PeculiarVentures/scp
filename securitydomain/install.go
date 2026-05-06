@@ -452,9 +452,14 @@ func (s *Session) installForInstall(ctx context.Context, opts InstallOptions) er
 		// P1=0x04 alone leaves the applet registered but not
 		// selectable on real cards — operators see the install
 		// succeed and then SELECT fails with a confusing SW.
-		// The combined form has been compatible with every
-		// JCOP/SafeNet/YubiKey implementation observed in the
-		// reference traces this package was built against.
+		//
+		// Spec-implemented; mock-validated. The "real cards
+		// reject 0x04 alone" claim above comes from the GP spec
+		// text and the coordination brief from the
+		// feat/sd-keys-cli session, not from end-to-end trace
+		// replay against live hardware. The mock accepts both
+		// 0x04 and 0x0C so existing tests stay portable; the
+		// production default of 0x0C is the wire-correct form.
 		P1:   0x0C,
 		P2:   0x00,
 		Data: data,

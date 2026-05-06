@@ -56,12 +56,17 @@ type DiscoveryTrace func(DiscoveryAttempt)
 //   - SW=6A82 (file not found): try the next candidate. The
 //     standard "this AID isn't here" signal.
 //   - SW=6A87 (Lc inconsistent / unexpected length): try the
-//     next candidate. SmartJac and some SafeNet variants
-//     answer 6A87 instead of 6A82 when the AID is unknown
-//     because their dispatcher rejects the SELECT before AID
-//     matching. Treating it as "not found" gives interop
+//     next candidate. Per the feat/sd-keys-cli coordination
+//     brief, some SmartJac and SafeNet GP card variants
+//     answer 6A87 rather than 6A82 when the AID is unknown
+//     because their dispatcher rejects the SELECT before
+//     AID matching. Treating it as "not found" gives interop
 //     against those cards without masking other 6A87 cases
-//     (the trace callback shows what happened).
+//     (the trace callback shows what happened). The
+//     attribution is from field reports relayed via that
+//     brief, not from a hardware-verified trace replay; the
+//     test fixture pins the host-side behavior against a
+//     scripted transport.
 //   - SW=6283 (selected file/application invalidated): the SD
 //     exists but is in TERMINATED/LOCKED state. Returns
 //     ErrLockedISD with the locked candidate; abort rather
