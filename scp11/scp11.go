@@ -584,8 +584,17 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 		return nil, fmt.Errorf("wrap command: %w", err)
 	}
 
-	// Send through the underlying transport.
-	resp, err := s.transport.Transmit(ctx, wrapped)
+	// Transport-layer chaining. transport.TransmitWithChaining splits
+	// wrapped.Data into ISO 7816-4 §5.1.1 chunks if it exceeds the
+	// short-Lc bound, sends each, and returns only the final chunk's
+	// response. Intermediate chunks return bare 9000 with no R-MAC;
+	// that's correct because the SCP wrap (and its MAC chain advance)
+	// happened ONCE above for the whole logical command. SCP03's
+	// Transmit uses the same pattern; SCP11 needs it for symmetric
+	// behavior on wrapped commands that exceed 255 bytes (cert
+	// installs, large object writes, anything that pads or grows
+	// past short-Lc once secure messaging is added).
+	resp, err := transport.TransmitWithChaining(ctx, s.transport, wrapped)
 	if err != nil {
 		return nil, fmt.Errorf("transmit: %w", err)
 	}

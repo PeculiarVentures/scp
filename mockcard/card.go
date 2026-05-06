@@ -155,6 +155,13 @@ type Card struct {
 	// same shape regardless of which path they took in.
 	pivObjects map[string][]byte
 
+	// chainBuffer accumulates data fields from a sequence of ISO
+	// 7816-4 §5.1.1 chained APDUs (CLA bit b5 = 0x10) until the
+	// final chunk arrives. processAPDU concatenates the data and
+	// dispatches once at the final chunk, mirroring real-card
+	// transport-level reassembly.
+	chainBuffer []byte
+
 	// RegistryISD, RegistryApps, RegistryLoadFiles back the GP
 	// GET STATUS handler. Tests populate these to control what the
 	// mock card claims is installed; an empty slice for any scope
@@ -228,6 +235,35 @@ func (c *Card) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// ISO 7816-4 §5.1.1 transport-level command chaining. Real cards
+	// reassemble chained chunks BEFORE applying any application or
+	// secure-messaging logic; we mirror that here. The chaining bit
+	// (CLA b5 = 0x10) on a chunk says "more chunks follow"; clear
+	// means "this is the final (or only) chunk." Intermediate
+	// chunks return 9000 with no data — the card has buffered them
+	// and is waiting for more. The final chunk is dispatched with
+	// CLA bit cleared and the full concatenated data field.
+	//
+	// scp11.Session.Transmit and scp03.Session.Transmit both wrap-
+	// then-chain: one SM wrap over the assembled command, then
+	// transport splits it. Without reassembly here, mockcard would
+	// see each chunk as a separate (mis-MAC'd) wrapped command and
+	// reject it — the SCP11 chaining regression test
+	// TestSCP11_Transmit_LongPayloadIsWrapThenChain pins this.
+	if cmd.CLA&0x10 != 0 {
+		c.chainBuffer = append(c.chainBuffer, cmd.Data...)
+		return mkSW(0x9000), nil
+	}
+	if len(c.chainBuffer) > 0 {
+		// Final chunk of a chain: assemble and dispatch with chain
+		// bit cleared.
+		assembled := *cmd
+		assembled.CLA &^= 0x10
+		assembled.Data = append(c.chainBuffer, cmd.Data...)
+		c.chainBuffer = nil
+		cmd = &assembled
+	}
+
 	if c.session != nil && channel.IsSecureMessaging(cmd.CLA) {
 		return c.processSecure(cmd)
 	}
@@ -278,6 +314,14 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 
 	case 0xF2: // GP §11.4.2 GET STATUS
 		return c.doGetStatus(cmd)
+
+	case 0xE2: // GP §11.11 STORE DATA
+		// Mock just acknowledges — validating wire format is the
+		// securitydomain package's job, not the mock's. Mirrors what
+		// scp03/mock.go does. Used by the SCP11 chaining regression
+		// test to exercise a long-payload command end-to-end through
+		// the wrap-then-chain layering.
+		return mkSW(0x9000), nil
 
 	case 0x88: // INTERNAL AUTHENTICATE (SCP11b handshake)
 		if underSM {
