@@ -48,7 +48,20 @@ func cmdSDKeys(ctx context.Context, env *runEnv, args []string) error {
 	case "export":
 		return cmdSDKeysExport(ctx, env, args[1:])
 	case "-h", "--help", "help":
-		fmt.Fprintln(env.out, "scpctl sd keys <list|export>")
+		fmt.Fprint(env.out, `scpctl sd keys - Security Domain key inventory and certificate export
+
+Usage:
+  scpctl sd keys <verb> [flags]
+
+Verbs:
+  list      List installed Security Domain key references with
+            optional certificate summaries. Read-only.
+  export    Export the certificate chain stored against one key
+            reference. PEM by default; --der for raw DER. Read-only.
+            Fails when no chain is stored unless --allow-empty.
+
+Use "scpctl sd keys <verb> -h" for per-verb flags.
+`)
 		return nil
 	}
 	return &usageError{msg: fmt.Sprintf("unknown keys subcommand %q", args[0])}
@@ -155,7 +168,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("sd keys list", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	scp03Flags := registerSCP03KeyFlags(fs)
+	scp03Flags := registerSCP03KeyFlags(fs, scp03Optional)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
@@ -348,7 +361,7 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 		"When the reference has no chain stored, exit 0 with a SKIP "+
 			"check (default behavior is FAIL exit 1). For inventory-walk "+
 			"scripts that iterate references and tolerate empties.")
-	scp03Flags := registerSCP03KeyFlags(fs)
+	scp03Flags := registerSCP03KeyFlags(fs, scp03Optional)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}

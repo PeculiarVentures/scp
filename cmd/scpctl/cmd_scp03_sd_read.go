@@ -36,7 +36,7 @@ func cmdSCP03SDRead(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("test scp03-sd-read", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}

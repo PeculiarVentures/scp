@@ -114,7 +114,7 @@ func cmdBootstrapSCP11a(ctx context.Context, env *runEnv, args []string) error {
 			"layer, so it captures POST-SCP03-wrapping bytes — exactly what "+
 			"the external capture sees from the OS side. No effect in "+
 			"dry-run mode (no APDUs are sent).")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}

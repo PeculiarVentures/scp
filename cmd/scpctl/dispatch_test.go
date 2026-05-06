@@ -308,6 +308,33 @@ func TestDispatch_SDKeysVerbs(t *testing.T) {
 	}
 }
 
+// TestDispatch_SDKeysHelpContent is a tighter version of the loose
+// TestDispatch_SDKeysVerbs check: 'scpctl sd keys help' must exit 0
+// AND the stdout must describe both verbs. Catches regressions where
+// a future change drops the verb list, prints the wrong subcommand,
+// or routes 'help' to the parent group instead of the keys handler.
+func TestDispatch_SDKeysHelpContent(t *testing.T) {
+	stdout, stderr, code := runScpctl(t, "sd", "keys", "help")
+	if code != 0 {
+		t.Errorf("'sd keys help' exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"scpctl sd keys",
+		"list",
+		"export",
+		"PEM",
+		"--der",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("'sd keys help' stdout missing %q; got:\n%s", want, stdout)
+		}
+	}
+	// Help must go to stdout (not stderr) so 'cmd | less' works.
+	if strings.Contains(stderr, "list") || strings.Contains(stderr, "export") {
+		t.Errorf("help content leaked to stderr; stderr:\n%s", stderr)
+	}
+}
+
 // TestDispatch_TopLevelUtilities verifies the readers/probe
 // dispatch paths reach their handlers. Both touch hardware so
 // they will fail at the PC/SC connect step; we test that the

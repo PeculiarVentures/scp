@@ -74,7 +74,7 @@ func cmdBootstrapOCE(ctx context.Context, env *runEnv, args []string) error {
 		"KVN to replace (0 = add new). Use this when rotating an existing OCE registration.")
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, bootstrap-oce runs in dry-run mode (validates inputs and reports planned operations without transmitting writes).")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}

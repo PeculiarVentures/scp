@@ -8,7 +8,7 @@
 //             key, cert, object, reset, provision) over the
 //             piv/session library
 //   - sd      Security Domain operations (info, reset, lock,
-//             unlock, terminate, OCE/SCP11a bootstraps)
+//             unlock, terminate, keys, OCE/SCP11a bootstraps)
 //   - oce     off-card OCE certificate diagnostics (host-only;
 //             does not touch a card)
 //
@@ -240,7 +240,7 @@ Groups:
               reset, provision.
 
   sd          Security Domain operations.
-              Wired: info, reset, lock, unlock, terminate,
+              Wired: info, reset, lock, unlock, terminate, keys,
               bootstrap-oce, bootstrap-scp11a, bootstrap-scp11a-sd.
 
   oce         Off-card OCE certificate diagnostics. Host-only;

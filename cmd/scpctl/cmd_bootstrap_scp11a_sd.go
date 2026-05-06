@@ -96,7 +96,7 @@ func cmdBootstrapSCP11aSD(ctx context.Context, env *runEnv, args []string) error
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, bootstrap-scp11a-sd runs in dry-run "+
 			"mode (validates inputs and reports planned operations without transmitting writes).")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}

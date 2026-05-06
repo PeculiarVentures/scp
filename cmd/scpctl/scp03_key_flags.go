@@ -10,19 +10,29 @@ import (
 	"github.com/PeculiarVentures/scp/scp03"
 )
 
-// scp03KeyFlags is the flag set every SCP03 command shares for
-// configuring the static key set used in the handshake. Three modes,
-// mutually exclusive:
+// scp03KeyFlags is the flag set SCP03-aware commands share for
+// configuring the static key set used in the handshake. The flags
+// are the same in both modes; what changes is the meaning of "no
+// flags set":
 //
-//	(no flags)              YubiKey factory: KVN=0xFF and the
-//	                        well-known publicly documented default
-//	                        keys (404142...4F). Same as the
-//	                        historical default.
+//	scp03Required  used by destructive bootstrap-style commands that
+//	               always open an SCP03 channel. With no flags, the
+//	               channel uses the YubiKey factory keys (KVN=0xFF,
+//	               well-known publicly documented values).
 //
-//	--scp03-keys-default    Explicit opt-in to the same factory
-//	                        defaults — useful for scripts that want
-//	                        to make the choice deliberate rather
-//	                        than implicit.
+//	scp03Optional  used by read-only commands (sd keys list/export)
+//	               that default to unauthenticated reads. With no
+//	               flags, the command opens unauthenticated and the
+//	               SCP03 path is skipped entirely. Setting any flag
+//	               opts the operator into an authenticated read.
+//
+// Flag forms (same in both modes):
+//
+//	--scp03-keys-default    Explicit opt-in to factory keys.
+//	                        In scp03Required this matches the
+//	                        implicit default; in scp03Optional this
+//	                        is how the operator opts into an
+//	                        authenticated read with factory keys.
 //
 //	--scp03-kvn <byte>
 //	--scp03-enc <hex>       Custom key set for cards whose SCP03
@@ -32,6 +42,7 @@ import (
 //	                        half-completed key rotation is impossible
 //	                        to misfire.
 type scp03KeyFlags struct {
+	mode       scp03FlagMode
 	useDefault *bool
 	kvn        *string
 	enc        *string
@@ -39,20 +50,56 @@ type scp03KeyFlags struct {
 	dek        *string
 }
 
+// scp03FlagMode selects the help-text wording for registerSCP03KeyFlags
+// so the same flag set can serve both required-auth (bootstrap) and
+// optional-auth (read-only) commands without confusing operators
+// about what "no flags" means.
+type scp03FlagMode int
+
+const (
+	// scp03Required: the command always opens an SCP03 channel.
+	// No flags = factory keys (current bootstrap behavior).
+	scp03Required scp03FlagMode = iota
+
+	// scp03Optional: the command opens unauthenticated by default
+	// and only opens SCP03 when at least one flag is set.
+	scp03Optional
+)
+
 // registerSCP03KeyFlags adds the SCP03 key flags to the given
-// FlagSet. Returns a handle to read parsed values and apply them
-// to a *scp03.Config.
-func registerSCP03KeyFlags(fs *flag.FlagSet) *scp03KeyFlags {
+// FlagSet, with help text appropriate to mode. Returns a handle
+// to read parsed values and apply them to a *scp03.Config.
+func registerSCP03KeyFlags(fs *flag.FlagSet, mode scp03FlagMode) *scp03KeyFlags {
+	// Help text for --scp03-keys-default and the custom-key trio
+	// varies by mode. The flag names and validation logic are
+	// identical; only the operator-facing wording changes so the
+	// help reflects what "no flags" actually does in this command.
+	var defaultHelp, customSuffix string
+	switch mode {
+	case scp03Required:
+		defaultHelp = "Explicit opt-in to YubiKey factory SCP03 keys (KVN=0xFF, " +
+			"well-known publicly documented values). Same as the implicit " +
+			"default for this command; useful for scripts that want to be " +
+			"explicit. Mutually exclusive with the --scp03-{kvn,enc,mac,dek} " +
+			"custom-key flags."
+		customSuffix = "Required together with --scp03-enc, --scp03-mac, " +
+			"--scp03-dek for cards whose keys have been rotated."
+	case scp03Optional:
+		defaultHelp = "Authenticate using YubiKey factory SCP03 keys (KVN=0xFF, " +
+			"well-known publicly documented values). Without any --scp03-* " +
+			"flag this command opens unauthenticated; pass this flag to " +
+			"force an authenticated read using factory keys. Mutually " +
+			"exclusive with the --scp03-{kvn,enc,mac,dek} custom-key flags."
+		customSuffix = "Implies SCP03-authenticated read. Required together " +
+			"with --scp03-enc, --scp03-mac, --scp03-dek for cards whose " +
+			"keys have been rotated."
+	}
+
 	return &scp03KeyFlags{
-		useDefault: fs.Bool("scp03-keys-default", false,
-			"Explicit opt-in to YubiKey factory SCP03 keys (KVN=0xFF, well-known "+
-				"publicly documented values). Same as the implicit default; useful "+
-				"for scripts that want to be explicit. Mutually exclusive with the "+
-				"--scp03-{kvn,enc,mac,dek} custom-key flags."),
+		mode:       mode,
+		useDefault: fs.Bool("scp03-keys-default", false, defaultHelp),
 		kvn: fs.String("scp03-kvn", "",
-			"SCP03 key version number, hex byte (e.g. 01, FF). Required together "+
-				"with --scp03-enc, --scp03-mac, --scp03-dek for cards whose keys "+
-				"have been rotated."),
+			"SCP03 key version number, hex byte (e.g. 01, FF). "+customSuffix),
 		enc: fs.String("scp03-enc", "",
 			"SCP03 channel encryption key, hex (16, 24, or 32 bytes for AES-128/192/256)."),
 		mac: fs.String("scp03-mac", "",

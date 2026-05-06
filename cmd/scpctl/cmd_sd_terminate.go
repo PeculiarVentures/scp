@@ -68,7 +68,7 @@ func cmdSDTerminate(ctx context.Context, env *runEnv, args []string) error {
 			"any operation. Modeled on 'sd reset's --confirm-reset-sd "+
 			"pattern — overloading a single confirm flag across "+
 			"reversible and irreversible operations is a foot-gun.")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}

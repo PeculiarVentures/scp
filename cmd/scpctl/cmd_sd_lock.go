@@ -65,7 +65,7 @@ func cmdSDLock(ctx context.Context, env *runEnv, args []string) error {
 		"Confirm destructive write. Without this flag, sd lock runs in "+
 			"dry-run mode (validates inputs and reports the planned "+
 			"transition without transmitting SET STATUS).")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
