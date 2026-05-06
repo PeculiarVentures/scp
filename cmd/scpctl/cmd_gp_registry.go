@@ -113,7 +113,7 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	dump := &registryDump{}
 	dump.ISD = walkRegistry(ctx, sd, securitydomain.StatusScopeISD, "ISD", report)
 	dump.Applications = walkRegistry(ctx, sd, securitydomain.StatusScopeApplications, "Applications", report)
-	dump.LoadFiles = walkRegistry(ctx, sd, securitydomain.StatusScopeLoadFilesAndModules, "LoadFiles", report)
+	dump.LoadFiles = walkLoadFiles(ctx, sd, report)
 	if dump.ISD != nil || dump.Applications != nil || dump.LoadFiles != nil {
 		data.Registry = dump
 	}

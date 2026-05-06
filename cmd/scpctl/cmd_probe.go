@@ -300,7 +300,7 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		dump := &registryDump{}
 		dump.ISD = walkRegistry(ctx, sd, securitydomain.StatusScopeISD, "ISD", report)
 		dump.Applications = walkRegistry(ctx, sd, securitydomain.StatusScopeApplications, "Applications", report)
-		dump.LoadFiles = walkRegistry(ctx, sd, securitydomain.StatusScopeLoadFilesAndModules, "LoadFiles", report)
+		dump.LoadFiles = walkLoadFiles(ctx, sd, report)
 		// Only attach Registry to Data if at least one scope produced
 		// or attempted output; otherwise the JSON has a meaningless
 		// empty registry object alongside the unrelated CRD fields.
@@ -369,8 +369,41 @@ func formatSCP(s cardrecognition.SCPInfo) string {
 // non-nil slice when the card returned no entries (SW=6A88), or a
 // populated slice when entries were returned.
 func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securitydomain.StatusScope, label string, report *Report) []registryEntryView {
+	return walkRegistryFetched(label, report, func() ([]securitydomain.RegistryEntry, string, error) {
+		entries, err := sd.GetStatus(ctx, scope)
+		return entries, "", err
+	})
+}
+
+// walkLoadFiles walks the Executable Load Files scope with the
+// LoadFilesAndModules -> LoadFiles fallback (see
+// securitydomain.GetStatusLoadFiles). The report check name is
+// always "GET STATUS scope=LoadFiles"; the detail string mentions
+// "modules omitted" when the card forced the fallback so the
+// operator can tell module names are absent from this card's
+// response rather than just absent from the data.
+func walkLoadFiles(ctx context.Context, sd *securitydomain.Session, report *Report) []registryEntryView {
+	return walkRegistryFetched("LoadFiles", report, func() ([]securitydomain.RegistryEntry, string, error) {
+		res, err := sd.GetStatusLoadFiles(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		var note string
+		if res.Scope == securitydomain.StatusScopeLoadFiles {
+			note = "modules omitted (card rejected LoadFilesAndModules; fell back to LoadFiles-only)"
+		}
+		return res.Entries, note, nil
+	})
+}
+
+// walkRegistryFetched is the shared shape for walkRegistry and
+// walkLoadFiles: invoke the supplied fetcher, classify the
+// result (skip/empty/populated), and translate to registry
+// entry views. The fetch closure returns (entries, fallbackNote,
+// err); the note is appended to the PASS detail when non-empty.
+func walkRegistryFetched(label string, report *Report, fetch func() ([]securitydomain.RegistryEntry, string, error)) []registryEntryView {
 	checkName := fmt.Sprintf("GET STATUS scope=%s", label)
-	entries, err := sd.GetStatus(ctx, scope)
+	entries, note, err := fetch()
 	if err != nil {
 		// SW=6982 (security status not satisfied) is the common
 		// authentication-required signal. Other SWs are reported
@@ -382,7 +415,11 @@ func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securit
 		// Empty (SW=6A88) is a successful "card has nothing in this
 		// scope" result, not an error. Record as PASS with a clear
 		// detail so consumers don't confuse empty with skipped.
-		report.Pass(checkName, "no entries")
+		detail := "no entries"
+		if note != "" {
+			detail = "no entries; " + note
+		}
+		report.Pass(checkName, detail)
 		return []registryEntryView{}
 	}
 
@@ -393,6 +430,9 @@ func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securit
 		aids = append(aids, hexEncode(e.AID))
 	}
 	summary := fmt.Sprintf("%d entries: %s", len(entries), strings.Join(aids, ", "))
+	if note != "" {
+		summary += "; " + note
+	}
 	report.Pass(checkName, summary)
 
 	views := make([]registryEntryView, 0, len(entries))
