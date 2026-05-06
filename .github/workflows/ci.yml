@@ -33,6 +33,25 @@ jobs:
       - name: Test
         run: go test -v -race -count=1 ./...
 
+  # The lint job runs golangci-lint v1.64.8 against the parent module
+  # plus each submodule below.
+  #
+  # install-mode: goinstall (set on every golangci-lint-action@v6 step)
+  # builds the v1.64.8 binary from source under the active Go toolchain
+  # — Go 1.26.2 from the setup-go step above — rather than downloading
+  # the pre-built binary, which is published built with Go 1.23.
+  # v1.64.8 binaries hard-refuse to lint a Go 1.26.2 codebase with:
+  #
+  #   "the Go language version (go1.23) used to build golangci-lint is
+  #    lower than the targeted Go version (1.26.2)"
+  #
+  # goinstall sidesteps that by rebuilding under the active toolchain.
+  # It's slightly slower than the binary download path (single-digit
+  # extra seconds per step, dominated by the lint run itself) but is
+  # the only working option until the pin bumps to a v2.x release that
+  # was published built against Go 1.26+. Bump deliberately when ready
+  # — v2.x changed the config schema, so a pin bump should land
+  # alongside any .golangci.yml that depends on the new shape.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -47,6 +66,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           args: --timeout=5m
 
   # CGo submodules. transport/pcsc wraps github.com/ebfe/scard which
@@ -176,6 +196,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           working-directory: transport/pcsc
           args: --timeout=5m
 
@@ -183,6 +204,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           working-directory: transport/pcsc/example
           args: --timeout=5m
 
@@ -190,6 +212,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           working-directory: cmd/scpctl
           args: --timeout=5m
 
@@ -216,6 +239,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           working-directory: transport/grpc
           args: --timeout=5m
 
@@ -223,6 +247,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           working-directory: transport/grpc/example
           args: --timeout=5m
 
