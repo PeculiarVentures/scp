@@ -286,6 +286,15 @@ Four command groups, non-overlapping purposes:
 
 `--install-params <hex>` and `--load-params <hex>` carry operator-supplied bytes verbatim into the INSTALL [for install] / [for load] parameters fields per GP §11.5.2.3. JC applets are sensitive to the C9/EF/C7/C8 TLV form here; the host does no TLV validation beyond hex parse and the 255-byte LV cap. Whitespace and `:` separators are accepted (e.g. `C9 04 49 4E 49 54` parses identically to `C90449494E4954`). Empty (default) sends a zero-length field, correct for applets that don't expect parameters.
 
+**Scope of `gp install`.** Plain (non-Delegated) Management on the SD that the SCP03 session is authenticated against. The following are **not implemented** and `gp install` does not pretend to be a substitute for tools that do:
+
+- **Delegated Management.** No first-class flag for DM tokens, no token receipt handling, no Authorized Receipt-of-Notification verification. Cards that require DM tokens reject the INSTALL with 6985/6982/6A80 depending on personalization. Operators with DM-required cards must use `--install-params` / `--load-params` to inject the vendor-specific payload and accept that the host will not validate it.
+- **DAP signing.** No host-side DAP signature computation, no DAP signature key management, no card-side `MandatedDAPVerification`-flag enforcement before LOAD. The `--load-hash hex:<digest>` mode passes a precomputed digest verbatim, which is how operators with DAP-signed flows feed in their out-of-band signature; the host does not produce one.
+- **Receipt verification.** Cards that emit install or load receipts have those receipts logged through the JSON output as raw bytes. They are NOT cryptographically validated. Receipt validation requires the issuer's verification public key, which is out of scope for this CLI.
+- **Loading via a DM-delegated SD.** INSTALL [for load] always targets the SD the SCP03 session is authenticated against; there is no chained delegation through an intermediate DAP/SSD.
+
+These limits exist because validating DM, DAP, and receipts against real cards requires personalization material this project has no access to. The protocol-level correctness for the surfaces above is in scope; the cryptographic verification is not yet implemented and the CLI will not pretend it is.
+
 `--load-hash <none|sha1|sha256|hex:DIGEST>` controls the load file data block hash. Default is `none` (no hash on the wire, LV field empty). `sha1` and `sha256` make the host compute the digest of the load image. `hex:DEADBEEF` sends an operator-supplied digest verbatim (used with DAP / vendor-signed flows). SD policy varies across cards: some require a particular algorithm, some reject any hash. The default of `none` matches the safest baseline; set this when the target SD is known to require it.
 
 `--expected-card-id <hex>` pins the card's CIN (GET DATA 0x0045) before any destructive APDU so fleet automation cannot accidentally write to the wrong card.

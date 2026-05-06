@@ -50,6 +50,46 @@ type gpInstallData struct {
 // inputs, computes load image hashes, prints what it would do)
 // without transmitting any APDU that mutates card state.
 //
+// SCOPE — what this command does NOT do:
+//
+//   - Delegated Management is not supported. The token-bearing
+//     INSTALL data fields exist in the wire builder
+//     (gp.BuildInstallForLoad / BuildInstallForInstall) and the
+//     CLI accepts --install-params / --load-params for vendor-
+//     specific install-data payloads, but no first-class flag for
+//     supplying a Delegated Management token, no token-receipt
+//     handling, no Authorized Receipt-of-Notification verification.
+//     A card that requires DM tokens will reject the INSTALL with
+//     6985 / 6982 / 6A80 depending on personalization.
+//
+//   - DAP (Data Authentication Pattern) signing is not supported
+//     beyond passing a precomputed digest verbatim via
+//     --load-hash hex:<digest>. The host does NOT compute a DAP
+//     signature, does NOT enforce a signature key, and does NOT
+//     verify card-side DAP-required flags before LOAD. Operators
+//     with DAP-required cards must compute the signature out of
+//     band and supply it via the install-data payload.
+//
+//   - Receipt verification is not supported. Cards that emit
+//     install / load receipts will return them in the response
+//     bytes; the receipts are NOT cryptographically validated by
+//     this CLI, only logged through the JSON output. Receipt
+//     validation requires the issuer's verification public key
+//     which is not modeled here.
+//
+//   - Loading via DM-delegated SD is not supported. INSTALL
+//     [for load] always targets the SD that the SCP03 session is
+//     authenticated against; there is no chained delegation.
+//
+// These limits exist because validating DM / DAP / receipts
+// against real cards requires personalization material this
+// project has no access to. The protocol-level correctness for
+// the surfaces above is in scope; the cryptographic verification
+// is not yet implemented and the CLI will not pretend it is.
+// See README.md "Verified profiles" / "Implemented capabilities"
+// / "Expansion targets" tiers — DM/DAP/receipts are expansion
+// targets, not implemented capabilities.
+//
 // Flags:
 //
 //	--cap <path>           CAP file to install (required)
