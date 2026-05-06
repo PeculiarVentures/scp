@@ -73,7 +73,7 @@ func TestSession_Install_HappyPath_RegistryReflectsState(t *testing.T) {
 
 func TestSession_Install_FailsAtInstallForLoad(t *testing.T) {
 	sess, mc := openInstallSession(t)
-	mc.FailNextInstallForLoad = 0x6A84 // not enough memory
+	mc.AddFault(mockcard.FailInstallForLoad(0x6A84)) // not enough memory
 
 	err := sess.Install(context.Background(), sampleOpts())
 	if err == nil {
@@ -119,7 +119,7 @@ func TestSession_Install_FailsAtInstallForLoad(t *testing.T) {
 
 func TestSession_Install_FailsAtLoadMidStream(t *testing.T) {
 	sess, mc := openInstallSession(t)
-	mc.FailLoadAtSeq = 2 // fail the third LOAD block
+	mc.AddFault(mockcard.FailLoadAtSeq(2, 0x6A84)) // fail the third LOAD block
 
 	opts := sampleOpts()
 	err := sess.Install(context.Background(), opts)
@@ -174,7 +174,7 @@ func TestSession_Install_FailsAtLoadMidStream(t *testing.T) {
 
 func TestSession_Install_FailsAtInstallForInstall(t *testing.T) {
 	sess, mc := openInstallSession(t)
-	mc.FailNextInstallForInstall = 0x6A80
+	mc.AddFault(mockcard.FailInstallForInstall(0x6A80))
 
 	opts := sampleOpts()
 	err := sess.Install(context.Background(), opts)
@@ -214,7 +214,7 @@ func TestSession_Install_FailsAtInstallForInstall(t *testing.T) {
 
 func TestSession_Install_AfterPartialFailure_DeleteThenRetrySucceeds(t *testing.T) {
 	sess, mc := openInstallSession(t)
-	mc.FailLoadAtSeq = 1
+	mc.AddFault(mockcard.FailLoadAtSeq(1, 0x6A84))
 
 	opts := sampleOpts()
 	if err := sess.Install(context.Background(), opts); err == nil {

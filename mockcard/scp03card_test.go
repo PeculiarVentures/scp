@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp03"
 )
@@ -163,28 +164,9 @@ func TestSCP03Card_GetStatus_PreSeededRegistry(t *testing.T) {
 func swOf(r *apdu.Response) uint16 { return uint16(r.SW1)<<8 | uint16(r.SW2) }
 
 func buildInstallForLoad(loadAID, sdAID, params []byte) []byte {
-	var b []byte
-	b = appendLV(b, loadAID)
-	b = appendLV(b, sdAID)
-	b = appendLV(b, nil)
-	b = appendLV(b, params)
-	b = appendLV(b, nil)
-	return b
+	return gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)
 }
 
 func buildInstallForInstall(loadAID, moduleAID, appletAID, privs []byte) []byte {
-	var b []byte
-	b = appendLV(b, loadAID)
-	b = appendLV(b, moduleAID)
-	b = appendLV(b, appletAID)
-	b = appendLV(b, privs)
-	b = appendLV(b, nil)
-	b = appendLV(b, nil)
-	return b
-}
-
-func appendLV(b, v []byte) []byte {
-	b = append(b, byte(len(v)))
-	b = append(b, v...)
-	return b
+	return gp.BuildInstallForInstallPayload(loadAID, moduleAID, appletAID, privs, nil, nil)
 }

@@ -250,7 +250,7 @@ func TestGPInstall_ConfirmWrite_HappyPath(t *testing.T) {
 func TestGPInstall_ConfirmWrite_PartialFailure_PrintsCleanupHint(t *testing.T) {
 	path := writeFixtureCAP(t)
 	mc := mockcard.NewSCP03Card(scp03.DefaultKeys)
-	mc.FailLoadAtSeq = 0 // fail the very first LOAD block
+	mc.AddFault(mockcard.FailLoadAtSeq(0, 0x6A84)) // fail the very first LOAD block
 
 	out, err := runGPInstall(t,
 		func() transport.Transport { return mc.Transport() },

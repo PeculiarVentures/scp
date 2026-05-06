@@ -119,8 +119,10 @@ func (s *Session) SetISDLifecycle(ctx context.Context, target LifecycleState) er
 		return fmt.Errorf("securitydomain: SET STATUS to %s: %w", target, err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("%w: SET STATUS to %s: SW=%04X",
-			ErrCardStatus, target, resp.StatusWord())
+		return &APDUError{
+			Operation: fmt.Sprintf("SET STATUS to %s", target),
+			SW:        resp.StatusWord(),
+		}
 	}
 	return nil
 }

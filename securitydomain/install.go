@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/gp"
 )
 
 // InstallStage identifies which stage of an install chain failed,
@@ -293,7 +294,7 @@ func validateAID(aid []byte, fieldName string) error {
 }
 
 func (s *Session) installForLoad(ctx context.Context, opts InstallOptions) error {
-	data := buildInstallForLoadPayload(
+	data := gp.BuildInstallForLoadPayload(
 		opts.LoadFileAID, opts.SDAID, opts.LoadHash, opts.LoadParams, opts.LoadToken)
 	cmd := &apdu.Command{
 		CLA:  clsGP,
@@ -372,7 +373,7 @@ func (s *Session) installForInstall(ctx context.Context, opts InstallOptions) er
 	if len(privs) == 0 {
 		privs = []byte{0x00}
 	}
-	data := buildInstallForInstallPayload(
+	data := gp.BuildInstallForInstallPayload(
 		opts.LoadFileAID, opts.ModuleAID, opts.AppletAID, privs,
 		opts.InstallParams, opts.InstallToken)
 	cmd := &apdu.Command{
@@ -427,39 +428,12 @@ func (s *Session) Delete(ctx context.Context, aid []byte, related bool) error {
 }
 
 // --- payload builders ---------------------------------------------------
-
-// buildInstallForLoadPayload encodes the INSTALL [for load] data
-// field per GP §11.5.2.3.1: each LV-prefixed field appears in
-// order with a 1-byte length. Empty fields encode as a single
-// 0x00 length byte (zero-length value).
-func buildInstallForLoadPayload(loadAID, sdAID, hash, params, token []byte) []byte {
-	var b []byte
-	b = appendLV(b, loadAID)
-	b = appendLV(b, sdAID)
-	b = appendLV(b, hash)
-	b = appendLV(b, params)
-	b = appendLV(b, token)
-	return b
-}
-
-// buildInstallForInstallPayload encodes the INSTALL [for install]
-// data field per GP §11.5.2.3.2.
-func buildInstallForInstallPayload(loadAID, moduleAID, appletAID, privs, params, token []byte) []byte {
-	var b []byte
-	b = appendLV(b, loadAID)
-	b = appendLV(b, moduleAID)
-	b = appendLV(b, appletAID)
-	b = appendLV(b, privs)
-	b = appendLV(b, params)
-	b = appendLV(b, token)
-	return b
-}
-
-func appendLV(b, v []byte) []byte {
-	b = append(b, byte(len(v)))
-	b = append(b, v...)
-	return b
-}
+//
+// Wire format builders live in package gp; this file just calls
+// into them. The builders are public so test fixtures driving
+// the mock APDU dispatch use the same code path the production
+// session does — a regression in wire layout fails everywhere at
+// once rather than diverging between host and tests.
 
 // --- helpers ------------------------------------------------------------
 
@@ -476,30 +450,6 @@ func checkSW(resp *apdu.Response, operation string) error {
 		return nil
 	}
 	return &APDUError{Operation: operation, SW: sw}
-}
-
-// APDUError is a non-9000 status word, surfaced as an error so
-// callers can distinguish "card said no" from "transport broke."
-// PartialInstallError unwraps to this when the failure was
-// card-side; errors.Is works against APDUError sentinel values
-// to match specific SWs.
-type APDUError struct {
-	Operation string
-	SW        uint16
-}
-
-func (e *APDUError) Error() string {
-	return fmt.Sprintf("%s rejected (SW=%04X)", e.Operation, e.SW)
-}
-
-// swFromError extracts the SW from an APDUError if err wraps one,
-// else returns 0 (transport-level error, no SW available).
-func swFromError(err error) uint16 {
-	var ae *APDUError
-	if errors.As(err, &ae) {
-		return ae.SW
-	}
-	return 0
 }
 
 func cloneBytes(b []byte) []byte {

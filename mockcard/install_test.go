@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/gp"
 )
 
 // helper: drive a single APDU through the card without going
@@ -30,38 +31,17 @@ func dispatchUnsecured(t *testing.T, c *Card, ins, p1, p2 byte, data []byte) *ap
 
 func swOf(r *apdu.Response) uint16 { return uint16(r.SW1)<<8 | uint16(r.SW2) }
 
-// buildInstallForLoadData constructs a well-framed INSTALL [for
-// load] payload per GP §11.5.2.3.1. Length-prefixed fields in
-// order: load file AID, SD AID, hash, params, token. Hash and
-// token are zero-length here because the mock doesn't validate
-// them.
+// buildInstallForLoadData wraps gp.BuildInstallForLoadPayload
+// for tests that don't carry hash/token. Hash and token are
+// zero-length here because the mock does not validate them.
 func buildInstallForLoadData(loadAID, sdAID, params []byte) []byte {
-	var b []byte
-	b = appendLV(b, loadAID)
-	b = appendLV(b, sdAID)
-	b = appendLV(b, nil) // hash (empty)
-	b = appendLV(b, params)
-	b = appendLV(b, nil) // token (empty)
-	return b
+	return gp.BuildInstallForLoadPayload(loadAID, sdAID, nil, params, nil)
 }
 
-// buildInstallForInstallData constructs INSTALL [for install]
-// payload per GP §11.5.2.3.2.
+// buildInstallForInstallData wraps gp.BuildInstallForInstallPayload
+// for tests that don't carry install params/token.
 func buildInstallForInstallData(loadAID, moduleAID, appletAID, privs []byte) []byte {
-	var b []byte
-	b = appendLV(b, loadAID)
-	b = appendLV(b, moduleAID)
-	b = appendLV(b, appletAID)
-	b = appendLV(b, privs)
-	b = appendLV(b, nil) // install_params (empty)
-	b = appendLV(b, nil) // install_token (empty)
-	return b
-}
-
-func appendLV(b, v []byte) []byte {
-	b = append(b, byte(len(v)))
-	b = append(b, v...)
-	return b
+	return gp.BuildInstallForInstallPayload(loadAID, moduleAID, appletAID, privs, nil, nil)
 }
 
 // --- INSTALL [for load] -------------------------------------------------

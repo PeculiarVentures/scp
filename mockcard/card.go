@@ -315,22 +315,21 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		return c.doSelect(cmd, underSM)
 
 	case 0xCA: // GET DATA
+		// GPState answers identity tags (0x42 IIN, 0x45 CIN)
+		// when configured; everything else falls through to the
+		// SCP11 mock's own GET DATA handler.
+		if resp, ok := c.GPState.HandleGPCommand(cmd); ok {
+			return resp, nil
+		}
 		return c.doGetData(cmd)
 
-	case 0xF2: // GP §11.4.2 GET STATUS
-		return c.handleGetStatus(cmd), nil
-
-	case 0xF0: // GP §11.1.10 SET STATUS
-		return c.handleSetStatus(cmd), nil
-
-	case 0xE6: // GP §11.5 INSTALL (for load + for install variants)
-		return c.handleInstall(cmd), nil
-
-	case 0xE8: // GP §11.6 LOAD (CAP component bytes streamed in chunks)
-		return c.handleLoad(cmd), nil
-
-	case 0xE4: // GP §11.2 DELETE
-		return c.handleDelete(cmd), nil
+	case 0xF2, 0xF0, 0xE6, 0xE8, 0xE4:
+		// GP card-content management (GET STATUS, SET STATUS,
+		// INSTALL, LOAD, DELETE). Single delegation point shared
+		// with mockcard.SCP03Card so a regression in any handler
+		// surfaces in both protocols' tests.
+		resp, _ := c.GPState.HandleGPCommand(cmd)
+		return resp, nil
 
 	case 0xE2: // GP §11.11 STORE DATA
 		// Mock just acknowledges — validating wire format is the

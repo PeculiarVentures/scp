@@ -7,17 +7,22 @@ import (
 	"github.com/PeculiarVentures/scp/tlv"
 )
 
-// GPState is the GlobalPlatform card-content management state that
-// can be shared by multiple secure-channel mock fronts (SCP11 in
-// mockcard.Card, SCP03 in mockcard.SCP03Card). It owns the three
-// registry slices plus the in-flight INSTALL [for load] context,
-// and provides the GP §11.x command handlers as methods.
+// GPState is the GlobalPlatform card-content management state
+// shared by mockcard.Card (SCP11) and mockcard.SCP03Card (SCP03).
+// It owns the three registry slices, the in-flight INSTALL [for
+// load] context, and the optional card-identity values (IIN,
+// CIN), and provides the GP §11.x command handlers as methods.
 //
 // Tests usually access the registry slices directly through the
 // embedding mock type's promoted fields (e.g. card.RegistryISD).
 // GPState does not export per-handler entry points because the
 // expected entry path is always through the embedding mock's APDU
 // dispatch.
+//
+// GPState models card state and only card state. Test affordances
+// like fault injection live on the embedding type (SCP03Card) via
+// AddFault, not as fields on GPState — keeping the production-
+// shaped model free of test-only switches.
 type GPState struct {
 	// RegistryISD, RegistryApps, RegistryLoadFiles back the GP
 	// GET STATUS handler. Tests populate these to control what the
@@ -33,24 +38,6 @@ type GPState struct {
 	// populated by handleInstallForLoad and cleared by the final
 	// LOAD block.
 	loadCtx *installLoadContext
-
-	// FailNextInstallForLoad, if non-zero, makes the next
-	// INSTALL [for load] return this SW instead of 9000. Cleared
-	// after firing once. Used by Install failure-recovery tests
-	// to simulate card-side rejection at stage 1.
-	FailNextInstallForLoad uint16
-
-	// FailLoadAtSeq, if >= 0, makes the LOAD block with this
-	// sequence number return SW=6A84 (not enough memory).
-	// Default zero-value 0 would fail the very first block; set
-	// to -1 explicitly to disable. The handler decrements
-	// FailLoadAtSeq toward -1 internally so it fires only once.
-	FailLoadAtSeq int
-
-	// FailNextInstallForInstall, if non-zero, makes the next
-	// INSTALL [for install] return this SW instead of 9000.
-	// Cleared after firing once.
-	FailNextInstallForInstall uint16
 
 	// IIN is the Issuer Identification Number per GP §B.3 (5
 	// bytes typical, ISO 7812 BCD). Returned by GET DATA tag
@@ -68,11 +55,9 @@ type GPState struct {
 	CIN []byte
 }
 
-// NewGPState returns a fresh GP state with empty registries and no
-// load in progress. FailLoadAtSeq is initialized to -1 (no
-// failure injection) so tests that don't opt into failure mode
-// don't accidentally trigger one.
-func NewGPState() *GPState { return &GPState{FailLoadAtSeq: -1} }
+// NewGPState returns a fresh GP state with empty registries and
+// no load in progress.
+func NewGPState() *GPState { return &GPState{} }
 
 // HandleGPCommand dispatches a GP card-content management APDU. It
 // returns (nil, false) if the INS byte is not a recognized GP
@@ -198,11 +183,6 @@ func (g *GPState) handleInstall(cmd *apdu.Command) *apdu.Response {
 }
 
 func (g *GPState) handleInstallForLoad(cmd *apdu.Command) *apdu.Response {
-	if g.FailNextInstallForLoad != 0 {
-		sw := g.FailNextInstallForLoad
-		g.FailNextInstallForLoad = 0
-		return mkSW(sw)
-	}
 	d := cmd.Data
 	loadAID, d, ok := readLV(d)
 	if !ok {
@@ -244,11 +224,6 @@ func (g *GPState) handleInstallForLoad(cmd *apdu.Command) *apdu.Response {
 }
 
 func (g *GPState) handleInstallForInstall(cmd *apdu.Command) *apdu.Response {
-	if g.FailNextInstallForInstall != 0 {
-		sw := g.FailNextInstallForInstall
-		g.FailNextInstallForInstall = 0
-		return mkSW(sw)
-	}
 	d := cmd.Data
 	loadAID, d, ok := readLV(d)
 	if !ok {
@@ -309,10 +284,6 @@ func (g *GPState) handleLoad(cmd *apdu.Command) *apdu.Response {
 	seq := cmd.P2
 	if seq != g.loadCtx.expectedSeq {
 		return mkSW(0x6A86)
-	}
-	if g.FailLoadAtSeq >= 0 && int(seq) == g.FailLoadAtSeq {
-		g.FailLoadAtSeq = -1 // fire once
-		return mkSW(0x6A84)  // not enough memory
 	}
 	g.loadCtx.bytesLoaded = append(g.loadCtx.bytesLoaded, cmd.Data...)
 	g.loadCtx.expectedSeq++

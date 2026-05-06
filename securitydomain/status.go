@@ -389,7 +389,10 @@ func (s *Session) GetStatus(ctx context.Context, scope StatusScope) ([]RegistryE
 			// Referenced data not found: empty registry for this scope.
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("%w: GET STATUS scope=%s: SW=%04X", ErrCardStatus, scope, sw)
+			return nil, &APDUError{
+				Operation: fmt.Sprintf("GET STATUS scope=%s", scope),
+				SW:        sw,
+			}
 		}
 	}
 }

@@ -57,41 +57,14 @@ func (s *Session) getIdentityTag(ctx context.Context, tag uint16, fieldName stri
 	}
 	data, err := s.GetData(ctx, tag, nil)
 	if err != nil {
-		// GetData wraps SW=6A88 as a non-success APDUError that
-		// surfaces in err. Detect that case and return the
-		// sentinel so callers can distinguish "card said no"
-		// from "transport broke."
+		// SW=6A88 means the card does not expose this identity
+		// field; surface as the typed sentinel so callers can
+		// distinguish "card said no" from a transport failure.
 		var ae *APDUError
 		if errors.As(err, &ae) && ae.SW == 0x6A88 {
-			return nil, fmt.Errorf("%s: %w", fieldName, ErrCardIdentityMissing)
-		}
-		// GetData currently formats the error string itself; the
-		// underlying SW for non-6A88 cases is already in err.
-		// Wrap with the field name so the caller knows which
-		// identity tag failed.
-		if isSW6A88(err) {
 			return nil, fmt.Errorf("%s: %w", fieldName, ErrCardIdentityMissing)
 		}
 		return nil, fmt.Errorf("%s: %w", fieldName, err)
 	}
 	return data, nil
-}
-
-// isSW6A88 detects the SW=6A88 case from a GetData-style error
-// string. The existing GetData wraps non-9000 SWs into a
-// formatted error string (e.g. "securitydomain: get data: SW=6A88")
-// rather than a typed error; this helper matches the SW byte
-// pattern. When GetData is upgraded to return a typed APDUError
-// this fallback can be removed.
-func isSW6A88(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	for i := 0; i+4 <= len(s); i++ {
-		if s[i] == '6' && s[i+1] == 'A' && s[i+2] == '8' && s[i+3] == '8' {
-			return true
-		}
-	}
-	return false
 }

@@ -20,6 +20,11 @@ import (
 // GP registry without authentication should use mockcard.Card
 // (SCP11) or extend GPState with a no-op auth wrapper.
 //
+// Fault injection: tests register *Fault entries via AddFault to
+// exercise card-side error paths (mid-LOAD failure, INSTALL
+// rejection, etc.). Faults are evaluated before the GP dispatch
+// in registration order; the first match short-circuits.
+//
 // Lifetime / mutation:
 //   - Tests typically configure SCP03 keys via NewSCP03Card,
 //     then optionally seed RegistryISD / RegistryApps /
@@ -36,6 +41,9 @@ type SCP03Card struct {
 	// INSTALL/LOAD/DELETE/GET STATUS handlers. Promoted fields
 	// (RegistryISD, etc.) are accessed directly by tests.
 	*GPState
+
+	// faults registered by AddFault, evaluated in order.
+	faults []*Fault
 }
 
 // NewSCP03Card creates a combined SCP03+GP mock configured with
@@ -52,15 +60,44 @@ func NewSCP03Card(keys scp03.StaticKeys) *SCP03Card {
 	}
 
 	// Plug GP dispatch into the SCP03 mock's plain-command path.
-	// The hook is invoked after SM unwrap; if HandleGPCommand
-	// recognizes the INS it returns the response and short-
-	// circuits; otherwise the SCP03 mock's built-in switch
-	// handles it (SELECT, GET DATA, PUT KEY, etc.).
+	// The hook is invoked after SM unwrap; faults are checked
+	// before GP dispatch so a fault on INS=0xE6/P1=0x02 fires
+	// without touching loadCtx.
 	mc.PlainHandler = func(cmd *apdu.Command) (*apdu.Response, bool) {
+		if resp, ok := c.checkFaults(cmd); ok {
+			return resp, true
+		}
 		return gp.HandleGPCommand(cmd)
 	}
 
 	return c
+}
+
+// AddFault registers a fault to fire on a matching APDU. Faults
+// are checked in registration order; the first match short-
+// circuits dispatch. Returns the card so tests can chain calls.
+func (c *SCP03Card) AddFault(f *Fault) *SCP03Card {
+	c.faults = append(c.faults, f)
+	return c
+}
+
+// checkFaults walks the fault list in registration order. The
+// first match returns its response and, if Once, the fault is
+// flagged fired so subsequent calls fall through to default
+// dispatch.
+func (c *SCP03Card) checkFaults(cmd *apdu.Command) (*apdu.Response, bool) {
+	for _, f := range c.faults {
+		if f.fired {
+			continue
+		}
+		if f.Match != nil && f.Match(cmd) {
+			if f.Once {
+				f.fired = true
+			}
+			return f.Response, true
+		}
+	}
+	return nil, false
 }
 
 // Transport returns a transport.Transport backed by this mock.
