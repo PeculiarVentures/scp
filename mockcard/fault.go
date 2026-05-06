@@ -54,10 +54,22 @@ func FailInstallForLoad(sw uint16) *Fault {
 }
 
 // FailInstallForInstall returns a one-shot fault that rejects
-// the next INSTALL [for install] (INS=0xE6, P1=0x04) with the
-// supplied SW. Convenience for stage-3 failure recovery tests.
+// FailInstallForInstall returns a one-shot fault that rejects
+// the next INSTALL [for install] APDU with the supplied SW.
+// Matches any P1 with the install bit (0x04) set per GP Card
+// Spec v2.3.1 §11.5.2.1 table 11-49 — that catches both 0x04
+// (install only) and 0x0C (combined install + make-selectable,
+// the production default since the gp install P1 fix). Test
+// fixtures stay portable across the two encodings without
+// having to know which one the host code uses.
 func FailInstallForInstall(sw uint16) *Fault {
-	return FailINS(0xE6, 0x04, 0x00, sw)
+	return &Fault{
+		Match: func(cmd *apdu.Command) bool {
+			return cmd.INS == 0xE6 && cmd.P1&0x04 != 0 && cmd.P2 == 0x00
+		},
+		Response: mkSW(sw),
+		Once:     true,
+	}
 }
 
 // FailLoadAtSeq returns a one-shot fault that rejects the LOAD
