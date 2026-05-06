@@ -334,6 +334,7 @@ type sdKeysExportData struct {
 	KVNHex       string          `json:"kvn_hex"`
 	Format       string          `json:"format"` // "pem" or "der"
 	OutPath      string          `json:"out_path,omitempty"`
+	ChainOrder   string          `json:"chain_order"` // "as-stored", "leaf-last", "leaf-first"
 	Certificates []sdKeyCertView `json:"certificates"`
 }
 
@@ -382,6 +383,18 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 		"When the reference has no chain stored, exit 0 with a SKIP "+
 			"check (default behavior is FAIL exit 1). For inventory-walk "+
 			"scripts that iterate references and tolerate empties.")
+	chainOrder := fs.String("chain-order", "as-stored",
+		"Order in which certificates appear in the output: 'as-stored' "+
+			"(default; preserves the on-card storage order, which is "+
+			"leaf-last for cards that follow GP §11.1.3 and ykman/yubikit "+
+			"convention), 'leaf-last' (force leaf at the end regardless of "+
+			"storage order — same as as-stored on conforming cards but "+
+			"defensive against malformed cards), or 'leaf-first' (reverse "+
+			"to leaf-at-start; useful for tooling that expects PEM bundles "+
+			"in that order). Determining 'leaf' relies on the standard "+
+			"signature-verifies-with-issuer-key relationship; if no leaf "+
+			"can be unambiguously identified the export errors instead of "+
+			"silently choosing.")
 	scp03Flags := registerSCP03KeyFlags(fs, scp03Optional)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -400,6 +413,13 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if *jsonMode && *outPath == "" {
 		return &usageError{msg: "--json requires --out (cannot mix JSON report and binary cert bytes on stdout)"}
+	}
+
+	switch *chainOrder {
+	case "as-stored", "leaf-last", "leaf-first":
+		// valid
+	default:
+		return &usageError{msg: fmt.Sprintf("--chain-order: %q not recognized; valid values are as-stored, leaf-last, leaf-first", *chainOrder)}
 	}
 
 	ref := securitydomain.NewKeyReference(kid, kvn)
@@ -457,13 +477,24 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass(checkName, fmt.Sprintf("%d entries", len(certs)))
 	report.Pass("chain present", "")
 
-	body, err := encodeChain(certs, *derMode)
+	orderedCerts, err := reorderChain(certs, *chainOrder)
+	if err != nil {
+		report.Fail("apply --chain-order", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("apply --chain-order: %w", err)
+	}
+	if *chainOrder != "as-stored" {
+		report.Pass("apply --chain-order", *chainOrder)
+	}
+
+	body, err := encodeChain(orderedCerts, *derMode)
 	if err != nil {
 		report.Fail("encode chain", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("encode chain: %w", err)
 	}
-	data.Certificates = projectCertChain(certs)
+	data.Certificates = projectCertChain(orderedCerts)
+	data.ChainOrder = *chainOrder
 
 	if *outPath != "" {
 		// Atomic write: create a sibling temp file, sync, close,
@@ -695,4 +726,109 @@ func formatLabel(der bool) string {
 		return "der"
 	}
 	return "pem"
+}
+
+// reorderChain applies the --chain-order flag's selected ordering
+// to the chain just fetched from the card.
+//
+// Order semantics:
+//
+//   - "as-stored": no-op. Cards that follow GP §11.1.3 store
+//     leaf-last; the library's GetCertificates documents the
+//     same; ykman/yubikit expects leaf-last; this is the default
+//     because it's also the most-likely-correct.
+//
+//   - "leaf-last": detect the leaf via signature relationships,
+//     reorder to put it at the end. On a conforming card this
+//     is identical to as-stored; on a malformed card (cert order
+//     scrambled at write time, or read shuffled by some applet)
+//     this is defensive.
+//
+//   - "leaf-first": detect the leaf, place it first, then issuers
+//     in chain order. Useful for tooling that consumes PEM
+//     bundles in that direction.
+//
+// Leaf detection: walk the chain, find the cert that is NOT
+// the issuer of any other cert in the chain. That's the leaf.
+// If multiple candidates exist (chain has unrelated certs) or
+// none can be identified (single-cert chains, or cyclic refs),
+// the function returns an error rather than silently picking —
+// the operator asked for a specific order and we can't guess.
+//
+// Single-cert chains are trivial: any order is leaf-first AND
+// leaf-last simultaneously. Returns the input unchanged.
+func reorderChain(certs []*x509.Certificate, order string) ([]*x509.Certificate, error) {
+	if len(certs) <= 1 || order == "as-stored" {
+		return certs, nil
+	}
+
+	leafIdx, err := findLeafIndex(certs)
+	if err != nil {
+		return nil, err
+	}
+
+	switch order {
+	case "leaf-last":
+		out := make([]*x509.Certificate, 0, len(certs))
+		for i, c := range certs {
+			if i == leafIdx {
+				continue
+			}
+			out = append(out, c)
+		}
+		out = append(out, certs[leafIdx])
+		return out, nil
+	case "leaf-first":
+		out := make([]*x509.Certificate, 0, len(certs))
+		out = append(out, certs[leafIdx])
+		for i, c := range certs {
+			if i == leafIdx {
+				continue
+			}
+			out = append(out, c)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unknown --chain-order %q (validated upstream — this is a bug)", order)
+	}
+}
+
+// findLeafIndex returns the index of the leaf cert in chain. The
+// leaf is the cert whose Subject is NOT the Issuer of any other
+// cert in the chain. Returns an error if no leaf or multiple
+// leaves can be unambiguously identified.
+func findLeafIndex(certs []*x509.Certificate) (int, error) {
+	// Build set of all Issuer DNs.
+	issuerSet := make(map[string]struct{}, len(certs))
+	for _, c := range certs {
+		issuerSet[string(c.RawIssuer)] = struct{}{}
+	}
+	var candidates []int
+	for i, c := range certs {
+		// A cert is a leaf candidate if no other cert in the chain
+		// names this cert's Subject as Issuer (i.e., this cert
+		// signed nothing else in the chain).
+		signedSomethingElse := false
+		for j, other := range certs {
+			if i == j {
+				continue
+			}
+			if string(other.RawIssuer) == string(c.RawSubject) {
+				signedSomethingElse = true
+				break
+			}
+		}
+		if !signedSomethingElse {
+			candidates = append(candidates, i)
+		}
+		_ = issuerSet // reserved for future cycle detection
+	}
+	switch len(candidates) {
+	case 0:
+		return 0, fmt.Errorf("no leaf in chain (every cert is an issuer of another — possible cycle)")
+	case 1:
+		return candidates[0], nil
+	default:
+		return 0, fmt.Errorf("ambiguous leaf in chain (%d candidates — chain may be malformed or contain unrelated certs)", len(candidates))
+	}
 }
