@@ -253,6 +253,14 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	if cfg == nil {
 		return nil, fmt.Errorf("%w: Config is required (cfg.Keys cannot be nil)", ErrInvalidConfig)
 	}
+	// Shallow copy so we don't mutate the caller's Config. The fields
+	// we override below (SecurityLevel) are scalars, so a shallow copy
+	// is enough to isolate the side effect; the slice-typed Keys
+	// fields are read-only here. Earlier versions modified cfg in
+	// place, which surprised callers reusing a shared config object
+	// across sessions.
+	local := *cfg
+	cfg = &local
 	if len(cfg.Keys.ENC) == 0 || len(cfg.Keys.MAC) == 0 || len(cfg.Keys.DEK) == 0 {
 		return nil, fmt.Errorf("%w: Config.Keys must be set; for factory-fresh cards explicitly use scp03.DefaultKeys (test keys, no security)", ErrInvalidConfig)
 	}

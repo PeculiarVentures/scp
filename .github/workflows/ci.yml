@@ -46,7 +46,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           args: --timeout=5m
 
   # CGo submodules. transport/pcsc wraps github.com/ebfe/scard which
@@ -176,21 +176,21 @@ jobs:
       - name: golangci-lint transport/pcsc
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           working-directory: transport/pcsc
           args: --timeout=5m
 
       - name: golangci-lint transport/pcsc/example
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           working-directory: transport/pcsc/example
           args: --timeout=5m
 
       - name: golangci-lint cmd/scpctl
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           working-directory: cmd/scpctl
           args: --timeout=5m
 
@@ -215,13 +215,49 @@ jobs:
       - name: golangci-lint transport/grpc
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           working-directory: transport/grpc
           args: --timeout=5m
 
       - name: golangci-lint transport/grpc/example
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           working-directory: transport/grpc/example
           args: --timeout=5m
+
+  # govulncheck scans imports for known vulnerabilities. Pinned tool
+  # version so a vendor advisory landing during a release window
+  # doesn't fail CI on an unrelated PR; bump deliberately.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install pcsclite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcsclite-dev
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Run govulncheck (root module)
+        run: govulncheck ./...
+
+      - name: Run govulncheck (transport/pcsc)
+        working-directory: transport/pcsc
+        run: govulncheck ./...
+
+      - name: Run govulncheck (cmd/scpctl)
+        working-directory: cmd/scpctl
+        run: govulncheck ./...
+
+      - name: Run govulncheck (transport/grpc)
+        working-directory: transport/grpc
+        run: govulncheck ./...

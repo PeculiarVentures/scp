@@ -419,6 +419,13 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	if cfg == nil {
 		return nil, fmt.Errorf("%w: Config is required (use YubiKeyDefaultSCP11bConfig() or StrictGPSCP11bConfig() as a starting point)", ErrInvalidConfig)
 	}
+	// Shallow copy so we don't mutate the caller's Config. The fields
+	// we override below (SecurityLevel) are scalars; the slice and
+	// pointer fields we read are not mutated. Earlier versions modified
+	// cfg in place, which surprised callers reusing a shared config
+	// across sessions or applets.
+	local := *cfg
+	cfg = &local
 	if cfg.SecurityLevel == 0 {
 		cfg.SecurityLevel = channel.LevelFull
 	}

@@ -153,3 +153,30 @@ func TestOpen_NilTransport_RejectsExplicitly(t *testing.T) {
 		t.Errorf("error should mention transport is required; got: %v", err)
 	}
 }
+
+// TestOpen_DoesNotMutateCallerConfig confirms scp11.Open shallow-
+// copies its Config argument before applying defaults like the
+// implicit SecurityLevel. Earlier versions mutated the caller's
+// Config in place, which surprised callers reusing a config across
+// sessions or holding a pointer that another goroutine read in
+// parallel. Open is allowed to fail (mock card with no trust path
+// fails post-validation) — the side-effect check on the caller's
+// pointer happens regardless of outcome.
+func TestOpen_DoesNotMutateCallerConfig(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg.SecurityLevel = 0
+	cfg.InsecureSkipCardAuthentication = true
+	wantLevel := cfg.SecurityLevel
+	_, _ = Open(context.Background(), mc.Transport(), cfg)
+	if cfg.SecurityLevel != wantLevel {
+		t.Errorf("Open mutated caller's Config.SecurityLevel: got 0x%X, want 0x%X",
+			cfg.SecurityLevel, wantLevel)
+	}
+	// Reference channel.LevelFull so the import stays used regardless
+	// of how Open is rewritten in the future.
+	_ = channel.LevelFull
+}

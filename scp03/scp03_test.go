@@ -3,6 +3,7 @@ package scp03
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -480,3 +481,35 @@ func TestSCP03_Transmit_LongPayloadIsWrapThenChain(t *testing.T) {
 		}
 	}
 }
+
+// TestOpen_DoesNotMutateCallerConfig confirms scp03.Open shallow-
+// copies its Config argument before applying defaults like the
+// implicit SecurityLevel. Earlier versions mutated the caller's
+// Config in place, which surprised callers reusing a config across
+// sessions or holding a pointer that another goroutine read in
+// parallel. Open is allowed to fail (we hand it a transport that
+// errors) — the side-effect check happens regardless of outcome.
+func TestOpen_DoesNotMutateCallerConfig(t *testing.T) {
+	cfg := &Config{Keys: DefaultKeys, SecurityLevel: 0}
+	wantLevel := cfg.SecurityLevel
+	_, _ = Open(context.Background(), &errorTransport{}, cfg)
+	if cfg.SecurityLevel != wantLevel {
+		t.Errorf("Open mutated caller's Config.SecurityLevel: got 0x%X, want 0x%X",
+			cfg.SecurityLevel, wantLevel)
+	}
+}
+
+type errorTransport struct{}
+
+func (e *errorTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	return nil, errTransportTestFailed
+}
+func (e *errorTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+	return nil, errTransportTestFailed
+}
+func (e *errorTransport) Close() error { return nil }
+func (e *errorTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
+
+var errTransportTestFailed = fmt.Errorf("transport failed (test)")
