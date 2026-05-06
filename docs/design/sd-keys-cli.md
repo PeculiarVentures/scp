@@ -1,6 +1,6 @@
 # `sd keys` and `sd allowlist` CLI plan
 
-Status: proposal
+Status: proposal (revision 2 — incorporates review feedback)
 Audience: project maintainers
 Scope: closing the operator-facing gaps between `scpctl sd` and the underlying `securitydomain.Session` API. Not a `ykman` clone.
 
@@ -9,6 +9,8 @@ Scope: closing the operator-facing gaps between `scpctl sd` and the underlying `
 A code-first comparison of `scpctl` and `Yubico/yubikey-manager` was written against the `gp/main-body` branch (commit `0ffb653`-era) and surfaced a single high-value parity gap: a generic, key-centric Security Domain CLI surface composed from the existing `securitydomain.Session` primitives.
 
 That comparison is a useful starting point but is partly stale relative to current `main`. This document captures the prioritized, current-state plan.
+
+Revision 2 incorporates review feedback on revision 1: phase numbering and split for `generate` vs `import`; fail-by-default semantics for `sd keys export` when no chain is present; authenticated-fallback support for the read-only commands so the design holds beyond YubiKey; explicit `unknown` handling for non-canonical KIDs; and a tightened semantic split between OCE / CA trust-anchor import and SD key certificate-chain storage.
 
 ## What's already done that the input comparison treats as missing
 
@@ -33,12 +35,13 @@ The CLI also already covers more than the input describes:
 
 ## What's actually missing in the CLI
 
-Three things, in the order they should land:
+Five things, in five phases. Read-only first, then writes split by hazard level (allowlist before key delete, generate before import):
 
-1. **`sd keys list`** and **`sd keys export`** — read-only key/cert presentation.
+1. **`sd keys list`** and **`sd keys export`** — read-only key/cert presentation. SCP03 authenticated-fallback support so the design holds for cards that gate key-information or cert-store reads behind authentication.
 2. **`sd allowlist get` / `set` / `clear`** — library is complete; CLI is the gap. SCP11a production policies need it.
-3. **`sd keys delete`** — destructive, distinct confirm gate.
-4. **`sd keys import`** and **`sd keys generate`** — write-side completion.
+3. **`sd keys delete`** — destructive, distinct confirm gate. Lands together with the YubiKey SCP11c write-authorization measurement (see below).
+4. **`sd keys generate`** — on-card EC key generation. Single card-side operation, single output (SPKI). Lower hazard than import.
+5. **`sd keys import`** — KID-dispatched key install. Higher hazard: SCP03 triple parsing, EC private key handling, public-cert / chain semantics, replace-KVN, SKI derivation.
 
 The bootstrap flows (`bootstrap-oce`, `bootstrap-scp11a`, `bootstrap-scp11a-sd`) stay. They encode the fresh-card sequencing that avoids the factory-key consumption foot-gun and they are a better operator workflow than composing the lower-level primitives by hand. The new commands sit beside them, not in place of them.
 
@@ -49,17 +52,45 @@ The bootstrap flows (`bootstrap-oce`, `bootstrap-scp11a`, `bootstrap-scp11a-sd`)
 - A speculative shared "secure-channel profile" abstraction across commands. Useful if and when concrete flag duplication becomes painful — defer until then.
 - A separate `gp` command group on `main`. The `gp/main-body` work is on its own branch; if and when it merges, GP destructive operations are GP differentiation, not `ykman` parity.
 
+## Authentication model for read-only commands
+
+The default path is unauthenticated. The library exposes `OpenUnauthenticated` and the operations `sd keys list` and `sd keys export` rely on (`GetKeyInformation`, `GetSupportedCaIdentifiers`, `GetCertificates`) do not call `requireOCEAuth()` — they work without an established channel on YubiKey today.
+
+But the read-permissions are card-defined, not standard. A non-YubiKey GP card may reasonably require SCP03 authentication before returning the Key Information Template or the cert store. The design has to allow for that without making YubiKey operators do extra work.
+
+Behavior:
+
+```text
+sd keys list, sd keys export
+
+  no auth flag set:
+    Open unauthenticated. Optional sections (KLOC/KLCC, per-ref
+    cert fetch when no chain) fail soft as SKIPs. Required reads
+    (KIT for list; cert chain for export with no --allow-empty)
+    fail hard.
+
+  --scp03[-keys-default] or --scp03-{kvn,enc,mac,dek}:
+    Open SCP03-authenticated. Same key-flag semantics as
+    bootstrap-* commands (registerSCP03KeyFlags helper). Auth
+    failure is FAIL, not SKIP — the operator explicitly asked for
+    auth and the card rejected it.
+```
+
+SCP11a authenticated fallback is a Phase 1b follow-up if there is demand. The OCE-key / chain / trust-root flag surface is substantial and the read-only use case for SCP11a is rare (SCP11a is primarily a write channel). Adding it now would be speculative.
+
+The default-unauth-with-opt-in-auth pattern is consistent with existing project conventions and avoids regressing the YubiKey ergonomics.
+
 ## Command surface
 
 ### `sd keys list`
 
-Read-only. Unauthenticated session.
+Read. Default unauthenticated; opens SCP03-authenticated when SCP03 flags are present.
 
 Composes:
 
 - `GetKeyInformation()` for KID/KVN/component summary.
 - `GetSupportedCaIdentifiers(true, true)` for KLOC/KLCC SKIs.
-- `GetCertificates(ref)` per key reference that has a cert slot.
+- `GetCertificates(ref)` per key reference.
 
 Output (`data` block):
 
@@ -69,15 +100,19 @@ Output (`data` block):
     {
       "kid": 1,
       "kvn": 255,
+      "kid_hex": "0x01",
+      "kvn_hex": "0xFF",
       "kind": "scp03",
-      "components": ["aes", "aes", "aes"]
+      "components": [{"id": 192, "type": 136}]
     },
     {
       "kid": 17,
       "kvn": 1,
+      "kid_hex": "0x11",
+      "kvn_hex": "0x01",
       "kind": "scp11a-sd",
-      "components": ["ec-public"],
-      "ca_identifier": { "kloc": "..." },
+      "components": [{"id": 240, "type": 80}],
+      "ca_ski": "AABBCC...",
       "certificates": [
         {"subject": "...", "spki_fingerprint_sha256": "..."}
       ]
@@ -86,15 +121,29 @@ Output (`data` block):
 }
 ```
 
-`kind` is derived host-side from `kid` (0x01 → scp03, 0x10/0x20-0x2F → ca-public, 0x11 → scp11a-sd, 0x13 → scp11b-sd, 0x15 → scp11c-sd).
+`kind` is derived host-side from `kid`:
 
-No private material in output ever. KCV is fine, raw key bytes are not.
+```text
+0x01           → "scp03"
+0x10           → "ca-public"
+0x11           → "scp11a-sd"
+0x13           → "scp11b-sd"
+0x15           → "scp11c-sd"
+0x20–0x2F      → "ca-public"   (Yubico KLCC extension range)
+anything else  → "unknown"
+```
 
-Flags: `--reader`, `--json`. No write gates.
+The `unknown` case is explicit. Cards from other vendors may install references at non-canonical KIDs; those entries are still reported with their authoritative KID/KVN bytes, just without a host-side classification. Forcing every key into a known kind would lie about the card.
+
+A future revision may add a `profile` field to the data block (e.g. `"yubikey"`, `"generic-gp"`, `"unknown"`) once profile detection is independently useful elsewhere. Not a Phase 1 commitment.
+
+No private material in output ever. KCV / SPKI fingerprints / public SKIs only.
+
+Flags: `--reader`, `--json`, `--scp03-*` (auth fallback). No write gates.
 
 ### `sd keys export`
 
-Read-only. Unauthenticated session.
+Read. Default unauthenticated; opens SCP03-authenticated when SCP03 flags are present.
 
 Writes the certificate chain for one key reference as PEM (or DER on `--der`).
 
@@ -102,7 +151,23 @@ Writes the certificate chain for one key reference as PEM (or DER on `--der`).
 scpctl sd keys export --kid 0x11 --kvn 1 --out chain.pem
 ```
 
-Composes: `GetCertificates(ref)`. SKIPs cleanly (exit 0, JSON-visible) when the reference has no stored chain.
+Composes: `GetCertificates(ref)`.
+
+**No-chain semantics:**
+
+```text
+default behavior:
+  exit 1, FAIL check named "chain present", no output file written.
+  An automation that piped through this command must not silently
+  proceed as if it had received material.
+
+--allow-empty:
+  exit 0, SKIP check named "chain present", JSON-visible
+  "certificates": []. For inventory scripts that want to walk a
+  list of references and skip ones with no stored chain.
+```
+
+The asymmetry with `sd keys list` is deliberate. `list` is fundamentally an inventory call where empty cells are normal (most SCP03 references have no cert chain). `export` is a targeted retrieval where the operator named one reference and asked for its chain. Empty there is a precise condition the operator should know about.
 
 ### `sd allowlist get|set|clear`
 
@@ -141,24 +206,26 @@ Authenticated SCP03 or SCP11a. Gated on `--confirm-write`. On-card key generatio
 scpctl sd keys generate --kid 0x11 --kvn 1 [--replace-kvn 0] --out sd-pub.pem --confirm-write [--scp03 ...]
 ```
 
-Composes `GenerateECKey`. If the kid is not an SCP11 SD slot, refuse host-side.
+Composes `GenerateECKey`. If the kid is not an SCP11 SD slot (0x11 / 0x13 / 0x15), refuse host-side.
 
 ### `sd keys import`
 
-Authenticated. Gated on `--confirm-write`. Dispatches by KID:
+Authenticated. Gated on `--confirm-write`. KID-dispatched.
 
-| KID                   | Material                                                                  | Library call                       |
-|-----------------------|---------------------------------------------------------------------------|------------------------------------|
-| `0x01`                | SCP03 K-ENC:K-MAC:K-DEK triple, AES-128/192/256                           | `PutSCP03Key`                      |
-| `0x10`, `0x20–0x2F`   | OCE / KLCC public key (cert-as-input), with optional cert chain + SKI     | `PutECPublicKey` + `StoreCertificates` + `StoreCaIssuer` |
-| `0x11`, `0x13`, `0x15`| SCP11 SD EC private key, with optional cert chain                         | `PutECPrivateKey` + `StoreCertificates` |
+**Two distinct semantic categories** — keep them clearly separated to avoid the earlier category error of treating OCE chains as card-stored SD cert bundles:
+
+| KID                     | Category                        | Library calls                                 | Cert handling                          |
+|-------------------------|---------------------------------|-----------------------------------------------|----------------------------------------|
+| `0x01`                  | SCP03 key set                   | `PutSCP03Key`                                 | n/a                                    |
+| `0x10`, `0x20–0x2F`     | OCE / CA trust anchor           | `PutECPublicKey` + `StoreCaIssuer`            | OCE leaf chain is **wire-only**; do NOT call `StoreCertificates` for trust anchors unless the target profile explicitly stores OCE chains on-card. |
+| `0x11`, `0x13`, `0x15`  | SD key (SCP11 endpoint key)     | `PutECPrivateKey` + optional `StoreCertificates` | Chain stored against the SD key ref via STORE DATA when `--certs` is given. |
 
 Input forms accepted:
 
 - `--key-pem path` (private or public per kid)
-- `--scp03-keys hex:hex:hex` for SCP03
-- `--certs path` (PEM bundle) — chain to associate with the key
-- `--ski hex` — explicit SKI override for CA imports (default: derived from leaf cert)
+- `--scp03-keys hex:hex:hex` for SCP03 (or `--scp03-enc/mac/dek` triple for symmetry with auth flags)
+- `--certs path` (PEM bundle) — only meaningful for the SD-key category; rejected with a clear usage error for the trust-anchor category unless `--profile` explicitly opts in
+- `--ski hex` — explicit SKI override for trust-anchor imports (default: derived from leaf cert)
 - `--replace-kvn N` — corresponds to library `replaceKvn`
 
 The opinionated bootstrap flows still exist and remain the recommended path for fresh cards. `sd keys import` is for operators who already have an established trust path and want explicit control.
@@ -187,7 +254,7 @@ This is *not* a blocker for `sd keys list/export` or `sd allowlist`.
 All new commands emit the standard `Report` (see `docs/scpctl.md`). Specifically:
 
 - `subcommand` is `"sd keys list"` etc.
-- `checks` includes one entry per significant operation (e.g. `"key info fetch"`, `"certificate fetch (kid=0x11 kvn=1)"`).
+- `checks` includes one entry per significant operation (e.g. `"key info fetch"`, `"certificate fetch (kid=0x11 kvn=1)"`, `"chain present"` for export).
 - `data` carries the structured payload above.
 - Lab/trust skips remain visible (`lab_skip_scp11_trust: true` propagates from the underlying SCP11 open).
 - Exit codes: `0` clean, `1` failure, `2` usage.
@@ -196,11 +263,12 @@ All new commands emit the standard `Report` (see `docs/scpctl.md`). Specifically
 
 | Phase | Commands                                              | Confirm gate(s)                | Library work                                        |
 |-------|-------------------------------------------------------|--------------------------------|-----------------------------------------------------|
-| 1     | `sd keys list`, `sd keys export`                      | none (read-only)               | none                                                |
+| 1     | `sd keys list`, `sd keys export`, SCP03 auth fallback | none (read-only)               | none                                                |
+| 1b    | SCP11a auth fallback for read-only commands           | none                           | none — gated on demand                              |
 | 2     | `sd allowlist get` / `set` / `clear`                  | `--confirm-write` for set/clear | possibly add `Session.GetAllowlist(ref)`            |
-| 3     | `sd keys delete`                                      | `--confirm-delete-key`         | none                                                |
-| 3a    | YubiKey SCP11c write integration test                 | n/a (test-only)                | none unless test fails → add `SecurityDomainWritePolicy` |
-| 4     | `sd keys import`, `sd keys generate`                  | `--confirm-write`              | none                                                |
+| 3     | `sd keys delete` + YubiKey SCP11c write integration test | `--confirm-delete-key`     | none unless test fails → add `SecurityDomainWritePolicy` |
+| 4     | `sd keys generate`                                    | `--confirm-write`              | none                                                |
+| 5     | `sd keys import`                                      | `--confirm-write`              | none                                                |
 
 Each phase is one PR. No phase rolls forward without the prior phase's tests passing on a real card.
 
