@@ -11,6 +11,8 @@ type sdTerminateData struct {
 	LifecycleBefore string `json:"lifecycle_before,omitempty"`
 	LifecycleAfter  string `json:"lifecycle_after,omitempty"`
 	Terminated      bool   `json:"terminated"`
+	// LastSW: see sdLockData.LastSW. Same shape, same purpose.
+	LastSW string `json:"last_sw,omitempty"`
 }
 
 // cmdSDTerminate transitions the Issuer Security Domain to the
@@ -124,6 +126,7 @@ func cmdSDTerminate(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if err := sd.SetISDLifecycle(ctx, securitydomain.LifecycleTerminated); err != nil {
 		sd.Close()
+		data.LastSW = extractLifecycleSW(err)
 		report.Fail("terminate", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd terminate: SET STATUS: %w", err)

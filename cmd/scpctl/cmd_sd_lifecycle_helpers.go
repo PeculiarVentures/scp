@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/securitydomain"
@@ -41,4 +42,35 @@ func readISDLifecycle(ctx context.Context, t transport.Transport) (securitydomai
 		return 0, fmt.Errorf("ISD GET STATUS returned no entries")
 	}
 	return securitydomain.LifecycleState(entries[0].Lifecycle), nil
+}
+
+// extractLifecycleSW returns the raw status word a card returned
+// for a failed SET STATUS, or 0 if err didn't originate from a
+// card-side rejection (transport error, OCE-auth refusal, etc.).
+//
+// The lifecycle data structs (sdLockData, sdUnlockData,
+// sdTerminateData) each carry a LastSW string field for JSON
+// output; this helper is the single extraction point so all three
+// commands populate that field consistently.
+//
+// Per the external review on feat/sd-keys-cli, Finding 10:
+// 'lifecycle behavior varies across cards [...] the CLI should
+// preserve raw lifecycle byte and raw SW in JSON for every failed
+// transition.' The structured field lets an operator tell card-
+// side rejections (6985 conditions of use, 6982 security status,
+// 6A88 referenced data not found) apart from host-side encoding
+// problems without parsing the human-readable Detail string.
+//
+// Returns the SW as an uppercase 4-digit hex string ("6985",
+// "6A88") for direct inclusion in JSON, or "" if no LifecycleError
+// could be unwrapped from err.
+func extractLifecycleSW(err error) string {
+	if err == nil {
+		return ""
+	}
+	var lerr *securitydomain.LifecycleError
+	if errors.As(err, &lerr) {
+		return fmt.Sprintf("%04X", lerr.SW)
+	}
+	return ""
 }

@@ -2,6 +2,9 @@ package securitydomain_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/scp03"
@@ -125,5 +128,74 @@ func TestLifecycleState_String(t *testing.T) {
 			t.Errorf("LifecycleState(0x%02X).String() = %q, want %q",
 				byte(tc.state), got, tc.want)
 		}
+	}
+}
+
+// TestLifecycleError_PreservesSW pins the structured-error contract
+// added for Finding 10 of the external review on feat/sd-keys-cli:
+// 'lifecycle behavior varies across cards [...] the CLI should
+// preserve raw lifecycle byte and raw SW in JSON for every failed
+// transition.'
+//
+// The contract:
+//   - SetISDLifecycle returns *LifecycleError on a non-9000 SW
+//   - LifecycleError exposes the raw SW for callers that need it
+//   - errors.Is(err, ErrCardStatus) still works (Unwrap)
+//   - errors.As lets callers extract the typed error
+//
+// This test exercises the type directly because doSetStatus in
+// mockcard unconditionally returns 9000; adding fault injection
+// to the mock just for this test would be more code than the
+// type's surface area. Tests that drive the full CLI command JSON
+// path live alongside the lifecycle commands themselves
+// (cmd_sd_lock_test.go, etc.) and exercise the populated
+// data.LastSW field once mockcard fault-injection lands.
+func TestLifecycleError_PreservesSW(t *testing.T) {
+	cases := []struct {
+		name   string
+		target securitydomain.LifecycleState
+		sw     uint16
+		hex    string
+	}{
+		{"conditions of use", securitydomain.LifecycleCardLocked, 0x6985, "6985"},
+		{"security status", securitydomain.LifecycleSecured, 0x6982, "6982"},
+		{"referenced data not found", securitydomain.LifecycleTerminated, 0x6A88, "6A88"},
+		{"unexpected SW", securitydomain.LifecycleSecured, 0x6F00, "6F00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &securitydomain.LifecycleError{Target: tc.target, SW: tc.sw}
+
+			// SW field is directly accessible for telemetry.
+			if err.SW != tc.sw {
+				t.Errorf("SW = %04X, want %04X", err.SW, tc.sw)
+			}
+
+			// Error() format includes the SW as 4-digit hex.
+			msg := err.Error()
+			if !strings.Contains(msg, tc.hex) {
+				t.Errorf("Error() %q should contain SW %s", msg, tc.hex)
+			}
+			// And the target lifecycle name.
+			if !strings.Contains(msg, tc.target.String()) {
+				t.Errorf("Error() %q should contain target %s", msg, tc.target)
+			}
+
+			// errors.Is unwraps to ErrCardStatus so existing
+			// callers that branch on the sentinel keep working.
+			if !errors.Is(err, securitydomain.ErrCardStatus) {
+				t.Errorf("errors.Is(err, ErrCardStatus) = false; should be true via Unwrap")
+			}
+
+			// errors.As recovers the typed error after wrapping.
+			wrapped := fmt.Errorf("sd lock: SET STATUS: %w", err)
+			var lerr *securitydomain.LifecycleError
+			if !errors.As(wrapped, &lerr) {
+				t.Errorf("errors.As after wrap should succeed; got false")
+			}
+			if lerr != nil && lerr.SW != tc.sw {
+				t.Errorf("after errors.As: SW = %04X, want %04X", lerr.SW, tc.sw)
+			}
+		})
 	}
 }

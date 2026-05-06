@@ -11,6 +11,18 @@ type sdLockData struct {
 	LifecycleBefore string `json:"lifecycle_before,omitempty"`
 	LifecycleAfter  string `json:"lifecycle_after,omitempty"`
 	Locked          bool   `json:"locked"`
+	// LastSW carries the raw card-side status word for a failed
+	// SET STATUS, as a 4-digit uppercase hex string (e.g. "6985"
+	// for conditions-of-use, "6982" for security-status,
+	// "6A88" for referenced-data-not-found). Empty when the
+	// transition succeeded or when the failure didn't originate
+	// from a card-side rejection (transport error, OCE-auth
+	// refusal). Per the external review on feat/sd-keys-cli,
+	// Finding 10: lifecycle JSON should preserve raw SW for
+	// every failed transition so an operator can distinguish
+	// 'card policy rejected this transition' from 'host encoded
+	// wrong APDU' without parsing the free-form Detail string.
+	LastSW string `json:"last_sw,omitempty"`
 }
 
 // cmdSDLock transitions the Issuer Security Domain to the
@@ -131,6 +143,7 @@ func cmdSDLock(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if err := sd.SetISDLifecycle(ctx, securitydomain.LifecycleCardLocked); err != nil {
 		sd.Close()
+		data.LastSW = extractLifecycleSW(err)
 		report.Fail("lock", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd lock: SET STATUS: %w", err)

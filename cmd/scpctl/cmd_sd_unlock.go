@@ -11,6 +11,8 @@ type sdUnlockData struct {
 	LifecycleBefore string `json:"lifecycle_before,omitempty"`
 	LifecycleAfter  string `json:"lifecycle_after,omitempty"`
 	Unlocked        bool   `json:"unlocked"`
+	// LastSW: see sdLockData.LastSW. Same shape, same purpose.
+	LastSW string `json:"last_sw,omitempty"`
 }
 
 // cmdSDUnlock transitions the Issuer Security Domain from
@@ -107,6 +109,7 @@ func cmdSDUnlock(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if err := sd.SetISDLifecycle(ctx, securitydomain.LifecycleSecured); err != nil {
 		sd.Close()
+		data.LastSW = extractLifecycleSW(err)
 		report.Fail("unlock", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd unlock: SET STATUS: %w", err)
