@@ -24,23 +24,26 @@ import (
 //   - Applet AID list from the Applet component (when present;
 //     library packages omit it).
 //   - Component inventory: name, tag byte, and total byte length.
+//   - Imports: per-package AID + version, Java Card runtime
+//     version inferred from the imported javacard.framework
+//     package version.
 //
-// What this parser does NOT do (intentionally, deferred to
-// Appendix B work):
+// What this parser does NOT do (intentionally):
 //
-//   - Concatenate components into a LOAD-ready byte stream. That
-//     belongs with the INSTALL/LOAD command builders that consume
-//     it; building the helper here without an executable consumer
-//     is dead code. CAPComponent.Raw is exposed so future builders
-//     can compose it themselves.
 //   - Parse Method, Class, ConstantPool, Descriptor, or any other
-//     component beyond Header and Applet. Those are required for
-//     bytecode verification or full applet inspection but are not
-//     needed to describe a CAP on disk for an operator.
+//     component beyond Header, Applet, and Import. Those are
+//     required for bytecode verification or full applet
+//     inspection but are not needed to describe a CAP on disk for
+//     an operator.
 //   - Validate cross-component references (constant pool offsets
 //     into Class, install_method_offset into Method, etc.). A
 //     malformed CAP that would fail card-side validation can still
-//     parse here as long as Header and Applet are well-formed.
+//     parse here as long as Header, Applet, and Import are
+//     well-formed.
+//
+// CAPFile.LoadImage builds the LOAD-ready byte stream for the
+// INSTALL [for load] flow; see loadimage.go for the policy
+// (Debug + Descriptor excluded; component order per JC VM Spec).
 //
 // References:
 //   - Java Card VM Specification §6 (CAP file format).
@@ -251,16 +254,16 @@ type CAPComponent struct {
 	// is therefore 3 + DeclaredSize. The MVP inspector reads
 	// len(Raw) for the size column and never concatenates.
 	//
-	// Future LOAD command builders (Appendix B) must NOT blindly
-	// concatenate Raw across every component in CAPFile.Components.
-	// Convention across Java Card converters and tooling excludes
-	// the Debug component (source line numbers, method names) and
-	// the Descriptor component (reflection metadata) from the on-
-	// card load image: neither is needed for execution, both waste
-	// EEPROM, and some card runtimes reject the load when they're
-	// included. The future LoadImage helper should accept an
-	// inclusion policy (default: exclude Debug and Descriptor)
-	// rather than treat Components as a flat byte stream.
+	// Callers building a LOAD-ready byte stream should use
+	// CAPFile.LoadImage rather than concatenating Raw across every
+	// component in CAPFile.Components. Convention across Java Card
+	// converters and tooling excludes the Debug component (source
+	// line numbers, method names) and the Descriptor component
+	// (reflection metadata) from the on-card load image: neither
+	// is needed for execution, both waste EEPROM, and some card
+	// runtimes reject the load when they're included. LoadImage
+	// applies that policy by default and exposes a hook for
+	// callers that need a different exclusion set.
 	Raw []byte
 }
 

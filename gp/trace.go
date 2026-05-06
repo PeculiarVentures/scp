@@ -16,13 +16,13 @@ import "time"
 //	"select"            applet or SD SELECT
 //	"registry"          GET STATUS walks
 //	"cap_inspect"       host-side CAP parsing milestones (no APDUs)
+//	"install"           INSTALL [for load] + LOAD chunks + INSTALL [for install]
+//	"delete"            DELETE for applet or load file
+//	"dry_run"           host-side preview path before any write APDU
 //
-// Future destructive-path work (Appendix B) introduces "install"
-// and "delete" phases for INSTALL [for load|install] and DELETE
-// command flows, plus "dry_run" for the host-side preview path
-// that bootstrap-oce already uses. The trace event shape does
-// not change to accommodate them; only the Phase string set
-// grows.
+// New phases extend the string set without changing the
+// TraceEvent shape. Add the constant and document the semantics
+// alongside the existing entries.
 type TraceEvent struct {
 	// Timestamp of the event, populated by the sink at Record time
 	// when zero. Allowing the caller to set it preserves the option

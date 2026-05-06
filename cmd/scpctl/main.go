@@ -117,11 +117,12 @@ var testCommands = map[string]func(ctx context.Context, env *runEnv, args []stri
 
 // gpCommands maps the gp-group subcommand names. The gp group is
 // the operator surface for generic GlobalPlatform card-content
-// management, distinct from the YubiKey-flavored sd group: probe
-// and registry are read-path operations on arbitrary GP cards;
-// cap is a host-side sub-grouping for CAP file utilities. Future
-// destructive applet-management commands (install, delete) land
-// here too once the Appendix B prerequisites are in place.
+// management, distinct from the YubiKey-flavored sd group:
+// probe and registry are read-path operations on arbitrary GP
+// cards; install and delete drive INSTALL [for load|install] +
+// LOAD and DELETE flows with dry-run-by-default and the
+// --confirm-write / --expected-card-id safety gates; cap is a
+// host-side sub-grouping for CAP file utilities.
 var gpCommands = map[string]func(ctx context.Context, env *runEnv, args []string) error{
 	"probe":    cmdGPProbe,
 	"registry": cmdGPRegistry,

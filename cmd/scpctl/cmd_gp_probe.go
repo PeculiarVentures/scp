@@ -16,17 +16,19 @@ import "context"
 // the top-level 'probe' an alias for 'gp probe'; the inverse would
 // not be possible without breaking existing scripts.
 //
-// What this command deliberately does NOT do in MVP:
+// Scope:
 //
-//   - Per-card identity exposure (CIN tag 0x45, IIN tag 0x42). These
-//     are separate GET DATA calls beyond CRD and are reserved for
-//     Appendix B alongside the --expected-card-id flag they exist
-//     to support.
-//   - SCP03 authenticated probing. The unauthenticated path is the
-//     full main-body scope; authenticated discovery is gp registry.
-//   - --sd-aid override. The default ISD AID covers every card we
-//     can validate against today; override support lands when a
-//     real-world card requires it.
+//   - Unauthenticated SELECT + GET DATA tag 0x66 for Card
+//     Recognition Data. CRD is the only GET DATA tag this command
+//     issues; per-card identity tags (CIN 0x45, IIN 0x42) require
+//     authentication and surface through 'gp install' / 'gp delete'
+//     via --expected-card-id, not through probe.
+//   - --sd-aid override and --discover-sd are honored on this
+//     unauthenticated path so an operator can confirm a card
+//     responds at a non-default ISD AID before opening an
+//     authenticated session.
+//   - Authenticated discovery (GET STATUS walk over registries)
+//     is 'gp registry', not 'gp probe'.
 func cmdGPProbe(ctx context.Context, env *runEnv, args []string) error {
 	return runProbe(ctx, env, args, probeOptions{
 		flagSetName:  "gp probe",
