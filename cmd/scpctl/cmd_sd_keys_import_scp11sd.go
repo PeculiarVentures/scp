@@ -438,7 +438,7 @@ func verifyLeafMatchesPrivateKey(priv *ecdsa.PrivateKey, leaf *x509.Certificate)
 		return fmt.Errorf("--key-pem: marshal private key's public counterpart: %w", err)
 	}
 	if !bytes.Equal(leafSPKI, keySPKI) {
-		return fmt.Errorf("--certs leaf cert public key does not match --key-pem private key. Most likely the wrong files were paired; verify --key-pem and --certs name a matching pair.")
+		return fmt.Errorf("--certs leaf cert public key does not match --key-pem private key (most likely the wrong files were paired; verify --key-pem and --certs name a matching pair)")
 	}
 	return nil
 }

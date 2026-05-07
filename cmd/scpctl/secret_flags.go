@@ -141,7 +141,7 @@ func (s *secretFlags) resolve(stdinSrc *singleShotStdin) (string, error) {
 		}
 		if mode := info.Mode().Perm(); mode&0o077 != 0 {
 			return "", fmt.Errorf(
-				"--%s-file %q has permissions %#o, which permits group/world read; chmod 0600 (or 0400) before retrying. Secret files are no safer than argv if anyone else on the host can read them.",
+				"--%s-file %q has permissions %#o, which permits group/world read; chmod 0600 (or 0400) before retrying (secret files are no safer than argv if anyone else on the host can read them)",
 				s.name, *s.filePath, mode)
 		}
 		raw, err := os.ReadFile(*s.filePath)
