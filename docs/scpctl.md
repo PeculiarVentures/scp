@@ -2,7 +2,7 @@
 
 `scpctl` is the unified administrative CLI for `github.com/PeculiarVentures/scp`. Grouped command structure with four operator-distinct groups plus a small set of top-level utilities.
 
-For the operator-facing reference (build, examples, per-command flags), see [`cmd/scpctl/README.md`](../cmd/scpctl/README.md). This document covers design decisions and the command structure rationale.
+For the operator-facing reference (build, examples, per-command flags), see [`cmd/scpctl/README.md`](../cmd/scpctl/README.md). This document covers design decisions and the command structure rationale. For hardware-specific investigation notes captured while validating individual card families against the probe, see [`safenet-token-jc.md`](./safenet-token-jc.md) (SafeNet eToken family / Athena IDProtect platform).
 
 ## Why `scpctl` and not `scp`
 
