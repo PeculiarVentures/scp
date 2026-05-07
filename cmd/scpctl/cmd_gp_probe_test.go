@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -170,4 +171,97 @@ func TestGPProbe_CPLCSurfacedInJSON(t *testing.T) {
 	if report.Data.CIN != "" {
 		t.Errorf("data.cin should be empty when card returns 6A88; got %q", report.Data.CIN)
 	}
+}
+
+// TestGPProbe_CardCapabilitiesStructured exercises the structured
+// Card Capability Information decode path end-to-end against a
+// mockcard configured with the real-card SafeNet Token JC bytes.
+// Pre-fix the probe surfaced only raw hex; post-fix the JSON
+// includes a card_capabilities_parsed field with named SCP entries
+// and decoded hash algorithms. The structured fixture matches what
+// gppro v25.10.20 produces against the same bytes.
+func TestGPProbe_CardCapabilitiesStructured(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	// Inject SafeNet Token JC's Card Capabilities response. The
+	// hex matches the fixture pinned in gp/cardcaps.
+	cc, err := hex.DecodeString("673E673C" +
+		"A00780010181020515" +
+		"A009800102810405154555" +
+		"A00A80010381020010820107" +
+		"8103FFFE80" +
+		"82031E0600" +
+		"830401020304" +
+		"85023B00" +
+		"86023C00" +
+		"87023F00")
+	if err != nil {
+		t.Fatalf("hex.DecodeString: %v", err)
+	}
+	mc.CardCapabilitiesData = cc
+
+	out := runGPProbe(t, mc, []string{"--reader", "fake", "--json"})
+
+	type scpEntry struct {
+		Version  string   `json:"version"`
+		IValues  []string `json:"i_values"`
+		KeySizes []string `json:"key_sizes"`
+	}
+	type capsView struct {
+		SCPEntries     []scpEntry `json:"scp_entries"`
+		HashAlgorithms []string   `json:"hash_algorithms"`
+	}
+	type probeData struct {
+		CardCapabilitiesParsed *capsView `json:"card_capabilities_parsed"`
+		CardCapabilities       string    `json:"card_capabilities"`
+	}
+	var report struct {
+		Data probeData `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("unmarshal JSON: %v\n--- output ---\n%s", err, out)
+	}
+
+	// Raw hex must still appear (parser-success path keeps both).
+	if report.Data.CardCapabilities == "" {
+		t.Errorf("card_capabilities raw hex should be populated; got empty\n%s", out)
+	}
+
+	if report.Data.CardCapabilitiesParsed == nil {
+		t.Fatalf("card_capabilities_parsed should be populated; got nil\n%s", out)
+	}
+
+	scps := report.Data.CardCapabilitiesParsed.SCPEntries
+	if len(scps) != 3 {
+		t.Fatalf("expected 3 SCP entries; got %d", len(scps))
+	}
+	if scps[0].Version != "SCP01" {
+		t.Errorf("scps[0].Version = %q, want SCP01", scps[0].Version)
+	}
+	if scps[2].Version != "SCP03" {
+		t.Errorf("scps[2].Version = %q, want SCP03", scps[2].Version)
+	}
+	wantSCP03Sizes := []string{"AES-128", "AES-192", "AES-256"}
+	if !equalStrSlice(scps[2].KeySizes, wantSCP03Sizes) {
+		t.Errorf("SCP03 key sizes = %v, want %v", scps[2].KeySizes, wantSCP03Sizes)
+	}
+	wantHashes := []string{"SHA-1", "SHA-256", "SHA-384", "SHA-512"}
+	if !equalStrSlice(report.Data.CardCapabilitiesParsed.HashAlgorithms, wantHashes) {
+		t.Errorf("hash algorithms = %v, want %v",
+			report.Data.CardCapabilitiesParsed.HashAlgorithms, wantHashes)
+	}
+}
+
+func equalStrSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
