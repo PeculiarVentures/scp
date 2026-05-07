@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/asn1"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -11,6 +10,7 @@ import (
 	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/securitydomain"
+	"github.com/PeculiarVentures/scp/securitydomain/profile"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -335,15 +335,13 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 
 	data := &probeData{RawHex: hexEncode(raw), AuthMode: authMode, CardLocked: cardLocked}
 
-	// Profile classification mirrors securitydomain/profile.Probe:
-	// YubiKey 5.7+ emits CardIdentificationOID 1.2.840.114283.3
-	// in the CRD. Any other CardIdentificationOID (or none) lands
-	// on standard-sd. Computed here rather than re-running
-	// profile.Probe because cmdProbe has already done the SELECT
-	// + GET DATA tag 0x66 work; running Probe again would
-	// duplicate the round trips.
-	if info.CardIdentificationOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 114283, 3}) {
-		data.Profile = "yubikey-sd"
+	// Classify via profile.ClassifyByCRD so cmd probe and
+	// profile.Probe agree on what counts as yubikey-sd. Computed
+	// from the already-parsed CardInfo rather than re-running
+	// profile.Probe to avoid duplicate SELECT + GET DATA round
+	// trips, but the classification rule is the same.
+	if prof := profile.ClassifyByCRD(info); prof != nil {
+		data.Profile = prof.Name()
 	} else {
 		data.Profile = "standard-sd"
 	}

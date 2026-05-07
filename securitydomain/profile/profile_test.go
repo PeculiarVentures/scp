@@ -2,11 +2,13 @@ package profile_test
 
 import (
 	"context"
+	"encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/securitydomain/profile"
 )
 
@@ -232,6 +234,133 @@ func TestProbe_NoCRDFallsThroughToStandard(t *testing.T) {
 	}
 	if res.CardInfo != nil {
 		t.Errorf("CardInfo should be nil when no CRD reachable, got %+v", res.CardInfo)
+	}
+}
+
+// realSafeNetEtokenFusionCRD is the actual Card Recognition Data
+// captured from a SafeNet eToken Fusion (Thales-built, OS release
+// date 2017-11-30, GP 2.2.1, JavaCard v3, SCP03 only) on
+// 2026-05-07 via scpctl probe. It exercises the post-fix
+// classification because it carries the same Card Identification
+// Scheme OID (1.2.840.114283.3) as YubiKey but is unambiguously
+// not a YubiKey.
+//
+// Differences from realYubiKeyCRD that the classifier must use to
+// distinguish the two:
+//   - Tag 60 (GP version) is 2.2.1, not 2.3.1 (informational, not
+//     used by classifier — versions can collide across vendors).
+//   - Tag 64 (SCP) carries SCP03 i=0x10 only, with no SCP11. The
+//     SafeNet does not advertise SCP11; YubiKey 5.7+ advertises
+//     both. classifyByCRD requires SCP11 in the SCPs list.
+//   - Tag 65 (Card Configuration Details) is present
+//     (1.2.840.114283.5.7.2.0.0). YubiKey CRD does not include
+//     this tag.
+//   - Tag 66 inner (Card Chip Details) is present
+//     (1.3.6.1.4.1.42.2.110.1.3 = JavaCard v3). YubiKey CRD does
+//     not include this tag. classifyByCRD treats presence of this
+//     OID as a positive non-YubiKey signal.
+var realSafeNetEtokenFusionCRD = mustHex(
+	"664E734C" +
+		"06072A864886FC6B01" + // GP RID
+		"600C060A2A864886FC6B02020201" + // GP 2.2.1
+		"630906072A864886FC6B03" + // Card_IDS = 1.2.840.114283.3
+		"640B06092A864886FC6B040310" + // SCP03 i=0x10
+		"650D060B2A864886FC6B0507020000" + // Card Configuration Details
+		"660C060A2B060104012A026E0103") // Card Chip Details: JavaCard v3
+
+// TestProbe_SafeNetEtokenFusionClassifiesAsStandard pins the bug
+// fix that motivated tightening the classifier. Pre-fix, the
+// SafeNet's CRD classified as yubikey-sd because it carries the
+// same Card_IDS OID 1.2.840.114283.3. Post-fix, the explicit
+// CardChipDetailsOID and the absence of SCP11 in the advertised
+// SCPs both push it to standard-sd.
+func TestProbe_SafeNetEtokenFusionClassifiesAsStandard(t *testing.T) {
+	tr := &scriptedTransmitter{
+		selectSW:   0x9000,
+		selectData: realSafeNetEtokenFusionCRD,
+	}
+	res, err := profile.Probe(context.Background(), tr, nil)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if res.Profile == nil || res.Profile.Name() != "standard-sd" {
+		t.Errorf("expected standard-sd for SafeNet eToken Fusion, got %v", res.Profile)
+	}
+	if res.CardInfo == nil {
+		t.Fatal("CardInfo should be populated for SafeNet CRD (parses successfully)")
+	}
+	if !res.CardInfo.CardIdentificationOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 114283, 3}) {
+		t.Errorf("SafeNet CardIdentificationOID = %v, want 1.2.840.114283.3 "+
+			"(this test relies on the OID-collision scenario; if the captured "+
+			"OID has changed, the test premise no longer holds)",
+			res.CardInfo.CardIdentificationOID)
+	}
+	// Pin the load-bearing distinguishing signals so a future
+	// fixture update can't silently drop them.
+	if len(res.CardInfo.CardChipDetailsOID) == 0 {
+		t.Error("SafeNet CardChipDetailsOID should be present (JavaCard v3)")
+	}
+	for _, s := range res.CardInfo.SCPs {
+		if s.Version == 0x11 {
+			t.Errorf("SafeNet should NOT advertise SCP11; SCPs=%+v", res.CardInfo.SCPs)
+		}
+	}
+}
+
+// TestClassifyByCRD_TableDriven covers the classifier's signal
+// matrix directly so each rule has a pinned test independent of
+// the Probe wrapper.
+func TestClassifyByCRD_TableDriven(t *testing.T) {
+	parse := func(b []byte) *cardrecognition.CardInfo {
+		info, err := cardrecognition.Parse(b)
+		if err != nil {
+			t.Fatalf("parse fixture: %v", err)
+		}
+		return info
+	}
+
+	cases := []struct {
+		name    string
+		info    *cardrecognition.CardInfo
+		want    string
+		comment string
+	}{
+		{
+			name:    "nil_info",
+			info:    nil,
+			want:    "standard-sd",
+			comment: "no CRD reachable; defensive default",
+		},
+		{
+			name:    "yubikey_5.7.4",
+			info:    parse(realYubiKeyCRD),
+			want:    "yubikey-sd",
+			comment: "Card_IDS present, no chip details, SCP11 advertised",
+		},
+		{
+			name:    "safenet_etoken_fusion",
+			info:    parse(realSafeNetEtokenFusionCRD),
+			want:    "standard-sd",
+			comment: "Card_IDS present (collision with YubiKey), but chip details set and no SCP11",
+		},
+		{
+			name:    "synthetic_no_yubikey_oid",
+			info:    parse(nonYubiKeyCRD),
+			want:    "standard-sd",
+			comment: "Card_IDS arc differs from GP-standard 1.2.840.114283.3",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := profile.ClassifyByCRD(tc.info)
+			if got == nil {
+				t.Fatalf("ClassifyByCRD returned nil")
+			}
+			if got.Name() != tc.want {
+				t.Errorf("Name = %q, want %q (%s)", got.Name(), tc.want, tc.comment)
+			}
+		})
 	}
 }
 
