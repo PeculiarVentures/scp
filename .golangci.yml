@@ -1,0 +1,42 @@
+version: "2"
+
+# Top-level config for golangci-lint v2.x. Pinned at the repo root and
+# applied to all submodules (cmd/scpctl, transport/pcsc, transport/grpc)
+# via golangci-lint-action's per-working-directory invocation.
+#
+# Linter selection
+# ================
+#
+# The default v2 linter set is errcheck, govet, ineffassign, staticcheck,
+# unused. We keep all five via 'default: standard'. No additional
+# linters enabled — the default set covers correctness; opinionated
+# style linters (gocyclo, lll, mnd, etc.) generate noise without
+# correctness wins.
+#
+# Formatter selection
+# ===================
+#
+# gofmt is enabled as a formatter so format drift fails CI. The v1.x
+# config that preceded this file did not enforce gofmt — drift
+# accumulated across 20+ files before the rehab round caught it.
+# gofumpt is NOT enabled (stricter than gofmt; reformats existing
+# style choices that aren't wrong, just opinionated).
+#
+# Issue caps
+# ==========
+#
+# v2 defaults cap each linter at 50 issues per run and 3 same-rule-
+# same-file. For a clean codebase the caps are fine; we lift both so
+# new violations can't sneak in under the limit. Revisit per-rule if
+# a future tooling change surfaces a flood.
+
+linters:
+  default: standard
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
