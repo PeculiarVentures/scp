@@ -115,6 +115,16 @@ type probeData struct {
 	CIN  string    `json:"cin,omitempty"`
 	KDD  string    `json:"kdd,omitempty"`
 	SSC  string    `json:"ssc,omitempty"`
+
+	// CardCapabilities is the raw hex of GET DATA tag 0x0067 (Card
+	// Capability Information per GP Card Spec v2.3.1 §H.4) when the
+	// card carries it. Most cards in the test population return
+	// SW=6A88 here; this field stays empty for those. No structured
+	// parsing yet — the value is the operator-visible counterpart of
+	// what gppro shows for this tag, useful for cards we eventually
+	// validate against. Parsing lands when there's a real-card
+	// fixture to pin against.
+	CardCapabilities string `json:"card_capabilities,omitempty"`
 }
 
 // cplcView is the JSON projection of cplc.Data. Vendor codes render
@@ -640,7 +650,8 @@ func probeOptionalGetData(ctx context.Context, sd *securitydomain.Session, data 
 			fmt.Sprintf("IC fabricator=0x%04X serial=%s", cdata.ICFabricatorCode(), cdata.SerialNumberHex()))
 	}
 
-	// IIN, CIN, KDD, SSC — opaque bytes, hex-rendered.
+	// IIN, CIN, KDD, SSC, Card Capabilities — opaque bytes,
+	// hex-rendered.
 	for _, c := range []struct {
 		name string
 		tag  string
@@ -651,6 +662,7 @@ func probeOptionalGetData(ctx context.Context, sd *securitydomain.Session, data 
 		{"CIN", "0x0045", gp.ReadCIN, func(d *probeData, s string) { d.CIN = s }},
 		{"KDD", "0x00CF", gp.ReadKDD, func(d *probeData, s string) { d.KDD = s }},
 		{"SSC", "0x00C1", gp.ReadSSC, func(d *probeData, s string) { d.SSC = s }},
+		{"Card Capabilities", "0x0067", gp.ReadCardCapabilities, func(d *probeData, s string) { d.CardCapabilities = s }},
 	} {
 		raw, err := c.read(ctx, sd)
 		label := fmt.Sprintf("GET DATA tag %s (%s)", c.tag, c.name)

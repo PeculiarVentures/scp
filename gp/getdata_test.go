@@ -191,9 +191,50 @@ func TestReadSSC_SafeNet(t *testing.T) {
 	}
 }
 
-// TestRead_AllSafeNet_OneCardOneCall replays the full SafeNet
-// optional-GET-DATA sweep in one transport. Five reads, five
-// successful responses, no extra APDUs sent.
+// TestReadCardCapabilities_Present pins the raw-bytes path. The
+// fixture is a synthetic Card Capability Information blob shaped
+// per GP §H.4: tag 67, length 12, sub-tags 64 (SCP options) and
+// 65 (key info). Real cards in the test population (SafeNet
+// eToken Fusion, YubiKey 5.x) return SW=6A88 for this tag, so
+// the synthetic fixture is the only available regression target
+// today; when a card that does answer 0x67 lands in the test
+// matrix the synthetic fixture stays as the no-hardware coverage
+// and a real-card fixture pins byte-exact decoding.
+func TestReadCardCapabilities_Present(t *testing.T) {
+	// Synthetic value: 67 0C 64 04 06 02 04 80 65 04 06 02 04 81
+	//   67 0C        = Card Capability Information, 12 bytes
+	//     64 04      = SCP options, 4 bytes
+	//       06 02 04 80   = OID-shaped, 2 bytes (e.g. SCP02 marker)
+	//     65 04      = key info, 4 bytes
+	//       06 02 04 81   = OID-shaped, 2 bytes
+	value := mustHex(t, "670C640406020480650406020481")
+	tt := &scriptedTx{responses: map[uint16]apdu.Response{
+		0x0067: {Data: value, SW1: 0x90, SW2: 0x00},
+	}}
+	got, err := gp.ReadCardCapabilities(context.Background(), tt)
+	if err != nil {
+		t.Fatalf("ReadCardCapabilities: %v", err)
+	}
+	if string(got) != string(value) {
+		t.Errorf("ReadCardCapabilities = %X, want %X", got, value)
+	}
+}
+
+// TestReadCardCapabilities_NotPresent confirms 6A88 produces
+// (nil, nil) — the SafeNet and YubiKey path. Most cards in the
+// wild fall here because Card Capability Information was added
+// late in the GP spec timeline and not all card families ship
+// it.
+func TestReadCardCapabilities_NotPresent(t *testing.T) {
+	tt := &scriptedTx{responses: nil}
+	got, err := gp.ReadCardCapabilities(context.Background(), tt)
+	if err != nil {
+		t.Fatalf("ReadCardCapabilities: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil on 6A88, got %X", got)
+	}
+}
 func TestRead_AllSafeNet_OneCardOneCall(t *testing.T) {
 	tt := &scriptedTx{responses: map[uint16]apdu.Response{
 		0x9F7F: {Data: mustHex(t, safeNetCPLCWithHeader), SW1: 0x90, SW2: 0x00},

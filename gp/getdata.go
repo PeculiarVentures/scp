@@ -139,6 +139,29 @@ func ReadSSC(ctx context.Context, t Transmitter) ([]byte, error) {
 	return readOptionalGetDataOrSkip(ctx, t, 0x00C1)
 }
 
+// ReadCardCapabilities reads Card Capability Information via GET
+// DATA tag 0x0067. Returns nil if the card does not carry the
+// object (most cards observed to date — SafeNet eToken Fusion and
+// YubiKey 5.x both return SW=6A88 for this tag).
+//
+// The returned bytes are not parsed: GP Card Spec v2.3.1 §H.4
+// defines the structure as BER-TLV with sub-tags enumerating SCP
+// versions, supported algorithms, and key-management capabilities,
+// but the sub-tag numbering and semantics drifted between GP 2.1.1,
+// 2.2, and 2.3.1, and the inner OID values are sparsely documented
+// outside the spec itself. Returning raw bytes preserves the data
+// for the operator without committing to a specific schema. A
+// structured parser lands when there's a card to validate it
+// against; until then the hex view is honest and gives operators
+// the same view gppro shows.
+//
+// The bytes typically begin with tag 0x67 and a 1-byte length,
+// followed by the value field. Callers can split the outer
+// header before display.
+func ReadCardCapabilities(ctx context.Context, t Transmitter) ([]byte, error) {
+	return readOptionalGetDataOrSkip(ctx, t, 0x0067)
+}
+
 // readOptionalGetDataOrSkip is readOptionalGetData with the
 // IsNotPresent translation applied, so the four IIN/CIN/KDD/SSC
 // helpers above all share the (data, err)/(nil, nil)/(nil, err)
