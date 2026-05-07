@@ -837,6 +837,14 @@ func (c *Card) doGetData(cmd *apdu.Command, underSM bool) (*apdu.Response, error
 	}
 
 	switch tag {
+	case 0x9F7F:
+		// CPLC. The mock claims to be a YubiKey-shaped GP card
+		// and YubiKey 5.x advertises CPLC at this tag, so the
+		// mock returns YubiKey-shape bytes. Same fixture the
+		// scp03.MockCard returns; both mocks share the synthetic
+		// CPLC so tests drive either through gp/cplc.Parse and
+		// see identical shape.
+		return &apdu.Response{Data: append([]byte(nil), syntheticCPLC...), SW1: 0x90, SW2: 0x00}, nil
 	case 0x0066:
 		// Card Recognition Data — same synthetic blob the SCP03 mock
 		// returns. Both mocks return identical CRD so a test that
@@ -879,6 +887,28 @@ func (c *Card) doGetData(cmd *apdu.Command, underSM bool) (*apdu.Response, error
 	default:
 		return mkSW(0x6A88), nil // reference data not found
 	}
+}
+
+// syntheticCPLC is the Card Production Life Cycle blob the mock
+// returns for GET DATA tag 0x9F7F. Bytes captured from a real
+// YubiKey 5C NFC firmware 5.7.4 on 2026-05-07. Includes the
+// 9F 7F 2A tag/length header. The post-fabrication date fields
+// contain random per-card serial bytes (not valid BCD) — authentic
+// YubiKey behavior that gp/cplc.Parse tolerates by marking the
+// affected DateField entries as Valid=false.
+var syntheticCPLC = []byte{
+	0x9F, 0x7F, 0x2A,
+	0x40, 0x90, 0x33, 0x2B, 0xF9, 0x17,
+	0x8E, 0xD7, 0xA0, 0xF2,
+	0xEA, 0x2B,
+	0xBD, 0x96, 0x9B, 0x1A,
+	0xF9, 0x5C,
+	0xA7, 0xDA, 0x23, 0xEB,
+	0xE2, 0xFF, 0x57, 0xCA,
+	0x47, 0xF7, 0xE7, 0x46,
+	0x93, 0x3E, 0x48, 0x5C,
+	0x05, 0x71, 0xCE, 0x68,
+	0x51, 0x80, 0x9F, 0x60,
 }
 
 // syntheticCRD is hand-assembled GP 2.3.1 / SCP03 i=0x65 Card

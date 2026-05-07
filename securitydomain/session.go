@@ -646,6 +646,21 @@ func (s *Session) CardLocked() bool {
 	return s.cardLocked
 }
 
+// Transmit sends an APDU through whatever channel the session is
+// using: the SCP-wrapped channel when the session is authenticated,
+// the raw transport otherwise. Useful for probe-style callers that
+// need to issue ad-hoc GET DATA reads (CPLC, IIN, CIN, KDD, SSC,
+// vendor-specific tags) without each tag needing its own Session
+// helper. The Session continues to own the transport's lifecycle —
+// Close still closes the transport — so callers should not stash
+// the returned response beyond the session's lifetime.
+//
+// The method satisfies gp.Transmitter so the gp.ReadCPLC family of
+// helpers can be invoked against an open SD session directly.
+func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	return s.transmit(ctx, cmd)
+}
+
 // transmit sends a command through the appropriate channel.
 func (s *Session) transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	if s.authenticated && s.scpSession != nil {

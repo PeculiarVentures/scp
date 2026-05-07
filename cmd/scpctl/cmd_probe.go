@@ -9,6 +9,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/gp"
+	"github.com/PeculiarVentures/scp/gp/cplc"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/securitydomain/profile"
 	"github.com/PeculiarVentures/scp/transport"
@@ -96,6 +97,50 @@ type probeData struct {
 	// human-readable surface is the per-scope GET STATUS line in
 	// Checks (count and a brief AID summary).
 	Registry *registryDump `json:"registry,omitempty"`
+
+	// CPLC, IIN, CIN, KDD, SSC are unauthenticated GET DATA
+	// objects that a card may carry. Each is omitted from JSON
+	// when the card returned 6A88 ("not present") so a consumer
+	// can branch on field presence rather than checking for empty
+	// strings. CPLC is a structured object; IIN/CIN/KDD/SSC are
+	// hex-rendered raw bytes because their structures are vendor-
+	// specific.
+	//
+	// CPLC fields trace the card's chip family, OS, and production
+	// dates. YubiKey 5.x advertises CPLC but with random bytes in
+	// the date fields (parser tolerates that, marks Valid=false).
+	// SafeNet eToken Fusion advertises a fully populated CPLC.
+	CPLC *cplcView `json:"cplc,omitempty"`
+	IIN  string    `json:"iin,omitempty"`
+	CIN  string    `json:"cin,omitempty"`
+	KDD  string    `json:"kdd,omitempty"`
+	SSC  string    `json:"ssc,omitempty"`
+}
+
+// cplcView is the JSON projection of cplc.Data. Vendor codes render
+// as uppercase hex (matching the rest of the probe report's hex
+// rendering); dates render in YYYY-MM-DD form when valid, or as
+// "{raw-hex} (raw)" when the field is uninitialized or didn't
+// decode as valid BCD.
+type cplcView struct {
+	ICFabricator                      string `json:"ic_fabricator"`
+	ICType                            string `json:"ic_type"`
+	OperatingSystemID                 string `json:"operating_system_id"`
+	OperatingSystemReleaseDate        string `json:"operating_system_release_date"`
+	OperatingSystemReleaseLevel       string `json:"operating_system_release_level"`
+	ICFabricationDate                 string `json:"ic_fabrication_date"`
+	ICSerialNumber                    string `json:"ic_serial_number"`
+	ICBatchIdentifier                 string `json:"ic_batch_identifier"`
+	ICModuleFabricator                string `json:"ic_module_fabricator"`
+	ICModulePackagingDate             string `json:"ic_module_packaging_date"`
+	ICCManufacturer                   string `json:"icc_manufacturer"`
+	ICEmbeddingDate                   string `json:"ic_embedding_date"`
+	ICPrePersonalizer                 string `json:"ic_pre_personalizer"`
+	ICPrePersonalizationEquipmentDate string `json:"ic_pre_personalization_equipment_date"`
+	ICPrePersonalizationEquipmentID   string `json:"ic_pre_personalization_equipment_id"`
+	ICPersonalizer                    string `json:"ic_personalizer"`
+	ICPersonalizationDate             string `json:"ic_personalization_date"`
+	ICPersonalizationEquipmentID      string `json:"ic_personalization_equipment_id"`
 }
 
 // registryDump is the JSON shape of a --full GP registry walk.
@@ -398,6 +443,19 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		}
 	}
 
+	// Optional unauthenticated GET DATA reads. Each tag is read
+	// independently; cards differ widely in which they expose.
+	// SafeNet/Gemalto/Thales cards return all five; YubiKey 5.x
+	// returns only CPLC; some configurations return none. Not-
+	// present (SW=6A88) is reported as SKIP rather than FAIL
+	// because the absence of these objects is informational, not
+	// a probe failure. Each read is gated by opts.fetchKeyInfo
+	// (currently the only flag distinguishing the basic 'probe'
+	// from the deeper 'sd info'); they're read on every probe so
+	// the operator sees identification material for any card,
+	// not just YubiKey-shaped ones.
+	probeOptionalGetData(ctx, sd, data, report)
+
 	// Key Information Template. Optional because many cards do not
 	// implement GET DATA tag 0x00E0; fetch failures are reported as
 	// SKIP rather than FAIL because absence of KIT is not a probe
@@ -549,6 +607,92 @@ func openProbeSession(
 	sd.SetProfile(prof)
 	report.Pass("open SCP03 SD", "")
 	return sd, "scp03", nil
+}
+
+// probeOptionalGetData performs the five unauthenticated GET DATA
+// reads (CPLC, IIN, CIN, KDD, SSC) against the open SD session and
+// populates the corresponding probeData fields and report lines.
+// Reads that return SW=6A88 (not present) appear as SKIP; reads
+// that succeed appear as PASS with a short summary; reads that
+// fail with anything else appear as SKIP with the SW for triage.
+//
+// The reads are independent. A card that supports CPLC but not
+// IIN gets one PASS line and one SKIP. None of these reads are
+// required for the probe to be useful — they're informational
+// identification material that exists across the GP card population
+// in varying combinations (SafeNet/IDPrime/IDCore advertise all
+// five; YubiKey 5.x advertises only CPLC; some cards advertise
+// none).
+//
+// The function reads through the SD session so that an authenticated
+// probe (e.g. cmdProbe with SCP03 keys supplied) can still see
+// values gated behind the auth wall. For unauthenticated probes
+// the session's Transmit routes through the raw transport.
+func probeOptionalGetData(ctx context.Context, sd *securitydomain.Session, data *probeData, report *Report) {
+	// CPLC.
+	if cdata, err := gp.ReadCPLC(ctx, sd); err != nil {
+		report.Skip("GET DATA tag 0x9F7F (CPLC)", err.Error())
+	} else if cdata == nil {
+		report.Skip("GET DATA tag 0x9F7F (CPLC)", "not present (SW=6A88)")
+	} else {
+		data.CPLC = cplcViewFrom(cdata)
+		report.Pass("GET DATA tag 0x9F7F (CPLC)",
+			fmt.Sprintf("IC fabricator=0x%04X serial=%s", cdata.ICFabricatorCode(), cdata.SerialNumberHex()))
+	}
+
+	// IIN, CIN, KDD, SSC — opaque bytes, hex-rendered.
+	for _, c := range []struct {
+		name string
+		tag  string
+		read func(context.Context, gp.Transmitter) ([]byte, error)
+		set  func(*probeData, string)
+	}{
+		{"IIN", "0x0042", gp.ReadIIN, func(d *probeData, s string) { d.IIN = s }},
+		{"CIN", "0x0045", gp.ReadCIN, func(d *probeData, s string) { d.CIN = s }},
+		{"KDD", "0x00CF", gp.ReadKDD, func(d *probeData, s string) { d.KDD = s }},
+		{"SSC", "0x00C1", gp.ReadSSC, func(d *probeData, s string) { d.SSC = s }},
+	} {
+		raw, err := c.read(ctx, sd)
+		label := fmt.Sprintf("GET DATA tag %s (%s)", c.tag, c.name)
+		switch {
+		case err != nil:
+			report.Skip(label, err.Error())
+		case raw == nil:
+			report.Skip(label, "not present (SW=6A88)")
+		default:
+			c.set(data, hexEncode(raw))
+			report.Pass(label, fmt.Sprintf("%d bytes", len(raw)))
+		}
+	}
+}
+
+// cplcViewFrom projects a *cplc.Data into the JSON-friendly cplcView.
+// Vendor codes render as 4-digit uppercase hex; equipment IDs as
+// 8-digit uppercase hex; dates via the DateField.Format helper which
+// produces YYYY-MM-DD when valid and "{raw-hex} (raw)" otherwise.
+func cplcViewFrom(d *cplc.Data) *cplcView {
+	hex2 := func(b [2]byte) string { return fmt.Sprintf("%02X%02X", b[0], b[1]) }
+	hex4 := func(b [4]byte) string { return fmt.Sprintf("%02X%02X%02X%02X", b[0], b[1], b[2], b[3]) }
+	return &cplcView{
+		ICFabricator:                      hex2(d.ICFabricator),
+		ICType:                            hex2(d.ICType),
+		OperatingSystemID:                 hex2(d.OperatingSystemID),
+		OperatingSystemReleaseDate:        d.OperatingSystemReleaseDate.Format(),
+		OperatingSystemReleaseLevel:       hex2(d.OperatingSystemReleaseLevel),
+		ICFabricationDate:                 d.ICFabricationDate.Format(),
+		ICSerialNumber:                    hex4(d.ICSerialNumber),
+		ICBatchIdentifier:                 hex2(d.ICBatchIdentifier),
+		ICModuleFabricator:                hex2(d.ICModuleFabricator),
+		ICModulePackagingDate:             d.ICModulePackagingDate.Format(),
+		ICCManufacturer:                   hex2(d.ICCManufacturer),
+		ICEmbeddingDate:                   d.ICEmbeddingDate.Format(),
+		ICPrePersonalizer:                 hex2(d.ICPrePersonalizer),
+		ICPrePersonalizationEquipmentDate: d.ICPrePersonalizationEquipmentDate.Format(),
+		ICPrePersonalizationEquipmentID:   hex4(d.ICPrePersonalizationEquipmentID),
+		ICPersonalizer:                    hex2(d.ICPersonalizer),
+		ICPersonalizationDate:             d.ICPersonalizationDate.Format(),
+		ICPersonalizationEquipmentID:      hex4(d.ICPersonalizationEquipmentID),
+	}
 }
 
 // hexEncode formats a byte slice as uppercase hex without spaces.
