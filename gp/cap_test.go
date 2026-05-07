@@ -127,6 +127,40 @@ func (b *capBuilder) bytes(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+// bytesInOrder is bytes() but writes ZIP entries in the supplied
+// order rather than map-iteration order. Tests use this to verify
+// that LoadImage's output is canonical regardless of how the CAP
+// producer ordered ZIP members. Any name in `order` that doesn't
+// exist in the builder's file set is silently skipped; any file
+// not named in `order` is skipped (so callers must pass a
+// complete list to get a complete CAP).
+func (b *capBuilder) bytesInOrder(t *testing.T, order []string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range order {
+		raw, ok := b.files[name]
+		if !ok {
+			continue
+		}
+		entryName := name
+		if b.dir != "" {
+			entryName = b.dir + "/" + name
+		}
+		w, err := zw.Create(entryName)
+		if err != nil {
+			t.Fatalf("zip.Create %s: %v", name, err)
+		}
+		if _, err := w.Write(raw); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // defaultCAP returns a builder pre-populated with valid framing
 // for every component. Header and Applet carry caller-supplied
 // payloads; the rest are empty (tag + size=0).

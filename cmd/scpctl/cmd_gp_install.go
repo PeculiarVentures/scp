@@ -173,6 +173,18 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		return fmt.Errorf("parse CAP: %w", err)
 	}
 	report.Pass("parse CAP", fmt.Sprintf("%d component(s)", len(cap.Components)))
+	// Reviewer-flagged: parse success is not a load guarantee.
+	// gp.ParseCAPFile reads structural metadata (Header,
+	// Applet, Import, component table) but does NOT verify
+	// Method bytecode, ConstantPool offsets, Descriptor
+	// component cross-references, or per-card load policy.
+	// A malformed-but-structurally-valid CAP can pass this
+	// step and still be rejected at LOAD or INSTALL time.
+	// Surfacing the limit explicitly in the dry-run output
+	// keeps an operator from reading "PASS parse CAP" as
+	// "PASS validate CAP for load."
+	report.Pass("parse scope",
+		"host structural parse only (Header + Applet + Import + component table); does not validate Method bytecode, ConstantPool offsets, install_method_offset references, or per-card load policy. The card may still reject LOAD or INSTALL even though every dry-run check passes.")
 
 	loadFileAID, err := decodeAIDOrCAPDefault(*packageAIDHex, "package-aid", cap.PackageAID[:])
 	if err != nil {

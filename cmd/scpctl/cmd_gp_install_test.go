@@ -187,6 +187,14 @@ func TestGPInstall_DryRun_DoesNotMutateCard(t *testing.T) {
 		"load image",
 		"SHA-256",
 		"SKIP",
+		// Reviewer-flagged: dry-run must not let parse-success
+		// be read as load-validity. The "parse scope" check
+		// labels the limitation explicitly so an operator
+		// reading the report knows a green dry-run does not
+		// guarantee the card will accept the CAP.
+		"parse scope",
+		"does not validate Method bytecode",
+		"card may still reject LOAD or INSTALL",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run output missing %q\n--- output ---\n%s", want, out)
