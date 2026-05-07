@@ -30,10 +30,15 @@ func candidateAIDStr(c gp.ISDCandidate) string {
 // custom encoders.
 type probeData struct {
 	// Profile is the resolved card profile name ("yubikey-sd",
-	// "standard-sd"). Comes from securitydomain/profile.Probe's
-	// Card-Identification-OID classification: YubiKey emits
-	// 1.2.840.114283.3 in the CRD, every other GP card we've
-	// observed emits a different OID or none. Operators read
+	// "standard-sd"). Comes from securitydomain/profile.classifyByCRD,
+	// which requires three signals together: the GP-standard
+	// Card_IDS OID 1.2.840.114283.3 present in the CRD, no
+	// CardChipDetailsOID (cards that tag a chip platform — e.g.
+	// SafeNet eToken Fusion emitting JavaCard v3 1.3.6.1.4.1.42.2.110.1.3
+	// — fall through to standard-sd), and SCP11 advertised in the
+	// SCPs list. The earlier classifier matched on Card_IDS OID
+	// alone and was tightened after a SafeNet eToken Fusion was
+	// observed emitting the same OID as YubiKey. Operators read
 	// this field to confirm auto-detection landed where they
 	// expected; automation reads it to decide whether YubiKey-
 	// extension commands (GENERATE EC KEY, ATTEST, INS=0xFB
@@ -86,8 +91,10 @@ type probeData struct {
 	// KeyInfo is populated by 'sd info' (and other callers that set
 	// probeOptions.fetchKeyInfo). Each entry is a human-readable
 	// summary like 'KID=0x01 KVN=0xFF (3 components)'. Omitted from
-	// JSON output when nil so the probe's CRD-only schema stays
-	// stable for consumers that only ever see cmdProbe.
+	// JSON output when nil so the unauthenticated probe schema
+	// (CRD plus the GP §H.6 / §H.4 unauthenticated identification
+	// reads) stays stable for consumers that only ever see
+	// cmdProbe; cmdSDInfo opts in to the additional KIT data.
 	KeyInfo []string `json:"key_info,omitempty"`
 
 	// Registry is populated by 'sd info --full'. Each scope has
@@ -234,15 +241,18 @@ type probeOptions struct {
 	reportLabel string
 
 	// fetchKeyInfo controls whether the Key Information Template
-	// is fetched and reported. cmdProbe does not (CRD is the
-	// historical scope). cmdSDInfo does, because reporting card
-	// identity at the SD-info level should include which key
-	// references the card has installed.
+	// is fetched and reported. cmdProbe does not (the unauthenticated
+	// identification surface — CRD plus CPLC, IIN, CIN, KDD, SSC,
+	// Card Capabilities — is the probe scope). cmdSDInfo does,
+	// because reporting card identity at the SD-info level should
+	// include which key references the card has installed.
 	fetchKeyInfo bool
 
 	// allowFullStatus controls whether 'sd info --full' is reachable
 	// from this entry point. cmdSDInfo sets it; cmdProbe does not,
-	// keeping the historical 'probe' surface CRD-only.
+	// keeping probe scoped to unauthenticated reads (the
+	// authenticated GP registry walk lives behind --full and a
+	// separate auth path).
 	allowFullStatus bool
 }
 
