@@ -225,6 +225,22 @@ type Card struct {
 	// Nil/empty preserves the historical behavior (only the GP-
 	// standard AID is recognized).
 	MockSDAID []byte
+
+	// MockSelectSW, when non-zero, is the status word returned for
+	// a SELECT that matches a recognized AID. Default 0 means
+	// "return 9000 on match" (the historical behavior). Set to
+	// 0x6283 to model a card whose ISD/applet is in CARD_LOCKED
+	// lifecycle: GP §11.1.2 says SELECT against a card-locked
+	// applet still returns FCI but with the warning SW=6283
+	// (state-of-non-volatile-memory-changed). GlobalPlatformPro
+	// tolerates this and continues with read-only operations
+	// rather than treating it as a hard failure; the
+	// securitydomain package follows the same model after the
+	// Section 9 fix from the third external review.
+	//
+	// Used by tests that exercise the locked-card SELECT
+	// tolerance without requiring a real CARD_LOCKED card.
+	MockSelectSW uint16
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -716,19 +732,29 @@ func (c *Card) doSelect(cmd *apdu.Command, underSM bool) (*apdu.Response, error)
 	if len(c.MockSDAID) > 0 && bytesEq(cmd.Data, c.MockSDAID) {
 		c.selectedAID = c.MockSDAID
 		c.pivSelected = false
-		return mkSW(0x9000), nil
+		return mkSW(c.selectMatchSW()), nil
 	}
 	if len(c.MockSDAID) == 0 && bytesEq(cmd.Data, aidSD) {
 		c.selectedAID = aidSD
 		c.pivSelected = false
-		return mkSW(0x9000), nil
+		return mkSW(c.selectMatchSW()), nil
 	}
 	if bytesEq(cmd.Data, aidPIV) {
 		c.selectedAID = aidPIV
 		c.pivSelected = true
-		return mkSW(0x9000), nil
+		return mkSW(c.selectMatchSW()), nil
 	}
 	return mkSW(0x6A82), nil
+}
+
+// selectMatchSW resolves the status word for a successful SELECT
+// match. Returns MockSelectSW when set, 0x9000 otherwise. Centralizing
+// the lookup keeps the four SELECT-success paths in doSelect identical.
+func (c *Card) selectMatchSW() uint16 {
+	if c.MockSelectSW != 0 {
+		return c.MockSelectSW
+	}
+	return 0x9000
 }
 
 func (c *Card) doGetData(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {

@@ -102,6 +102,26 @@ type Session struct {
 	// operating on the AID the operator named, not on the
 	// implicit default).
 	sdAID []byte
+
+	// cardLocked records whether the SELECT that opened this
+	// session returned SW=6283. GP §11.1.2 documents 6283 as
+	// "selected file invalidated" — the card is in CARD_LOCKED
+	// lifecycle (see GP §5.3.1), the SELECT structurally
+	// succeeded (FCI was returned), but the card signals that
+	// management operations may be constrained.
+	//
+	// GlobalPlatformPro and OpenSC tolerate 6283 on SELECT and
+	// continue with whatever read-only data is available rather
+	// than treating it as a hard failure. The securitydomain
+	// package follows the same model: OpenUnauthenticatedWithAID
+	// records the warning and returns success; CardLocked()
+	// surfaces it to callers (sd info renders a CARD_LOCKED
+	// warning, programmatic consumers can decide whether to
+	// proceed).
+	//
+	// Per the third external review, Section 9 (locked-card
+	// SELECT behavior).
+	cardLocked bool
 }
 
 // dekProvider is the unexported capability interface that the SD
@@ -437,6 +457,17 @@ func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, 
 // addressed by AID.
 //
 // Per the external review on feat/sd-keys-cli, Finding 2.
+//
+// Locked-card tolerance: SW=6283 from the SELECT is treated as
+// success-with-warning rather than failure. GP §11.1.2 documents
+// 6283 as "selected file invalidated" — the FCI returned but the
+// applet is in CARD_LOCKED lifecycle. GlobalPlatformPro and OpenSC
+// both tolerate this; the resulting Session has CardLocked() == true
+// so the caller can decide whether to proceed with read-only flows
+// (CRD probe, registry walk on locked-card-permitted scopes) or
+// surface a clear error.
+//
+// Per the third external review, Section 9.
 func OpenUnauthenticatedWithAID(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
@@ -447,10 +478,25 @@ func OpenUnauthenticatedWithAID(ctx context.Context, t transport.Transport, sdAI
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", err)
 	}
-	if !resp.IsSuccess() {
+	locked := false
+	switch resp.StatusWord() {
+	case 0x9000:
+		// Normal success.
+	case 0x6283:
+		// CARD_LOCKED warning per GP §11.1.2 / §5.3.1. Card is
+		// in a constrained lifecycle but the SELECT returned
+		// FCI; downstream reads can still attempt to proceed.
+		// Flag the session so the caller knows.
+		locked = true
+	default:
 		return nil, fmt.Errorf("securitydomain: select SD: %w", resp.Error())
 	}
-	return &Session{transport: t, authenticated: false, sdAID: cloneAID(aid)}, nil
+	return &Session{
+		transport:     t,
+		authenticated: false,
+		sdAID:         cloneAID(aid),
+		cardLocked:    locked,
+	}, nil
 }
 
 // effectiveSDAID returns the AID an Open* call should target. Empty
@@ -555,6 +601,28 @@ func (s *Session) Protocol() string {
 // what the session ended up targeting).
 func (s *Session) SDAID() []byte {
 	return cloneAID(s.sdAID)
+}
+
+// CardLocked reports whether the SELECT that opened this session
+// returned SW=6283 (CARD_LOCKED warning per GP §11.1.2). When true,
+// the card's applet is in a constrained lifecycle: the SELECT
+// structurally succeeded so reads against the unauthenticated channel
+// can be attempted, but management operations and authenticated
+// reads may be rejected by the card with SW=6985 ("conditions of use
+// not satisfied") or similar.
+//
+// Returns false on a normal 9000 SELECT (the typical case) and on
+// every authenticated Open* path (which require 9000 by construction).
+//
+// Callers reporting card identity (e.g. sd info) should display the
+// CARD_LOCKED state prominently so an operator diagnosing a card
+// that "just isn't responding" sees the actual cause; programmatic
+// consumers can decide whether to proceed with read-only operations
+// or surface a clear error.
+//
+// Per the third external review, Section 9 (locked-card SELECT).
+func (s *Session) CardLocked() bool {
+	return s.cardLocked
 }
 
 // transmit sends a command through the appropriate channel.

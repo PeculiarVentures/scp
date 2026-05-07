@@ -483,3 +483,99 @@ func TestSDInfo_SDAIDFlag_RejectsInvalid(t *testing.T) {
 		t.Errorf("err type = %T, want *usageError", err)
 	}
 }
+
+// TestSDInfo_CardLocked6283_ReportsAndContinues exercises the
+// end-to-end CARD_LOCKED path through 'sd info' against a mockcard
+// configured with MockSelectSW=0x6283. Pins three behaviors:
+//
+//  1. The command does NOT fail. Returns nil error and emits a
+//     readable report.
+//  2. The output contains a CARD_LOCKED indicator (the SKIP line
+//     emitted by runProbe before any read paths).
+//  3. The JSON output sets data.card_locked=true so a programmatic
+//     consumer can key on the field rather than parsing prose.
+//
+// Per the third external review, Section 9.
+func TestSDInfo_CardLocked6283_ReportsAndContinues(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	mc.MockSelectSW = 0x6283
+
+	t.Run("text output reports CARD_LOCKED and does not fail", func(t *testing.T) {
+		var buf bytes.Buffer
+		env := &runEnv{
+			out: &buf, errOut: &buf,
+			connect: func(_ context.Context, _ string) (transport.Transport, error) {
+				return mc.Transport(), nil
+			},
+		}
+		err := cmdSDInfo(context.Background(), env, []string{"--reader", "fake"})
+		if err != nil {
+			t.Fatalf("cmdSDInfo: %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, "CARD_LOCKED") {
+			t.Errorf("expected CARD_LOCKED indicator in output:\n%s", out)
+		}
+		if !strings.Contains(out, "6283") {
+			t.Errorf("expected SW 6283 referenced in output:\n%s", out)
+		}
+	})
+
+	t.Run("JSON output sets data.card_locked=true", func(t *testing.T) {
+		var buf bytes.Buffer
+		env := &runEnv{
+			out: &buf, errOut: &buf,
+			connect: func(_ context.Context, _ string) (transport.Transport, error) {
+				return mc.Transport(), nil
+			},
+		}
+		err := cmdSDInfo(context.Background(), env, []string{"--reader", "fake", "--json"})
+		if err != nil {
+			t.Fatalf("cmdSDInfo: %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		// Pin the field name. JSON shape is decided in
+		// probeData; if a regression renames or drops the
+		// field, programmatic consumers break.
+		if !strings.Contains(out, "\"card_locked\"") {
+			t.Errorf("expected 'card_locked' key in JSON output:\n%s", out)
+		}
+		if !strings.Contains(out, "\"card_locked\": true") {
+			t.Errorf("expected card_locked=true; got:\n%s", out)
+		}
+	})
+}
+
+// TestSDInfo_NormalSelect_NoCardLockedField pins the negative case:
+// a regular 9000 SELECT must NOT include the card_locked field in
+// JSON output (omitempty) and must NOT mention CARD_LOCKED in text.
+// Catches a regression that flips the default or always includes
+// the warning.
+func TestSDInfo_NormalSelect_NoCardLockedField(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	// MockSelectSW unset → defaults to 9000.
+
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return mc.Transport(), nil
+		},
+	}
+	if err := cmdSDInfo(context.Background(), env, []string{"--reader", "fake", "--json"}); err != nil {
+		t.Fatalf("cmdSDInfo: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if strings.Contains(out, "card_locked") {
+		t.Errorf("'card_locked' should be omitted from JSON when false (omitempty); got:\n%s", out)
+	}
+	if strings.Contains(out, "CARD_LOCKED") {
+		t.Errorf("CARD_LOCKED should not appear in text on a normal 9000 SELECT; got:\n%s", out)
+	}
+}

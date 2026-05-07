@@ -41,6 +41,23 @@ type probeData struct {
 	// to "scp11a" / "scp11c" once Finding 4 lands.
 	AuthMode string `json:"auth_mode,omitempty"`
 
+	// CardLocked reports whether the SELECT that opened the probe
+	// session returned SW=6283 (CARD_LOCKED warning per GP §11.1.2).
+	// True means the card's applet is in CARD_LOCKED lifecycle:
+	// the SELECT structurally returned FCI but management
+	// operations and authenticated reads may be rejected by the
+	// card. The probe still proceeds with the read paths — failing
+	// closed on a CARD_LOCKED card would refuse to describe it at
+	// all, which is exactly the case where an operator most needs
+	// information.
+	//
+	// Omitted from JSON when false (the typical case). Surfaces in
+	// text output as a CARD_LOCKED warning line so an operator
+	// sees it prominently.
+	//
+	// Per the third external review, Section 9 (locked-card SELECT).
+	CardLocked bool `json:"card_locked,omitempty"`
+
 	// KeyInfo is populated by 'sd info' (and other callers that set
 	// probeOptions.fetchKeyInfo). Each entry is a human-readable
 	// summary like 'KID=0x01 KVN=0xFF (3 components)'. Omitted from
@@ -198,6 +215,22 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	}
 	defer sd.Close()
 
+	// CARD_LOCKED warning surfaces immediately so it appears
+	// before the per-step Pass/Fail lines and an operator sees
+	// it prominently. The probe continues either way — failing
+	// closed on CARD_LOCKED would refuse to describe the card,
+	// which is exactly the case where the operator most needs
+	// information about it.
+	//
+	// Per the third external review, Section 9.
+	cardLocked := sd.CardLocked()
+	if cardLocked {
+		report.Skip("SELECT SD",
+			"card returned SW=6283 (CARD_LOCKED, GP §11.1.2). FCI returned, "+
+				"reads will be attempted, but management operations and "+
+				"authenticated reads may be rejected by the card.")
+	}
+
 	raw, err := sd.GetCardRecognitionData(ctx)
 	if err != nil {
 		report.Fail("GET DATA tag 0x66", err.Error())
@@ -219,7 +252,7 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	}
 	report.Pass("parse CRD", "")
 
-	data := &probeData{RawHex: hexEncode(raw), AuthMode: authMode}
+	data := &probeData{RawHex: hexEncode(raw), AuthMode: authMode, CardLocked: cardLocked}
 	if len(info.GPVersion) > 0 {
 		data.GPVersion = joinInts(info.GPVersion, ".")
 	}
