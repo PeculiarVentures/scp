@@ -73,14 +73,21 @@ func (c *MockCard) doGetData(p1, p2 byte, requestBody []byte) (*apdu.Response, e
 // syntheticCRD is the Card Recognition Data blob the mock returns
 // for GET DATA tag 0x0066. Hand-assembled per GP Card Spec §H.2:
 // outer 66 LL, inner 73 LL OID list, GP RID marker + GP version
-// (1.2.840.114283.2.2.3.1 = 2.3.1) + SCP info OID
+// (1.2.840.114283.2.2.3.1 = 2.3.1) + Card Identification Scheme
+// (1.2.840.114283.3 — the YubiKey signature OID, see profile.Probe
+// docs and cardrecognition's RetailYubiKey5 fixture) + SCP info
 // (1.2.840.114283.4.3.65 = SCP03 i=0x65). Same shape as the test
 // fixture used by the cardrecognition package and #41 trace tests.
+//
+// Length math: inner children = GP RID (9) + GP version (14) +
+// card-id OID (11) + SCP03 (13) = 47 = 0x2F. Wrapped tag 0x73 ->
+// 49 bytes. Wrapped tag 0x66 -> 51 bytes total.
 var syntheticCRD = []byte{
-	0x66, 0x26,
-	0x73, 0x24,
+	0x66, 0x31,
+	0x73, 0x2F,
 	0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x01,
 	0x60, 0x0C, 0x06, 0x0A, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x02, 0x02, 0x03, 0x01,
+	0x63, 0x09, 0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x03,
 	0x64, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x03, 0x65,
 }
 
