@@ -22,6 +22,8 @@ Tracks which PIV operations have been exercised end to end against which cards. 
 
 The YubiKey rows are verified against retail YubiKey 5 series tokens via `cmd/scpctl test ...` runs. The test suite (`scpctl test all`) covers SELECT, PIN verify, the SCP03/11b/11a SD reads, and the SCP11b-wrapped PIV verify. Generate, put cert, attest, and reset are exercised by `scpctl piv provision` and `scpctl piv reset` against the same hardware. SCP11b PIV requires firmware 5.7+; older firmware shows up as `n/a`, not as a regression.
 
+Most recent end-to-end hardware verification: **YubiKey 5C NFC firmware 5.7.4, May 2026**. The full `scpctl piv provision --attest` flow (open SCP11b vs PIV → MGMT-KEY AUTH (AES-192) → VERIFY PIN → GENERATE KEY (ECC P-256) → ATTESTATION) succeeded end-to-end including the chained-response GET RESPONSE path that ATTEST exercises. The `scpctl probe` and `scpctl sd keys list` profile auto-detection landed on `yubikey-sd` via the Card Recognition Data Card Identification Scheme OID (`1.2.840.114283.3`).
+
 ## What `spec` means for the Standard PIV row
 
 The library emits the SP 800-73-4 instruction subset for Standard PIV operations (SELECT, VERIFY, CHANGE REFERENCE DATA, RESET RETRY COUNTER, GENERATE ASYMMETRIC KEY PAIR, GENERAL AUTHENTICATE, PUT DATA, GET DATA). The host-side capability gate refuses YubiKey-proprietary instructions under the Standard PIV profile, so a Standard PIV card cannot be issued an INS byte it does not understand.
