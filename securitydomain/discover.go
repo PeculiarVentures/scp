@@ -120,7 +120,15 @@ func DiscoverISD(ctx context.Context, t transport.Transport, candidates []gp.ISD
 	var lastErr error
 
 	for _, c := range candidates {
-		sd, err := OpenUnauthenticatedWithAID(ctx, t, c.AID)
+		// Use openSelectAIDLiteral, not OpenUnauthenticatedWithAID,
+		// so that a nil-AID candidate sends an empty SELECT (the
+		// ISO/IEC 7816-4 §5.3.1 default-selection probe) rather
+		// than silently substituting AIDSecurityDomain. The
+		// public OpenUnauthenticatedWithAID applies that fallback
+		// as a usability convenience for direct callers; here it
+		// would collapse the curated list's third candidate into
+		// the first.
+		sd, err := openSelectAIDLiteral(ctx, t, c.AID)
 		if err == nil {
 			// OpenUnauthenticatedWithAID tolerates SW=6283
 			// (CARD_LOCKED) as success-with-warning per

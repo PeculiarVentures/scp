@@ -39,6 +39,20 @@ var ISDDiscoveryAIDs = []ISDCandidate{
 		Source: "GP Card Spec v2.3.1 §F.6 (Card Manager AID, shorter form used by older cards)",
 	},
 	{
+		AID: mustHexAID("A000000018434D00"),
+		Source: "GemPlus / Gemalto / Thales Card Manager AID. " +
+			"IIN prefix A0000000 18 is the GemPlus RID per ISO/IEC " +
+			"7816-5 registration; suffix 434D00 (\"CM\\0\") is " +
+			"\"Card Manager\" as used in GemXpresso, IDPrime, IDCore, " +
+			"and SafeNet eToken Fusion firmware. Empirically " +
+			"confirmed against a SafeNet eToken Fusion (Thales-built, " +
+			"OS release date 2017-11-30), where the card returns FCI " +
+			"naming this AID as the default-selected application. " +
+			"Citation derived from ISO/IEC 7816-5 IIN registration " +
+			"and the card's own SELECT response, not from any " +
+			"GPL/AGPL/LGPL implementation.",
+	},
+	{
 		AID:    nil,
 		Source: "ISO/IEC 7816-4 §5.3.1 (default selection: SELECT with no AID; some cards auto-select the ISD on power-up)",
 	},
