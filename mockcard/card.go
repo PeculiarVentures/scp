@@ -190,6 +190,19 @@ type Card struct {
 	// references they need. Default (nil) preserves the historical
 	// single-SCP03-entry behavior used by existing tests.
 	KeyInformationTemplate []byte
+
+	// MockSDAID, when non-nil and non-empty, overrides the default
+	// GP-standard ISD AID (A0000001510000) for SELECT matching. Used
+	// to exercise the host-side --sd-aid plumb-through (Finding 2)
+	// without requiring a vendor-specific real card. SELECT against
+	// the override AID returns 9000; SELECT against the GP-standard
+	// AID returns 6A82 (file not found) when an override is in
+	// effect, mirroring how a vendor-specific card behaves when
+	// addressed by the wrong AID.
+	//
+	// Nil/empty preserves the historical behavior (only the GP-
+	// standard AID is recognized).
+	MockSDAID []byte
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -665,7 +678,16 @@ func (c *Card) doSelect(cmd *apdu.Command, underSM bool) (*apdu.Response, error)
 	if !underSM {
 		c.session = nil
 	}
-	if bytesEq(cmd.Data, aidSD) {
+	// MockSDAID overrides the default GP-standard ISD AID. When set,
+	// the override AID is the only one that resolves to the SD;
+	// the GP-standard AID returns 6A82 (file not found), mirroring
+	// vendor-specific cards that use a non-default ISD AID.
+	if len(c.MockSDAID) > 0 && bytesEq(cmd.Data, c.MockSDAID) {
+		c.selectedAID = c.MockSDAID
+		c.pivSelected = false
+		return mkSW(0x9000), nil
+	}
+	if len(c.MockSDAID) == 0 && bytesEq(cmd.Data, aidSD) {
 		c.selectedAID = aidSD
 		c.pivSelected = false
 		return mkSW(0x9000), nil

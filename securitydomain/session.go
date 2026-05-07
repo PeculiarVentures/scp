@@ -83,6 +83,25 @@ type Session struct {
 	// methods will consult this field too. Set once at session
 	// open and never mutated for the session's lifetime.
 	profile profile.Profile
+
+	// sdAID records which Security Domain AID this session
+	// targets. Set at Open* via the explicit sdAID parameter
+	// or defaulted to AIDSecurityDomain when none was given.
+	//
+	// Stored so callers / observers (telemetry, JSON output,
+	// post-open diagnostics) can recover the addressed AID
+	// without rebuilding it from external state. Read-only
+	// after construction; cloneAID at Open* time means a
+	// caller mutating the input slice can't corrupt this copy.
+	//
+	// Per the external review on feat/sd-keys-cli, Finding 2:
+	// non-default ISD AIDs must be addressable via the Open*
+	// API. The SDAID() accessor exposes the chosen value for
+	// CLI output and for sanity-checks across nested calls
+	// (e.g. lifecycle commands that want to assert they're
+	// operating on the AID the operator named, not on the
+	// implicit default).
+	sdAID []byte
 }
 
 // dekProvider is the unexported capability interface that the SD
@@ -187,7 +206,37 @@ func sessionDEK(s scp.Session) []byte {
 // AIDSecurityDomain regardless of the values in cfg — Security Domain
 // management requires a fully-authenticated channel against the ISD,
 // and the wrapper would otherwise silently downgrade.
+//
+// For non-default ISD AIDs (vendor-specific cards, Supplementary
+// Security Domains addressed by AID), use OpenSCP03WithAID.
 func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*Session, error) {
+	return OpenSCP03WithAID(ctx, t, cfg, nil)
+}
+
+// OpenSCP03WithAID is OpenSCP03 with an explicit Security Domain AID.
+//
+// sdAID controls which Security Domain the SCP03 session targets via
+// the SELECT FILE that opens the channel:
+//
+//   - sdAID == nil OR len(sdAID) == 0: default to AIDSecurityDomain
+//     (the GP-standard ISD AID A0000001510000). Identical behavior
+//     to OpenSCP03; OpenSCP03 calls this function with nil.
+//
+//   - sdAID non-empty: SELECT this AID instead. Used for non-YubiKey
+//     GP cards whose ISD lives at a vendor-specific AID, and for
+//     Supplementary Security Domains (SSDs) addressed by AID rather
+//     than as the implicit default.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2: a
+// --sd-aid plumb-through across generic SD commands is the biggest
+// generic-GP interop blocker, since cards that use a non-default
+// ISD AID currently cannot be addressed at all.
+//
+// SecurityLevel is still forced to LevelFull for the same reason as
+// OpenSCP03 (full SCP03 SD management always requires a fully-
+// authenticated channel; allowing partial security levels here would
+// silently downgrade the channel). Only the AID is configurable.
+func OpenSCP03WithAID(ctx context.Context, t transport.Transport, cfg *scp03.Config, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
@@ -208,7 +257,7 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 	// we override are scalars / nil-able pointers, so a shallow copy
 	// is enough to isolate the side effect.
 	local := *cfg
-	local.SelectAID = AIDSecurityDomain
+	local.SelectAID = effectiveSDAID(sdAID)
 	local.SecurityLevel = channel.LevelFull
 
 	scpSess, err := scp03.Open(ctx, t, &local)
@@ -226,6 +275,7 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 		authenticated:    true,
 		oceAuthenticated: sessionOCEAuthenticated(scpSess),
 		dek:              dek,
+		sdAID:            cloneAID(local.SelectAID),
 	}, nil
 }
 
@@ -244,7 +294,21 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 // PutSCP03Key, PutECPrivateKey, and PutECPublicKey all failed with
 // "SCP03 session required" against an SCP11-authenticated session —
 // even though the SCP11 session DOES derive a usable DEK.
+//
+// For non-default ISD AIDs (vendor-specific cards, Supplementary
+// Security Domains addressed by AID), use OpenSCP11WithAID.
 func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*Session, error) {
+	return OpenSCP11WithAID(ctx, t, cfg, nil)
+}
+
+// OpenSCP11WithAID is OpenSCP11 with an explicit Security Domain AID.
+//
+// sdAID semantics match OpenSCP03WithAID: nil/empty defaults to
+// AIDSecurityDomain; non-empty selects that AID instead. Used for
+// non-YubiKey GP cards and for Supplementary Security Domains.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2.
+func OpenSCP11WithAID(ctx context.Context, t transport.Transport, cfg *scp11.Config, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
@@ -252,7 +316,7 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*
 		return nil, errors.New("securitydomain: scp11 Config is required (use scp11.YubiKeyDefaultSCP11bConfig() or scp11.StrictGPSCP11bConfig() as a starting point)")
 	}
 	local := *cfg
-	local.SelectAID = AIDSecurityDomain
+	local.SelectAID = effectiveSDAID(sdAID)
 	local.ApplicationAID = nil
 
 	scpSess, err := scp11.Open(ctx, t, &local)
@@ -265,6 +329,7 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*
 		transport:        t,
 		authenticated:    true,
 		oceAuthenticated: sessionOCEAuthenticated(scpSess),
+		sdAID:            cloneAID(local.SelectAID),
 	}
 	if dek := sessionDEK(scpSess); len(dek) > 0 {
 		// SCP11-derived DEK passes the same length check used for
@@ -355,11 +420,29 @@ func validateDEK(dek []byte) error {
 }
 
 // OpenUnauthenticated opens a read-only session to the Security Domain.
+//
+// Targets the GP-standard ISD AID. For non-default AIDs use
+// OpenUnauthenticatedWithAID.
 func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, error) {
+	return OpenUnauthenticatedWithAID(ctx, t, nil)
+}
+
+// OpenUnauthenticatedWithAID is OpenUnauthenticated with an explicit
+// Security Domain AID.
+//
+// sdAID semantics match OpenSCP03WithAID: nil/empty defaults to
+// AIDSecurityDomain; non-empty selects that AID instead. Used to
+// run non-destructive reads (CRD, KIT, registry walk) against a
+// non-default ISD AID or against a Supplementary Security Domain
+// addressed by AID.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2.
+func OpenUnauthenticatedWithAID(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
-	cmd := apdu.NewSelect(AIDSecurityDomain)
+	aid := effectiveSDAID(sdAID)
+	cmd := apdu.NewSelect(aid)
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", err)
@@ -367,7 +450,30 @@ func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, 
 	if !resp.IsSuccess() {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", resp.Error())
 	}
-	return &Session{transport: t, authenticated: false}, nil
+	return &Session{transport: t, authenticated: false, sdAID: cloneAID(aid)}, nil
+}
+
+// effectiveSDAID returns the AID an Open* call should target. Empty
+// or nil input falls back to the GP-standard ISD AID; non-empty
+// input is returned unchanged. The caller is responsible for cloning
+// before storing — Open* functions store via cloneAID so per-Session
+// state can't be mutated by a caller that retains a slice reference.
+func effectiveSDAID(sdAID []byte) []byte {
+	if len(sdAID) == 0 {
+		return AIDSecurityDomain
+	}
+	return sdAID
+}
+
+// cloneAID copies an AID slice so the Session retains a stable
+// reference even if the caller mutates the input.
+func cloneAID(aid []byte) []byte {
+	if len(aid) == 0 {
+		return nil
+	}
+	out := make([]byte, len(aid))
+	copy(out, aid)
+	return out
 }
 
 // Close terminates the session and zeros key material.
@@ -432,6 +538,23 @@ func (s *Session) Protocol() string {
 		return s.scpSession.Protocol()
 	}
 	return "none"
+}
+
+// SDAID returns a defensive copy of the Security Domain AID this
+// session targets. The AID was set at Open* — either explicitly via
+// the sdAID parameter on the *WithAID variants or implicitly defaulted
+// to AIDSecurityDomain (the GP-standard ISD) when no AID was given.
+//
+// The returned slice is a copy: mutating it does not affect the
+// session's internal state, and the session's stored AID is never
+// mutated after construction.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2: lets
+// callers verify which AID was actually addressed (useful in JSON
+// output that should record both the operator's --sd-aid input and
+// what the session ended up targeting).
+func (s *Session) SDAID() []byte {
+	return cloneAID(s.sdAID)
 }
 
 // transmit sends a command through the appropriate channel.
