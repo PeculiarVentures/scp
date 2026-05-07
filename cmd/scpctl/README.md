@@ -384,8 +384,57 @@ scpctl sd bootstrap-oce \
 
 The CLI never logs key bytes — the report shows `SCP03 keys PASS — custom (KVN 0x01, AES-128)` (or `factory (KVN 0xFF, AES-128 well-known)`), nothing more.
 
+## SCP11a/c management auth for `sd keys *` and `sd allowlist *`
+
+Every management verb in the `sd` group (`allowlist set`/`clear`, `keys delete`/`generate`/`import`) accepts SCP11a or SCP11c as an alternative to SCP03 for cards that have been moved off shared-secret SCP03 management onto certificate-based authentication. SCP11b is deliberately **not** offered: it's one-way auth (the card authenticates to the host but the host does not authenticate to the card), and every OCE-gated command on these verbs would be rejected by the card with `SW=6982`. The flag parser refuses `--scp11-mode=b` at parse time so the failure is fast and the diagnostic is clear.
+
+The flag set parallels the smoke-test surface but uses an `--scp11-` prefix to keep the auth flag group visually separate from the OCE-installation flags on `bootstrap-oce`:
+
+| Flag | Purpose |
+|---|---|
+| `--scp11-mode a`\|`c` | SCP11 variant. `a` = mutual auth via certificate chain (GP slot KID `0x11`). `c` = mutual auth with receipt for scriptable replay (KID `0x15`). Empty default keeps the command on SCP03. |
+| `--scp11-oce-key <pem>` | OCE private key (PKCS#8 or SEC1, P-256). Required when `--scp11-mode` is set. |
+| `--scp11-oce-cert <pem>` | OCE certificate chain, leaf-last. Required when `--scp11-mode` is set. The card validates this chain against its installed OCE root before accepting the authentication. |
+| `--scp11-oce-kid <hex>` | OCE Key ID on the card (defaults to `0x10` per Yubico factory). |
+| `--scp11-oce-kvn <hex>` | OCE Key Version Number (defaults to `0x03`). |
+| `--scp11-sd-kid <hex>` | Card-side SD key reference KID. Defaults to `0x11` for SCP11a or `0x15` for SCP11c per GP Amendment F §7.1.1. Override only for non-standard slots. |
+| `--scp11-sd-kvn <hex>` | Card-side SD KVN. Defaults to `0x00` (GP literal "any version"). |
+| `--scp11-trust-roots <pem>` | **Production.** PEM bundle of card root certificates. Loaded into `cfg.CardTrustAnchors` so the card's certificate is validated during the SCP11 handshake. |
+| `--scp11-lab-skip-trust` | **Lab only.** Skip card cert validation. Reduces SCP11 to opportunistic encryption against an unauthenticated card key. Mutually exclusive with `--scp11-trust-roots`. |
+
+`--scp03-*` and `--scp11-*` are mutually exclusive — pick one auth mode per command. The trust-config flags (`--scp11-trust-roots` vs `--scp11-lab-skip-trust`) are also mutually exclusive within the SCP11 group; opening SCP11 against an unauthenticated card key without explicit lab opt-in is opportunistic encryption rather than authenticated key agreement, and the helper refuses to do that silently.
+
+```bash
+# SCP03 (default) — historical management-auth path
+scpctl sd keys delete \
+  --reader "YubiKey" --kid 11 --kvn 7F \
+  --confirm-delete-key
+
+# SCP11a — cert-based mutual auth, production trust roots
+scpctl sd allowlist set \
+  --reader "VendorCard" \
+  --kid 11 --kvn 01 \
+  --serial 0x12ab --serial 0x34cd \
+  --scp11-mode a \
+  --scp11-oce-key /etc/oce/oce.key.pem \
+  --scp11-oce-cert /etc/oce/oce.chain.pem \
+  --scp11-trust-roots /etc/oce/card-roots.pem \
+  --confirm-write
+
+# SCP11c — same shape with the receipt-validating variant
+scpctl sd keys generate \
+  --reader "VendorCard" --kid 11 --kvn 02 \
+  --scp11-mode c \
+  --scp11-oce-key /etc/oce/oce.key.pem \
+  --scp11-oce-cert /etc/oce/oce.chain.pem \
+  --scp11-trust-roots /etc/oce/card-roots.pem \
+  --confirm-write
+```
+
+The session report names which mode opened: `open SCP11 session PASS` (with the protocol string in JSON's `data.channel` reading `scp11a` or `scp11c`) or `open SCP03 session PASS` for the historical path.
+
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (mgmt-key auth + cert-binding), `piv-reset`, `test`. SCP11 commands accept `--trust-roots <pem>` for production trust validation. SCP03 commands accept `--scp03-{kvn,enc,mac,dek}` for rotated-key cards.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (mgmt-key auth + cert-binding), `piv-reset`, `test`. SCP11 smoke commands accept `--trust-roots <pem>` for production trust validation. SCP03 commands accept `--scp03-{kvn,enc,mac,dek}` for rotated-key cards. The `sd` management verbs (`sd allowlist set`/`clear`, `sd keys delete`/`generate`/`import`) accept SCP11a/c as an alternative to SCP03 via the `--scp11-*` flag group documented above; SCP11b is rejected for OCE-gated operations.
 - Next: `GET METADATA` (Yubico extension) for auto-detecting management-key algorithm against a card whose state isn't known up front.
-- Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
+- Deferred: SCP11c with `HostID` / `CardGroupID` — the `scp11.Config` fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. SCP11c WITHOUT those parameters works today as the receipt-validating variant of SCP11a (with `KID=0x15` per GP) and is what `--scp11-mode c` exposes; the deferred work is exclusively the host-identifier path. A dedicated `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c-with-host-binding. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
