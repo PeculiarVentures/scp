@@ -112,6 +112,68 @@ func TestDeriveSessionKeys_MismatchedLengths(t *testing.T) {
 	}
 }
 
+// TestSCP11bDerivationIncludesStaticECDH pins the SCP11b derivation
+// behavior this library implements: Z = ShSee || ShSes, where ShSes
+// is computed by reusing the OCE ephemeral key against the SD static
+// public key. The test exercises kdf in isolation (no real ECDH
+// values needed; the KDF treats its inputs as opaque byte strings)
+// and asserts two things at once.
+//
+// First: providing two different ShSes values with identical ShSee
+// MUST produce different session keys. If a future "cleanup" makes
+// DeriveSessionKeysFromSharedSecrets ignore shSes for any reason
+// (filtered as zero-length, dropped under a SCP11b code path, etc.),
+// keysA and keysB will be equal and this test fails loudly.
+//
+// Second: providing ShSes alongside ShSee MUST produce different
+// session keys than ShSee alone. If a future change strips the
+// second ECDH term to "match the spec literally" without auditing
+// the interop consequences, keysA will equal keysShSeeOnly and
+// every Yubico/YubiKey SCP11b interop will silently break on the
+// host side. This test catches that before any wire bytes go out.
+//
+// See the package comment for the rationale on why SCP11b in this
+// library uses Z = ShSee || ShSes rather than Z = ShSee.
+func TestSCP11bDerivationIncludesStaticECDH(t *testing.T) {
+	shSee := bytes.Repeat([]byte{0xAA}, 32)
+	shSesA := bytes.Repeat([]byte{0xBB}, 32)
+	shSesB := bytes.Repeat([]byte{0xCC}, 32)
+
+	keysA, err := DeriveSessionKeysFromSharedSecrets(shSee, shSesA, nil, nil)
+	if err != nil {
+		t.Fatalf("derive with shSesA: %v", err)
+	}
+	keysB, err := DeriveSessionKeysFromSharedSecrets(shSee, shSesB, nil, nil)
+	if err != nil {
+		t.Fatalf("derive with shSesB: %v", err)
+	}
+	keysShSeeOnly, err := DeriveSessionKeysFromSharedSecrets(shSee, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("derive with shSee only: %v", err)
+	}
+
+	// shSes must contribute to the derivation: A and B must differ.
+	if bytes.Equal(keysA.SENC, keysB.SENC) {
+		t.Error("derivation does not include shSes: SENC identical with different shSes values")
+	}
+	if bytes.Equal(keysA.SMAC, keysB.SMAC) {
+		t.Error("derivation does not include shSes: SMAC identical with different shSes values")
+	}
+	if bytes.Equal(keysA.Receipt, keysB.Receipt) {
+		t.Error("derivation does not include shSes: Receipt key identical with different shSes values")
+	}
+
+	// The SCP11b interop derivation must include shSes. Stripping it
+	// to match a strict "Z = ShSee" reading of GP Amendment F would
+	// silently break Yubico/YubiKey SCP11b interop.
+	if bytes.Equal(keysA.SENC, keysShSeeOnly.SENC) {
+		t.Error("derivation with shSes equals derivation without shSes: shSes did not contribute to SENC")
+	}
+	if bytes.Equal(keysA.SMAC, keysShSeeOnly.SMAC) {
+		t.Error("derivation with shSes equals derivation without shSes: shSes did not contribute to SMAC")
+	}
+}
+
 func TestPadUnpad(t *testing.T) {
 	tests := []struct {
 		input     []byte
