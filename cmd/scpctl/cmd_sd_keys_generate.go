@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"strings"
 
 	"github.com/PeculiarVentures/scp/securitydomain"
 )
@@ -113,6 +114,7 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 			"runs in dry-run mode (validates inputs, reports the planned "+
 			"action, exits 0 without opening SCP03 or issuing the APDU).")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	scp11Keys := registerSCP11KeyFlags(fs, scp11Optional)
 	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -163,8 +165,7 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 			"import instead."}
 	}
 
-	scp03Cfg, err := scp03Keys.applyToConfig()
-	if err != nil {
+	if err := validateAuthFlags(scp03Keys, scp11Keys); err != nil {
 		return err
 	}
 
@@ -203,16 +204,13 @@ func cmdSDKeysGenerate(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
+	sd, profName, err := openManagementSession(ctx, t, scp03Keys, scp11Keys, sdAID, report)
 	if err != nil {
-		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd keys generate: open SCP03: %w", err)
 	}
 	defer sd.Close()
-	report.Pass("open SCP03 session", "")
-	data.Channel = "scp03"
+	data.Channel = strings.ToLower(sd.Protocol())
 	data.Profile = profName
 
 	checkName := fmt.Sprintf("GENERATE EC KEY (Yubico extension INS=0xF1) kid=0x%02X kvn=0x%02X", kid, kvn)

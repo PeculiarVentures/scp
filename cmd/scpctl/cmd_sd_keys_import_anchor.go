@@ -130,6 +130,7 @@ func cmdSDKeysImportTrustAnchor(ctx context.Context, env *runEnv, args []string)
 			"the planned action, exits 0 without opening SCP03 or transmitting "+
 			"any APDU).")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	scp11Keys := registerSCP11KeyFlags(fs, scp11Optional)
 	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -183,8 +184,7 @@ func cmdSDKeysImportTrustAnchor(ctx context.Context, env *runEnv, args []string)
 		return fmt.Errorf("sd keys import (trust anchor): compute SPKI fingerprint: %w", err)
 	}
 
-	scp03Cfg, err := scp03Keys.applyToConfig()
-	if err != nil {
+	if err := validateAuthFlags(scp03Keys, scp11Keys); err != nil {
 		return err
 	}
 
@@ -225,16 +225,13 @@ func cmdSDKeysImportTrustAnchor(ctx context.Context, env *runEnv, args []string)
 	}
 
 	// Active path.
-	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
+	sd, profName, err := openManagementSession(ctx, t, scp03Keys, scp11Keys, sdAID, report)
 	if err != nil {
-		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd keys import: open SCP03: %w", err)
 	}
 	defer sd.Close()
-	report.Pass("open SCP03 session", "")
-	data.Channel = "scp03"
+	data.Channel = strings.ToLower(sd.Protocol())
 	data.Profile = profName
 
 	putKeyCheck := fmt.Sprintf("PUT KEY P-256 public (trust anchor) kid=0x%02X kvn=0x%02X", kid, kvn)

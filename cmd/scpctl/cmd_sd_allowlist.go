@@ -186,6 +186,7 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 		"Certificate serial number to permit. Decimal or 0x-prefixed hex. "+
 			"Repeat for multiple serials. At least one is required.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	scp11Keys := registerSCP11KeyFlags(fs, scp11Optional)
 	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -224,8 +225,7 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 		canonical = append(canonical, n.String())
 	}
 
-	scp03Cfg, err := scp03Keys.applyToConfig()
-	if err != nil {
+	if err := validateAuthFlags(scp03Keys, scp11Keys); err != nil {
 		return err
 	}
 
@@ -258,16 +258,13 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
+	sd, profName, err := openManagementSession(ctx, t, scp03Keys, scp11Keys, sdAID, report)
 	if err != nil {
-		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd allowlist set: open SCP03: %w", err)
 	}
 	defer sd.Close()
-	report.Pass("open SCP03 session", "")
-	data.Channel = "scp03"
+	data.Channel = strings.ToLower(sd.Protocol())
 	data.Profile = profName
 
 	checkName := fmt.Sprintf("STORE DATA allowlist kid=0x%02X kvn=0x%02X", kid, kvn)
@@ -308,6 +305,7 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 		"Confirm destructive write. Without this flag, sd allowlist clear "+
 			"runs in dry-run mode.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	scp11Keys := registerSCP11KeyFlags(fs, scp11Optional)
 	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -333,8 +331,7 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 		return &usageError{msg: fmt.Sprintf("--kvn: %v", err)}
 	}
 
-	scp03Cfg, err := scp03Keys.applyToConfig()
-	if err != nil {
+	if err := validateAuthFlags(scp03Keys, scp11Keys); err != nil {
 		return err
 	}
 
@@ -367,16 +364,13 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 	}
 	defer t.Close()
 
-	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
+	sd, profName, err := openManagementSession(ctx, t, scp03Keys, scp11Keys, sdAID, report)
 	if err != nil {
-		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd allowlist clear: open SCP03: %w", err)
 	}
 	defer sd.Close()
-	report.Pass("open SCP03 session", "")
-	data.Channel = "scp03"
+	data.Channel = strings.ToLower(sd.Protocol())
 	data.Profile = profName
 
 	checkName := fmt.Sprintf("STORE DATA allowlist clear kid=0x%02X kvn=0x%02X", kid, kvn)
