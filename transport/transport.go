@@ -167,3 +167,62 @@ func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*a
 		SW2:  resp.SW2,
 	}, nil
 }
+
+// DrainGetResponse extends an initial response by issuing GET RESPONSE
+// over the raw transport for as long as the card returns SW=61xx
+// ("more data follows"). The accumulated data plus the final SW
+// is returned as a single Response.
+//
+// Used by SCP03 and SCP11 Session.Transmit to assemble the full
+// secure-messaging-protected payload before invoking R-MAC
+// verification. The card has computed the MAC over the entire
+// encrypted response; verifying a partial chunk fails MAC by
+// construction and (per GP §4.8) terminates the channel.
+//
+// Why this needs to be a transport-level helper rather than an
+// apdu.TransmitWithChaining call from the Session: GET RESPONSE
+// is a transport continuation, not an application-layer command.
+// Sending GET RESPONSE through the secure channel would re-wrap
+// it (incrementing the C-MAC chain on a continuation that the
+// card doesn't see as a wrapped command) and fail the next real
+// wrapped command. The drain runs on the underlying transport,
+// bypasses the channel layer, and returns the assembled bytes
+// for the channel to verify in one shot.
+//
+// initial is the response that may carry SW=61xx. If initial's
+// SW1 is not 0x61, DrainGetResponse returns it unchanged with no
+// extra round trips. The same MaxGetResponseIterations and
+// MaxCollectedResponseBytes caps apply as TransmitCollectAll.
+func DrainGetResponse(ctx context.Context, t Transport, initial *apdu.Response) (*apdu.Response, error) {
+	if initial == nil {
+		return nil, fmt.Errorf("DrainGetResponse: nil initial response")
+	}
+	if !initial.IsMoreData() {
+		return initial, nil
+	}
+
+	allData := append([]byte(nil), initial.Data...)
+	resp := initial
+	for i := 0; resp.IsMoreData(); i++ {
+		if i >= MaxGetResponseIterations {
+			return nil, fmt.Errorf("GET RESPONSE exceeded %d iterations", MaxGetResponseIterations)
+		}
+		if len(allData) >= MaxCollectedResponseBytes {
+			return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", MaxCollectedResponseBytes)
+		}
+		next, err := t.Transmit(ctx, apdu.NewGetResponse(resp.SW2))
+		if err != nil {
+			return nil, fmt.Errorf("GET RESPONSE step %d: %w", i+1, err)
+		}
+		allData = append(allData, next.Data...)
+		if len(allData) > MaxCollectedResponseBytes {
+			return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", MaxCollectedResponseBytes)
+		}
+		resp = next
+	}
+	return &apdu.Response{
+		Data: allData,
+		SW1:  resp.SW1,
+		SW2:  resp.SW2,
+	}, nil
+}
