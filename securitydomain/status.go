@@ -504,11 +504,53 @@ func parseRegistryEntry(node *tlv.Node, scope StatusScope) (RegistryEntry, error
 		}
 	}
 	if privOnly := tlv.Find(children, tagRegistryPrivOnly); privOnly != nil {
-		privs, err := ParsePrivileges(privOnly.Value)
-		if err != nil {
-			return RegistryEntry{}, err
+		// Legacy GP: tag 0xC5 carries privileges in either the
+		// 3-byte canonical form (GP §6.6.1 Table 6-1) or, on
+		// older Java Card platforms and reference test cards,
+		// in a 1-byte form that encodes only the first byte of
+		// the privilege set. GlobalPlatformPro tolerates both
+		// shapes; we follow the same rule so the registry walk
+		// against an old card surfaces AID + lifecycle even
+		// when the privileges field is non-canonical.
+		//
+		// Per the third external review, Section 7 (GET STATUS
+		// legacy/tagged parsing).
+		switch len(privOnly.Value) {
+		case 3:
+			privs, err := ParsePrivileges(privOnly.Value)
+			if err != nil {
+				return RegistryEntry{}, err
+			}
+			entry.Privileges = privs
+		case 1:
+			// Legacy 1-byte form: only byte 1 of the
+			// privilege set is present. Pad to 3 bytes
+			// with zeros and parse to extract the byte-1
+			// flags (SecurityDomain, DAPVerification,
+			// etc.). Byte 2 + 3 flags are absent on these
+			// cards so reading them as zero is correct.
+			padded := []byte{privOnly.Value[0], 0x00, 0x00}
+			privs, err := ParsePrivileges(padded)
+			if err != nil {
+				return RegistryEntry{}, err
+			}
+			entry.Privileges = privs
+		case 0:
+			// Empty privileges: card returned the tag with
+			// no value. Leave Privileges at the zero value
+			// (all flags false) and continue. Hard-failing
+			// here would refuse to describe an entry that
+			// happens to have no privileges set, which is
+			// legitimate for some load-file / package
+			// entries.
+		default:
+			// 2 bytes or 4+ bytes: shape we don't recognize.
+			// Treat as soft warning by zero-valuing
+			// Privileges rather than failing the entry.
+			// Future work could surface the raw bytes via
+			// a diagnostic field; today the AID + lifecycle
+			// path is what the operator needs most.
 		}
-		entry.Privileges = privs
 	}
 
 	if assoc := tlv.Find(children, tagRegistryAssocSD); assoc != nil {
