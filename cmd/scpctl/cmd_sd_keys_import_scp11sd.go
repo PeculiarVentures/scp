@@ -3,9 +3,30 @@ package main
 // SCP11 SD key-import branch of `scpctl sd keys import`.
 //
 // Imports an SCP11 endpoint private key (and optionally a
-// certificate chain) at one of the SCP11 SD slots:
-//   KID 0x11 / 0x13 / 0x15 (SCP11a / b / c authentication keys)
-//   KID 0x10 / 0x20-0x2F   (SCP11 management slots)
+// certificate chain) at one of the three SCP11 authentication
+// slots:
+//
+//   KID 0x11   SCP11a — mutual auth, OCE certificate verified by card
+//   KID 0x13   SCP11b — card-only auth, no OCE cert required
+//   KID 0x15   SCP11c — same shape as 11a, distinct slot
+//
+// These are the ONLY KIDs this branch handles. The dispatcher in
+// cmd_sd_keys_import.go enforces the invariant via
+// importCategoryForKID:
+//
+//   0x01                  -> scp03-key-set     (cmd_sd_keys_import_scp03.go)
+//   0x11 / 0x13 / 0x15    -> scp11-sd-key      (this file)
+//   0x10, 0x20-0x2F       -> ca-trust-anchor   (cmd_sd_keys_import_anchor.go)
+//
+// 0x10 (PK.CA-KLOC.ECDSA) and 0x20-0x2F (KLCC range) are CA/OCE
+// public-key trust anchors, NOT private-key import targets — they
+// route to a different branch with a different flag surface and
+// security model. An earlier revision of this file's header
+// listed them here as "SCP11 management slots"; that was wrong
+// and has been corrected. The runtime guard
+// (cmdSDKeysImportSCP11SD itself) only accepts 0x11/0x13/0x15
+// and rejects anything else as a usage error before any APDU
+// goes out.
 //
 // Composes Session.PutECPrivateKey (always) and
 // Session.StoreCertificates (only when --certs supplied). Both
@@ -19,9 +40,6 @@ package main
 // don't apply to SCP03 imports or trust-anchor imports. Keeping
 // the branch and its private helpers in one file makes the
 // "all SCP11-SD-specific code" surface auditable in isolation.
-//
-// The dispatcher in cmd_sd_keys_import.go routes into this file
-// based on importCategoryForKID(kid)=="scp11-sd-key".
 //
 // Helpers in this file used only by this branch:
 //

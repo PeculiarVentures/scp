@@ -555,3 +555,99 @@ func TestIsCATrustAnchorKID(t *testing.T) {
 		}
 	}
 }
+
+// TestSDKeysImportTrustAnchor_RejectsPrivateKeyPEM pins the
+// cross-category invariant: a trust-anchor KID (0x10 or 0x20-0x2F)
+// with a PRIVATE KEY PEM is a usage error, and the error must
+// redirect the operator to the correct import path
+// (--kid 11/13/15 for SCP11 SD private keys).
+//
+// External-review request: the file split's earlier header
+// incorrectly listed 0x10 / 0x20-0x2F under SCP11-SD private-key
+// import. The doc was wrong but the runtime invariant was
+// correct — this test pins the runtime invariant so a future
+// drift in either direction (header or guard) fails loudly.
+func TestSDKeysImportTrustAnchor_RejectsPrivateKeyPEM(t *testing.T) {
+	for _, kid := range []string{"10", "20", "2F"} {
+		t.Run("kid="+kid, func(t *testing.T) {
+			dir := t.TempDir()
+			priv := genP256TestKey(t)
+			privKeyPath := writeKeyPEM(t, dir, priv) // PKCS#8 PRIVATE KEY block
+
+			mc, err := mockcard.New()
+			if err != nil {
+				t.Fatalf("mockcard.New: %v", err)
+			}
+			env, _ := envForMock(mc)
+			err = cmdSDKeysImport(context.Background(), env, []string{
+				"--reader", "fake",
+				"--kid", kid, "--kvn", "01",
+				"--key-pem", privKeyPath,
+			})
+			if err == nil {
+				t.Fatalf("expected usageError; got nil")
+			}
+			msg := err.Error()
+			// Must identify the file as a private key
+			if !strings.Contains(msg, "private key") {
+				t.Errorf("error should identify the input as a private key; got %q", msg)
+			}
+			// Must redirect to the SCP11 SD import path
+			if !strings.Contains(msg, "--kid 11") || !strings.Contains(msg, "13") || !strings.Contains(msg, "15") {
+				t.Errorf("error should redirect to --kid 11/13/15; got %q", msg)
+			}
+			// Must NOT silently accept and treat as anchor
+			if strings.Contains(msg, "PASS") {
+				t.Errorf("private-key PEM must not pass anchor import; got %q", msg)
+			}
+		})
+	}
+}
+
+// TestSDKeysImportSCP11SD_RejectsAnchorKID is the inverse direction:
+// an SCP11 SD private-key import (--kid 11/13/15) is correctly
+// dispatched to that branch, and the dispatcher does NOT accept
+// 0x10 / 0x20-0x2F as SCP11-SD slots even with a private-key PEM.
+//
+// The dispatcher routes 0x10 / 0x20-0x2F to the anchor handler
+// regardless of input shape; the anchor handler then rejects the
+// private-key PEM (pinned in the test above). This test pins the
+// dispatch direction by reading the resulting error: it must come
+// from the anchor handler, not from cmdSDKeysImportSCP11SD's
+// isSCP11SDSlot guard.
+func TestSDKeysImportSCP11SD_DispatcherDoesNotRouteAnchorKIDs(t *testing.T) {
+	for _, kid := range []string{"10", "20", "2F"} {
+		t.Run("kid="+kid, func(t *testing.T) {
+			dir := t.TempDir()
+			priv := genP256TestKey(t)
+			privKeyPath := writeKeyPEM(t, dir, priv)
+
+			mc, err := mockcard.New()
+			if err != nil {
+				t.Fatalf("mockcard.New: %v", err)
+			}
+			env, _ := envForMock(mc)
+			err = cmdSDKeysImport(context.Background(), env, []string{
+				"--reader", "fake",
+				"--kid", kid, "--kvn", "01",
+				"--key-pem", privKeyPath,
+			})
+			if err == nil {
+				t.Fatalf("expected usageError; got nil")
+			}
+			// The anchor handler's error mentions "trust anchor"
+			// in the message; the SCP11-SD handler's defensive
+			// guard mentions "SCP11 SD import handler accepts
+			// SCP11 SD slots only". If the dispatcher routed
+			// 0x10 to the SCP11-SD handler we'd see the latter.
+			msg := err.Error()
+			if strings.Contains(msg, "SCP11 SD import handler accepts") {
+				t.Errorf("dispatcher routed anchor KID 0x%s to SCP11-SD handler; expected route to anchor handler. err=%q",
+					kid, msg)
+			}
+			if !strings.Contains(msg, "trust anchor") {
+				t.Errorf("expected anchor-handler error mentioning 'trust anchor'; got %q", msg)
+			}
+		})
+	}
+}
