@@ -333,7 +333,7 @@ func OpenSCP11WithAID(ctx context.Context, t transport.Transport, cfg *scp11.Con
 		return nil, errors.New("securitydomain: transport is required")
 	}
 	if cfg == nil {
-		return nil, errors.New("securitydomain: scp11 Config is required (use scp11.YubiKeyDefaultSCP11bConfig() or scp11.StrictGPSCP11bConfig() as a starting point)")
+		return nil, errors.New("securitydomain: scp11 Config is required (use yubikey.SCP11bConfig() or scp11.StrictGPSCP11bConfig() as a starting point)")
 	}
 	local := *cfg
 	local.SelectAID = effectiveSDAID(sdAID)

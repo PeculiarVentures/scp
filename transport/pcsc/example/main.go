@@ -19,6 +19,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/transport/pcsc"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 func main() {
@@ -60,7 +61,7 @@ func main() {
 	// production code MUST configure CardTrustPolicy or
 	// CardTrustAnchors. See "Certificate Trust Validation" in the
 	// main README.
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sess, err := scp11.Open(ctx, tr, cfg)

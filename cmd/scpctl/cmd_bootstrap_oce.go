@@ -47,7 +47,7 @@ type bootstrapOCEData struct {
 // supplied explicitly, which this version doesn't expose yet — that's
 // follow-up work, but the mechanism is straightforward (build an
 // scp03.Config from those flags rather than calling
-// FactoryYubiKeyConfig).
+// yubikey.FactorySCP03Config).
 //
 // Destructive: this command writes to the card. It is gated behind
 // --confirm-write to mirror the safety pattern the README's

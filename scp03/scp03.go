@@ -89,32 +89,6 @@ var DefaultKeys = StaticKeys{
 	DEK: []byte{0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F},
 }
 
-// YubiKey factory and GP-spec defaults for KeyVersion. See the
-// README factory-keys table for vendor-by-vendor specifics.
-const (
-	// YubiKeyFactoryKeyVersion is the KVN YubiKey 5.3+ ships with
-	// for SCP03 (per Yubico tech manual §SCP specifics). Always
-	// pair with DefaultKeys; replace the key set immediately after
-	// first connection.
-	YubiKeyFactoryKeyVersion byte = 0xFF
-)
-
-// FactoryYubiKeyConfig returns an SCP03 Config wired up for a
-// factory-fresh YubiKey: DefaultKeys at KVN 0xFF, full security
-// level. The session it produces has NO security (the keys are
-// publicly known); the only legitimate use is the first session
-// against a brand-new card so you can rotate the key set.
-//
-// Don't use this in production code paths. The deliberately verbose
-// name is the consent: typing "Factory" + "YubiKey" is the
-// acknowledgment that you're knowingly using publicly known keys.
-func FactoryYubiKeyConfig() *Config {
-	return &Config{
-		Keys:       DefaultKeys,
-		KeyVersion: YubiKeyFactoryKeyVersion,
-	}
-}
-
 // StrictGPConfig returns an SCP03 Config with spec-literal defaults
 // for the given key set: KeyVersion 0 ("any version" per GP), full
 // security level by default, and EmptyDataEncryption set explicitly

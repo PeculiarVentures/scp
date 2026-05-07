@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // TestSCP03KeyFlags_DefaultIsFactory confirms no flags = factory.
@@ -24,9 +25,9 @@ func TestSCP03KeyFlags_DefaultIsFactory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyToConfig: %v", err)
 	}
-	if cfg.KeyVersion != scp03.YubiKeyFactoryKeyVersion {
+	if cfg.KeyVersion != yubikey.FactoryKeyVersion {
 		t.Errorf("KVN got 0x%02X want 0x%02X (YubiKey factory)",
-			cfg.KeyVersion, scp03.YubiKeyFactoryKeyVersion)
+			cfg.KeyVersion, yubikey.FactoryKeyVersion)
 	}
 	if !bytesEqualKey(cfg.Keys.ENC, scp03.DefaultKeys.ENC) {
 		t.Error("ENC key not the well-known factory value")
@@ -48,8 +49,8 @@ func TestSCP03KeyFlags_ExplicitDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyToConfig: %v", err)
 	}
-	if cfg.KeyVersion != scp03.YubiKeyFactoryKeyVersion {
-		t.Errorf("KVN: got 0x%02X want 0x%02X", cfg.KeyVersion, scp03.YubiKeyFactoryKeyVersion)
+	if cfg.KeyVersion != yubikey.FactoryKeyVersion {
+		t.Errorf("KVN: got 0x%02X want 0x%02X", cfg.KeyVersion, yubikey.FactoryKeyVersion)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/trust"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // ExampleOpen_scp11b demonstrates opening an SCP11b session — the
@@ -33,7 +34,7 @@ func ExampleOpen_scp11b() {
 		return
 	}
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true // example-only; do not use in production
 
 	sess, err := scp11.Open(ctx, card.Transport(), cfg)

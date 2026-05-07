@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // TestTrustFlags_LoadsRootsAndConfiguresAnchors confirms the
@@ -61,7 +61,7 @@ func TestTrustFlags_LoadsRootsAndConfiguresAnchors(t *testing.T) {
 	if err := fs.Parse([]string{"--trust-roots", rootsPath}); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	report := &Report{Subcommand: "test"}
 	proceed, err := tf.applyTrust(cfg, report)
 	if err != nil {
@@ -86,7 +86,7 @@ func TestTrustFlags_LabSkipPath(t *testing.T) {
 	if err := fs.Parse([]string{"--lab-skip-scp11-trust"}); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	report := &Report{Subcommand: "test"}
 	proceed, err := tf.applyTrust(cfg, report)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestTrustFlags_NoFlagSkipsCleanly(t *testing.T) {
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	report := &Report{Subcommand: "test"}
 	proceed, err := tf.applyTrust(cfg, report)
 	if err != nil {
@@ -140,7 +140,7 @@ func TestTrustFlags_RejectsBothFlagsSet(t *testing.T) {
 	if err := fs.Parse([]string{"--trust-roots", "/nonexistent", "--lab-skip-scp11-trust"}); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	report := &Report{Subcommand: "test"}
 	_, err := tf.applyTrust(cfg, report)
 	if err == nil {

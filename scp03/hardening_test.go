@@ -72,21 +72,3 @@ func TestOpen_AcceptsAllSameLengths(t *testing.T) {
 		}
 	}
 }
-
-// TestFactoryYubiKeyConfig_ReturnsKVN0xFF locks in the YubiKey
-// factory KVN. Cards that ship at 0xFF (YubiKey 5.3+) reject 0x00
-// with 6A88; the helper exists so callers don't get bitten by the
-// default zero.
-func TestFactoryYubiKeyConfig_ReturnsKVN0xFF(t *testing.T) {
-	cfg := FactoryYubiKeyConfig()
-	if cfg.KeyVersion != 0xFF {
-		t.Errorf("FactoryYubiKeyConfig.KeyVersion = 0x%02X, want 0xFF", cfg.KeyVersion)
-	}
-	if cfg.KeyVersion != YubiKeyFactoryKeyVersion {
-		t.Errorf("FactoryYubiKeyConfig.KeyVersion does not match YubiKeyFactoryKeyVersion constant")
-	}
-	// Verify the keys are the GP standard 0x40..0x4F, not zeros.
-	if cfg.Keys.ENC[0] != 0x40 {
-		t.Error("FactoryYubiKeyConfig should use scp03.DefaultKeys")
-	}
-}

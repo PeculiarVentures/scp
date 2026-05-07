@@ -11,6 +11,7 @@ import (
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport"
 	"github.com/PeculiarVentures/scp/trust"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // SCP11bPIVOptions configures OpenSCP11bPIV. The two safe defaults
@@ -111,7 +112,7 @@ func OpenSCP11bPIV(
 		return nil, fmt.Errorf("piv/session: resolve PK.SD.ECKA: %w", err)
 	}
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.SelectAID = scp11.AIDPIV
 	cfg.ApplicationAID = nil
 	cfg.PreverifiedCardStaticPublicKey = pubKey

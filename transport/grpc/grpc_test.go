@@ -13,10 +13,10 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport"
 	pb "github.com/PeculiarVentures/scp/transport/grpc/proto/cardrelayv1"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // startTestServer spins up a CardRelay gRPC server backed by the
@@ -137,7 +137,7 @@ func TestClientServer_FullSCP11bSession(t *testing.T) {
 		return mock.Transport(), nil
 	})
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true // mock cert isn't pinned
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -7,6 +7,7 @@ import (
 	scp "github.com/PeculiarVentures/scp"
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // ExampleSession_Transmit shows code written against the abstract
@@ -25,7 +26,7 @@ func ExampleSession_Transmit() {
 	// implements scp.Session; this example uses SCP03 against the
 	// in-tree mock card to keep itself self-contained.
 	card := scp03.NewMockCard(scp03.DefaultKeys)
-	concrete, err := scp03.Open(ctx, card.Transport(), scp03.FactoryYubiKeyConfig())
+	concrete, err := scp03.Open(ctx, card.Transport(), yubikey.FactorySCP03Config())
 	if err != nil {
 		fmt.Println("open:", err)
 		return

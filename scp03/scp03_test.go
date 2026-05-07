@@ -316,7 +316,7 @@ func TestSessionKeys_PreservesStaticDEK(t *testing.T) {
 
 // TestStrictGPConfig verifies StrictGPConfig produces a Config with
 // GP-spec defaults: zero KVN ("any version") and the GP-literal
-// empty-data policy — the semantic difference from FactoryYubiKeyConfig.
+// empty-data policy — the semantic difference from yubikey.FactorySCP03Config.
 func TestStrictGPConfig(t *testing.T) {
 	cfg := StrictGPConfig(DefaultKeys)
 	if cfg.KeyVersion != 0x00 {

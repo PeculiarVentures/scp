@@ -307,55 +307,6 @@ var (
 	AIDOTP = []byte{0xA0, 0x00, 0x00, 0x05, 0x27, 0x20, 0x01}
 )
 
-// YubiKeyDefaultSCP11bConfig returns a starting Config for SCP11b
-// (one-way card-to-host authentication) tuned for YubiKey defaults:
-// SD applet, KID 0x13, KVN 0x01, full security level, and the
-// pad-and-encrypt empty-data policy (channel.EmptyDataPadAndEncrypt,
-// the zero value, verified against YubiKey 5.x). The caller still
-// has to configure card-trust validation: set CardTrustPolicy or
-// CardTrustAnchors, or InsecureSkipCardAuthentication for tests.
-//
-// For spec-literal defaults that don't bake in YubiKey assumptions,
-// see StrictGPSCP11bConfig.
-func YubiKeyDefaultSCP11bConfig() *Config {
-	return &Config{
-		Variant:       SCP11b,
-		SelectAID:     AIDSecurityDomain,
-		KeyID:         0x13, // GP §7.1.1 SCP11b
-		KeyVersion:    0x01,
-		SecurityLevel: channel.LevelFull,
-	}
-}
-
-// YubiKeyDefaultSCP11aConfig returns a starting Config for SCP11a
-// (mutual authentication via OCE certificate chain), tuned for
-// YubiKey. KeyID is set to the GP Amendment F §7.1.1 SCP11a slot
-// (0x11). The caller must still populate OCECertificates,
-// OCEPrivateKey, OCEKeyReference, and a card-trust configuration
-// (CardTrustPolicy / CardTrustAnchors / InsecureSkipCardAuthentication)
-// before calling Open.
-//
-// For spec-literal defaults, see StrictGPSCP11aConfig.
-func YubiKeyDefaultSCP11aConfig() *Config {
-	cfg := YubiKeyDefaultSCP11bConfig()
-	cfg.Variant = SCP11a
-	cfg.KeyID = 0x11 // GP §7.1.1 SCP11a
-	return cfg
-}
-
-// YubiKeyDefaultSCP11cConfig returns a starting Config for SCP11c
-// (mutual authentication with offline scripting), tuned for YubiKey.
-// KeyID is set to the GP Amendment F §7.1.1 SCP11c slot (0x15).
-// Same OCE/trust caveats as YubiKeyDefaultSCP11aConfig.
-//
-// For spec-literal defaults, see StrictGPSCP11cConfig.
-func YubiKeyDefaultSCP11cConfig() *Config {
-	cfg := YubiKeyDefaultSCP11bConfig()
-	cfg.Variant = SCP11c
-	cfg.KeyID = 0x15 // GP §7.1.1 SCP11c
-	return cfg
-}
-
 // StrictGPSCP11bConfig returns an SCP11b Config with spec-literal
 // defaults and no YubiKey-specific tinting. It explicitly sets
 // EmptyDataEncryption to channel.EmptyDataNoOp, which matches the
@@ -428,7 +379,7 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, fmt.Errorf("%w: transport is required", ErrInvalidConfig)
 	}
 	if cfg == nil {
-		return nil, fmt.Errorf("%w: Config is required (use YubiKeyDefaultSCP11bConfig() or StrictGPSCP11bConfig() as a starting point)", ErrInvalidConfig)
+		return nil, fmt.Errorf("%w: Config is required (use yubikey.SCP11bConfig() or StrictGPSCP11bConfig() as a starting point)", ErrInvalidConfig)
 	}
 	// Shallow copy so we don't mutate the caller's Config. The fields
 	// we override below (SecurityLevel) are scalars; the slice and

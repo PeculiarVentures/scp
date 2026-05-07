@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 type scp11bSDReadData struct {
@@ -81,7 +81,7 @@ func cmdSCP11bSDRead(ctx context.Context, env *runEnv, args []string) error {
 		}
 	}
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	proceed, err := trust.applyTrust(cfg, report)
 	if err != nil {
 		return err
