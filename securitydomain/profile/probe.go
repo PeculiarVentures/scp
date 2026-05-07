@@ -2,10 +2,12 @@ package profile
 
 import (
 	"context"
+	"encoding/asn1"
 	"errors"
 	"fmt"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/cardrecognition"
 )
 
 // AIDSecurityDomain is the GP Issuer Security Domain default AID
@@ -15,43 +17,59 @@ import (
 // securitydomain depends on profile for capability gating).
 var AIDSecurityDomain = []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00}
 
-// yubikeyVersionObject is the GP-spec data object tag YubiKey 5.x
-// uses to expose its firmware version (5FC109 in BER-TLV form).
-// The tag is YubiKey-specific; standard GP cards return SW=6A88
-// (referenced data not found) when GET DATA targets it, which is
-// the discriminator the probe uses to distinguish YubiKey from
-// other GP cards without sending any vendor-extension instruction.
+// yubikeyCardIdentificationOID is the value YubiKey 5.7+ emits in
+// the Card Recognition Data tag 0x63 (Card Identification Scheme).
+// It's the bare GP RID + arc 3 with no further qualifier — Yubico
+// occupies the GP card-identification slot but doesn't advertise
+// a vendor-specific sub-OID, which makes the unqualified value
+// itself the discriminator.
 //
-// GET DATA encodes the tag in the P1/P2 bytes for two-byte tags:
-//
-//	00 CA 5F C1 00  -- GET DATA tag 5FC1, sub-tag 09 in Le envelope
-//
-// The exact tag bytes are operator-visible in the trace so audit
-// log diffs across detection runs are unambiguous.
-var yubikeyVersionTag = []byte{0x5F, 0xC1, 0x09}
+// Captured 2026-05-04 from a retail YubiKey 5.7.4. Pinned in
+// cardrecognition/cardrecognition_test.go's
+// TestParse_RetailYubiKey5_BothSCPs fixture.
+var yubikeyCardIdentificationOID = asn1.ObjectIdentifier{1, 2, 840, 114283, 3}
+
+// crdGetDataTagP2 is the GP-spec tag for fetching Card Recognition
+// Data via GET DATA. Most cards return CRD inline in the SELECT
+// FCI; some return a minimal SELECT response and require a
+// follow-up GET DATA tag 0x66.
+const crdGetDataTagP2 = 0x66
 
 // ProbeResult is the output of a non-destructive SD probe.
 //
 // Profile is the recommended profile for the detected card. The
-// raw SELECT response data and any vendor version blob are exposed
-// for callers (CLI, JSON reports) that want to surface what the
-// probe actually saw rather than just the chosen profile name.
+// raw SELECT response data and parsed CRD are exposed for callers
+// (CLI, JSON reports) that want to surface what the probe actually
+// saw rather than just the chosen profile name.
 type ProbeResult struct {
-	// Profile is the profile selected for this card. Either
-	// YubiKeySDProfile (when the YubiKey version object answered
-	// 9000), StandardSDProfile (SD reachable, no YubiKey signal),
-	// or nil if no SD was reachable.
+	// Profile is the profile selected for this card. YubiKey()
+	// when the CRD's Card Identification Scheme OID matches
+	// Yubico's, Standard() when SD is reachable but the OID
+	// either is absent or names a non-YubiKey vendor, or nil if
+	// no SD was reachable (Probe returns an error in that case).
 	Profile Profile
 
 	// SelectResponse is the raw response data the card returned
 	// for SELECT AID. May be nil if SELECT failed.
 	SelectResponse []byte
 
-	// YubiKeyVersion is the 3-byte major.minor.patch firmware
-	// version parsed from the YubiKey version object, populated
-	// only when the GET DATA on tag 5FC109 succeeded with a
-	// well-shaped response. Nil for non-YubiKey cards or when
-	// the object was absent.
+	// CardInfo is the parsed Card Recognition Data, if Probe
+	// could fetch and parse it. Nil if the card returned no CRD
+	// or the CRD was unparseable. CardInfo carries the structural
+	// signal (Card Identification Scheme OID, GP version, SCPs
+	// advertised) the probe uses for profile selection — exposed
+	// here so consumers can render or audit what the probe saw.
+	CardInfo *cardrecognition.CardInfo
+
+	// YubiKeyVersion is reserved for compatibility with earlier
+	// callers that read this field. Always nil under the CRD-based
+	// probe — the previous implementation tried to read a YubiKey
+	// firmware version object directly off the SD applet, but
+	// that data lives in the PIV applet and switching applets
+	// during a probe was intrusive. Operators wanting the firmware
+	// version should call ykman or run scpctl piv info.
+	//
+	// Deprecated: always nil. Will be removed in a future release.
 	YubiKeyVersion []byte
 }
 
@@ -64,24 +82,33 @@ var ErrNoSecurityDomain = errors.New("securitydomain/profile: no Security Domain
 // Probe runs a non-destructive identification sequence against a
 // card and returns the recommended SD profile.
 //
-// Sequence:
+// The probe sequence:
 //
-//  1. SELECT AID (00 A4 04 00 [sdAID]). Required. Failure here
-//     yields ErrNoSecurityDomain because nothing else is
-//     meaningful.
-//
-//  2. GET DATA tag 5FC109 (YubiKey firmware version object).
-//     YubiKey 5.x answers 9000 with a 3-byte major.minor.patch
-//     payload. Standard GP cards answer SW=6A88. A 6A88 drops
-//     through to StandardSDProfile silently; any other failure
-//     also drops through (we don't fail the whole probe over an
-//     unexpected SW because the SD itself is reachable — the
-//     operator can still proceed, just under the standard profile).
+//  1. SELECT the SD by AID. If SELECT fails, return
+//     ErrNoSecurityDomain — the operator either has no card,
+//     no GP card, or the wrong AID.
+//  2. Try to parse the SELECT FCI as Card Recognition Data
+//     (GP §H.2). YubiKey returns CRD inline in the SELECT
+//     response; standard GP cards may not.
+//  3. If SELECT didn't produce parseable CRD, issue GET DATA
+//     tag 0x66 to fetch CRD explicitly.
+//  4. If parsed CRD has Card Identification Scheme OID
+//     1.2.840.114283.3 (Yubico's signature — see fixture in
+//     cardrecognition's RetailYubiKey5 test), return YubiKey().
+//  5. Otherwise return Standard().
 //
 // Auto-detect never silently selects YubiKey for a card that did
-// not identify as one. A card that returns 9000 to GET DATA on
-// 5FC109 with a non-conformant response (zero bytes, malformed)
-// also drops through to standard rather than guessing.
+// not identify as one. A card that returns 9000 to SELECT but
+// emits no CRD, or emits CRD without a Card Identification Scheme
+// arc, drops through to Standard rather than guessing.
+//
+// The previous probe implementation queried GET DATA tag 0x5FC109
+// against the SD applet expecting the YubiKey firmware version
+// object — but that data lives in the PIV applet, not the SD.
+// Probe always returned Standard regardless of card. Hardware
+// verification against a YubiKey 5.7.4 surfaced the bug; this
+// implementation uses the CRD which is reliably available off
+// the SD applet.
 //
 // Pass nil for sdAID to use the GP-default ISD AID. Pass a
 // vendor- or deployment-specific AID for cards with a non-default
@@ -94,7 +121,7 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 		sdAID = AIDSecurityDomain
 	}
 
-	// Step 1: SELECT.
+	// Step 1: SELECT the SD.
 	sel := &apdu.Command{
 		CLA:  0x00,
 		INS:  0xA4,
@@ -113,37 +140,42 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 
 	out := &ProbeResult{SelectResponse: resp.Data}
 
-	// Step 2: probe the YubiKey version object via GET DATA.
-	getVer := &apdu.Command{
-		CLA:  0x00,
-		INS:  0xCA,
-		P1:   yubikeyVersionTag[0],
-		P2:   yubikeyVersionTag[1],
-		Data: nil,
-		Le:   -1,
+	// Step 2: try parsing SELECT response as inline CRD.
+	if info, err := cardrecognition.Parse(resp.Data); err == nil {
+		out.CardInfo = info
 	}
-	verResp, err := t.Transmit(ctx, getVer)
-	if err != nil {
-		// Transport error. The SD is reachable (SELECT succeeded)
-		// but version probing failed mid-way. Treat as inconclusive
-		// and fall through to standard rather than failing — the
-		// CLI surfaces the probe outcome and the operator can
-		// override.
-		out.Profile = Standard()
-		return out, nil
+
+	// Step 3: fall back to GET DATA tag 0x66 if SELECT didn't
+	// give us CRD. Some cards return a minimal SELECT response
+	// and expect the host to fetch CRD explicitly.
+	if out.CardInfo == nil {
+		getCRD := &apdu.Command{
+			CLA:  0x00,
+			INS:  0xCA,
+			P1:   0x00,
+			P2:   crdGetDataTagP2,
+			Data: nil,
+			Le:   -1,
+		}
+		if crdResp, err := t.Transmit(ctx, getCRD); err == nil && crdResp.IsSuccess() {
+			if info, err := cardrecognition.Parse(crdResp.Data); err == nil {
+				out.CardInfo = info
+			}
+		}
 	}
-	if verResp.IsSuccess() && len(verResp.Data) >= 3 {
-		// YubiKey 5.x emits the version as raw 3-byte
-		// major.minor.patch. Older firmware that wraps it in BER-TLV
-		// is not in scope for this probe; the data shape can be
-		// extended later if needed.
-		out.YubiKeyVersion = append([]byte(nil), verResp.Data[:3]...)
+
+	// Step 4: classify on Card Identification Scheme OID. The
+	// signature is the bare GP RID + arc 3 (1.2.840.114283.3)
+	// with no further qualifier — that exact OID is what every
+	// captured YubiKey 5.7+ has emitted to date.
+	if out.CardInfo != nil &&
+		out.CardInfo.CardIdentificationOID.Equal(yubikeyCardIdentificationOID) {
 		out.Profile = YubiKey()
 		return out, nil
 	}
 
-	// Any other outcome (6A88 / non-conformant payload / SW=9000
-	// with shorter data than expected) drops through to standard.
+	// Step 5: anything else — no CRD, CRD without Card ID OID,
+	// or CRD naming a different vendor — drops to Standard.
 	out.Profile = Standard()
 	return out, nil
 }
