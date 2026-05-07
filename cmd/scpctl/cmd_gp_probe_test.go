@@ -111,3 +111,63 @@ func runGPProbe(t *testing.T, mc *mockcard.Card, args []string) string {
 	}
 	return buf.String()
 }
+
+// TestGPProbe_CPLCSurfacedInJSON confirms that the optional GET DATA
+// reads added in PR #(probe-expansion) populate the CPLC field of
+// the JSON output when the mock card advertises CPLC. The mockcard
+// returns YubiKey-shape CPLC bytes (CPLC present at tag 9F7F, but
+// post-fabrication date fields contain random per-card serial bytes
+// that don't decode as valid BCD). The parser must succeed and
+// surface ICFabricator/ICType/serial; date fields render as "raw".
+//
+// Pins regression: pre-fix the probe didn't read 9F7F at all and
+// the JSON had no cplc field. Post-fix, every probe (including the
+// gp probe variant) populates it.
+func TestGPProbe_CPLCSurfacedInJSON(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	out := runGPProbe(t, mc, []string{"--reader", "fake", "--json"})
+
+	type cplcView struct {
+		ICFabricator      string `json:"ic_fabricator"`
+		ICSerialNumber    string `json:"ic_serial_number"`
+		ICFabricationDate string `json:"ic_fabrication_date"`
+	}
+	type probeData struct {
+		CPLC *cplcView `json:"cplc"`
+		IIN  string    `json:"iin"`
+		CIN  string    `json:"cin"`
+	}
+	var report struct {
+		Data probeData `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("unmarshal JSON: %v\n--- output ---\n%s", err, out)
+	}
+
+	if report.Data.CPLC == nil {
+		t.Fatalf("data.cplc should be populated when card advertises 9F7F; got nil\n--- output ---\n%s", out)
+	}
+	if report.Data.CPLC.ICFabricator != "4090" {
+		t.Errorf("CPLC.ICFabricator = %q, want %q (mockcard fixture)", report.Data.CPLC.ICFabricator, "4090")
+	}
+	// YubiKey-shape CPLC has random bytes in date fields so they
+	// surface as "{raw} (raw)" rather than YYYY-MM-DD. Confirms the
+	// parser's tolerance fed through to the report layer.
+	if !strings.Contains(report.Data.CPLC.ICFabricationDate, "(raw)") {
+		t.Errorf("CPLC.ICFabricationDate should report raw bytes for the YubiKey-shape mock; got %q",
+			report.Data.CPLC.ICFabricationDate)
+	}
+
+	// IIN/CIN aren't present on YubiKey-shape mock (default 6A88
+	// case in doGetData). Confirm omitted from JSON via the
+	// json:"omitempty" tag.
+	if report.Data.IIN != "" {
+		t.Errorf("data.iin should be empty when card returns 6A88; got %q", report.Data.IIN)
+	}
+	if report.Data.CIN != "" {
+		t.Errorf("data.cin should be empty when card returns 6A88; got %q", report.Data.CIN)
+	}
+}

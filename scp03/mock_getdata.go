@@ -24,6 +24,14 @@ import (
 func (c *MockCard) doGetData(p1, p2 byte, requestBody []byte) (*apdu.Response, error) {
 	tag := uint16(p1)<<8 | uint16(p2)
 	switch tag {
+	case 0x9F7F:
+		// CPLC. The mock claims to be a YubiKey-shaped GP card
+		// and YubiKey 5.x advertises CPLC at this tag, so the
+		// mock returns the bytes captured from a real YubiKey
+		// 5.7.4. The post-fabrication date fields contain
+		// random per-card serial bytes (not valid BCD) which is
+		// authentic YubiKey behavior — gp/cplc tolerates it.
+		return &apdu.Response{Data: append([]byte(nil), syntheticCPLC...), SW1: 0x90, SW2: 0x00}, nil
 	case 0x0066:
 		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
 	case 0x00E0:
@@ -68,6 +76,32 @@ func (c *MockCard) doGetData(p1, p2 byte, requestBody []byte) (*apdu.Response, e
 	default:
 		return &apdu.Response{SW1: 0x6A, SW2: 0x88}, nil // reference data not found
 	}
+}
+
+// syntheticCPLC is the Card Production Life Cycle blob the mock
+// returns for GET DATA tag 0x9F7F. Bytes captured from a real
+// YubiKey 5C NFC firmware 5.7.4 on 2026-05-07. Includes the
+// 9F 7F 2A tag/length header (45 bytes total). The post-
+// fabrication date fields contain random per-card serial bytes
+// rather than valid BCD dates — authentic YubiKey behavior that
+// gp/cplc.Parse accepts (marks affected DateField entries as
+// Valid=false while preserving Raw bytes for inspection).
+var syntheticCPLC = []byte{
+	0x9F, 0x7F, 0x2A,
+	0x40, 0x90, // ICFabricator
+	0x33, 0x2B, // ICType
+	0xF9, 0x17, // OperatingSystemID
+	0x8E, 0xD7, // OperatingSystemReleaseDate (random bytes, not BCD)
+	0xA0, 0xF2, // OperatingSystemReleaseLevel
+	0xEA, 0x2B, // ICFabricationDate (random bytes)
+	0xBD, 0x96, 0x9B, 0x1A, // ICSerialNumber
+	0xF9, 0x5C, // ICBatchIdentifier
+	0xA7, 0xDA, 0x23, 0xEB, // ICModuleFabricator + ICModulePackagingDate
+	0xE2, 0xFF, 0x57, 0xCA, // ICCManufacturer + ICEmbeddingDate
+	0x47, 0xF7, 0xE7, 0x46, // ICPrePersonalizer + Date
+	0x93, 0x3E, 0x48, 0x5C, // ICPrePersonalizationEquipmentID
+	0x05, 0x71, 0xCE, 0x68, // ICPersonalizer + Date
+	0x51, 0x80, 0x9F, 0x60, // ICPersonalizationEquipmentID
 }
 
 // syntheticCRD is the Card Recognition Data blob the mock returns
