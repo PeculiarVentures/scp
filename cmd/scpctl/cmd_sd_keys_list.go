@@ -168,7 +168,20 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 	// inventory to report against, so a fetch failure is FAIL.
 	keys, err := sd.GetKeyInformation(ctx)
 	if err != nil {
-		report.Fail("GET DATA tag 0x00E0 (KIT)", err.Error())
+		// If the card refuses GET DATA on the unauthenticated
+		// channel (SW=6982 Security status not satisfied), the
+		// raw SW alone won't tell an operator how to recover.
+		// Emit an explicit message that names the limitation:
+		// SCP03 is the only authenticated read fallback this
+		// command supports; SCP11a-authenticated reads are not
+		// implemented (deferred until a concrete deployment
+		// surfaces a card that requires SCP11a for GET DATA).
+		hint := authRequiredHint(err, channel, "sd keys list")
+		if hint != "" {
+			report.Fail("GET DATA tag 0x00E0 (KIT)", hint)
+		} else {
+			report.Fail("GET DATA tag 0x00E0 (KIT)", err.Error())
+		}
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("get key information: %w", err)
 	}

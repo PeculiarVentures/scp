@@ -664,3 +664,257 @@ func TestClassifyKID(t *testing.T) {
 		}
 	}
 }
+
+// --- auth-required hint on unauthenticated reads ---
+
+// TestSDKeysList_AuthRequiredHint pins the friendly error
+// behavior when an unauthenticated `sd keys list` hits a card
+// that requires authentication for GET DATA. The reviewer asked
+// for this to surface as a clear message naming the SCP03
+// fallback rather than letting the raw SW=6982 bubble up.
+func TestSDKeysList_AuthRequiredHint(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	mc.RequireAuthForReads = true
+
+	env, buf := envForMock(mc)
+	err = cmdSDKeys(context.Background(), env, []string{"list", "--reader", "fake"})
+	if err == nil {
+		t.Fatalf("expected error from auth-required card; got nil")
+	}
+	out := buf.String()
+
+	// Must surface the limitation, not just the raw SW.
+	for _, want := range []string{
+		"FAIL",
+		"GET DATA tag 0x00E0",
+		"requires authentication",
+		"SCP03 fallback",
+		"--scp03-key",
+		"SCP11a-authenticated reads are not implemented",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	// The hint mentions 6982 explicitly so an operator who
+	// knows the SW catalog can confirm the diagnosis.
+	if !strings.Contains(out, "6982") {
+		t.Errorf("output should mention SW=6982 explicitly\n--- output ---\n%s", out)
+	}
+}
+
+// TestSDKeysExport_AuthRequiredHint is the same shape on the
+// export path. Failure happens at the per-ref GET DATA tag
+// 0xBF21 call, but the message must still name the limitation.
+func TestSDKeysExport_AuthRequiredHint(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	// Need a non-empty cert store on the card for the
+	// auth-gating to be the failure mode (otherwise empty cert
+	// store returns SW=6A88, which is a different code path).
+	mc.RequireAuthForReads = true
+
+	env, buf := envForMock(mc)
+	err = cmdSDKeys(context.Background(), env, []string{
+		"export",
+		"--reader", "fake",
+		"--kid", "11", "--kvn", "01",
+	})
+	if err == nil {
+		t.Fatalf("expected error from auth-required card; got nil")
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"FAIL",
+		"requires authentication",
+		"SCP03 fallback",
+		"sd keys export",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}
+
+// TestAuthRequiredHint_NotEmittedOnAuthenticatedChannel pins
+// that the hint fires only on the unauthenticated channel —
+// when an SCP03 session has been opened, a 6982 from the card
+// is a different failure mode (e.g., the authenticated KVN was
+// rotated out from under us) and the hint's "use SCP03"
+// remediation would be misleading.
+func TestAuthRequiredHint_NotEmittedOnAuthenticatedChannel(t *testing.T) {
+	// Direct unit test of the helper: same SW, different
+	// channel, must return empty.
+	rawErr := apduSWError(0x6982)
+	if got := authRequiredHint(rawErr, "scp03", "sd keys list"); got != "" {
+		t.Errorf("authRequiredHint on scp03 channel should be empty; got %q", got)
+	}
+	if got := authRequiredHint(rawErr, "unauthenticated", "sd keys list"); got == "" {
+		t.Errorf("authRequiredHint on unauthenticated channel with SW=6982 should be non-empty")
+	}
+	// Non-6982 error on unauthenticated channel: also empty,
+	// to avoid attaching a misleading hint.
+	otherErr := apduSWError(0x6A82)
+	if got := authRequiredHint(otherErr, "unauthenticated", "sd keys list"); got != "" {
+		t.Errorf("authRequiredHint on non-6982 SW should be empty; got %q", got)
+	}
+}
+
+// apduSWError fabricates an error string matching the format
+// *apdu.Response.Error() produces, for unit testing the hint
+// helper without spinning up a real card.
+func apduSWError(sw uint16) error {
+	return errorString{msg: "card returned SW=" + uint16Hex(sw) + " (something)"}
+}
+
+type errorString struct{ msg string }
+
+func (e errorString) Error() string { return e.msg }
+
+func uint16Hex(v uint16) string {
+	const hexdig = "0123456789ABCDEF"
+	return string([]byte{
+		hexdig[(v>>12)&0xF],
+		hexdig[(v>>8)&0xF],
+		hexdig[(v>>4)&0xF],
+		hexdig[v&0xF],
+	})
+}
+
+// --- profile-qualified key-kind JSON shape (reviewer follow-up) ---
+
+// TestSDKeysList_StandardSD_RawAndKindBoth pins the contract that
+// under --profile standard-sd, the JSON output for SCP11 SD slots
+// emits BOTH the raw kid/kvn/component bytes AND a generic
+// "scp11-sd" kind label (no Yubico-specific variant letter).
+//
+// External-review concern: "key-kind mapping is YubiKey-specific
+// but presented as generic." The implementation IS profile-qualified
+// (dropped variant letters under standard-sd) but a regression
+// where someone widened the YubiKey label to fire under standard-sd
+// would silently mislabel non-YubiKey cards. This test pins the
+// contract by:
+//
+//   1. Forcing --profile standard-sd (no probing).
+//   2. Advertising KIDs 0x11, 0x13, 0x15 plus an unknown KID 0x42.
+//   3. Asserting kind labels on the SCP11 slots are "scp11-sd"
+//      (no variant), kind on the unknown KID is "unknown".
+//   4. Asserting kid/kvn/kid_hex/kvn_hex/components are populated
+//      regardless of kind label, so a downstream consumer can
+//      always reconstruct what the card actually said.
+func TestSDKeysList_StandardSD_RawAndKindBoth(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	mc.KeyInformationTemplate = kitBytes(
+		struct{ KID, KVN byte }{0x11, 0x01},
+		struct{ KID, KVN byte }{0x13, 0x02},
+		struct{ KID, KVN byte }{0x15, 0x03},
+		struct{ KID, KVN byte }{0x42, 0x04}, // off-spec / unknown
+	)
+
+	env, buf := envForMock(mc)
+	if err := cmdSDKeysList(context.Background(), env, []string{
+		"--reader", "fake",
+		"--profile", "standard-sd",
+		"--json",
+	}); err != nil {
+		t.Fatalf("cmdSDKeysList: %v", err)
+	}
+
+	var report struct {
+		Data struct {
+			Profile string `json:"profile"`
+			Keys    []struct {
+				KID        int    `json:"kid"`
+				KVN        int    `json:"kvn"`
+				KIDHex     string `json:"kid_hex"`
+				KVNHex     string `json:"kvn_hex"`
+				Kind       string `json:"kind"`
+				Components []struct {
+					ID   byte `json:"id"`
+					Type byte `json:"type"`
+				} `json:"components,omitempty"`
+			} `json:"keys"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("unmarshal report: %v\n%s", err, buf.String())
+	}
+
+	// The active profile must be reported as standard-sd so an
+	// audit-log consumer can correlate the labeling convention
+	// with the data shape that follows.
+	if report.Data.Profile != "standard-sd" {
+		t.Errorf("data.profile = %q, want standard-sd; full output:\n%s", report.Data.Profile, buf.String())
+	}
+
+	if len(report.Data.Keys) != 4 {
+		t.Fatalf("keys length = %d, want 4; payload:\n%s", len(report.Data.Keys), buf.String())
+	}
+
+	wantKindByKID := map[int]string{
+		0x11: "scp11-sd", // standard-sd: no variant letter
+		0x13: "scp11-sd",
+		0x15: "scp11-sd",
+		0x42: "unknown", // off-spec KID, no guess
+	}
+	for _, k := range report.Data.Keys {
+		want, known := wantKindByKID[k.KID]
+		if !known {
+			t.Errorf("unexpected KID 0x%02X in output", k.KID)
+			continue
+		}
+		if k.Kind != want {
+			t.Errorf("kid=0x%02X: kind = %q, want %q under --profile standard-sd",
+				k.KID, k.Kind, want)
+		}
+		// Raw bytes must always be present and match the
+		// underlying KID/KVN — the kind label is a host-side
+		// convenience; the raw fields are authoritative.
+		wantHex := func(b int) string {
+			const hexdig = "0123456789ABCDEF"
+			return "0x" + string([]byte{hexdig[(b>>4)&0xF], hexdig[b&0xF]})
+		}
+		if k.KIDHex != wantHex(k.KID) {
+			t.Errorf("kid=0x%02X: kid_hex = %q, want %q", k.KID, k.KIDHex, wantHex(k.KID))
+		}
+		if k.KVNHex != wantHex(k.KVN) {
+			t.Errorf("kid=0x%02X: kvn_hex = %q, want %q", k.KID, k.KVNHex, wantHex(k.KVN))
+		}
+		// Components must be carried verbatim from the card —
+		// the host doesn't drop or invent component rows.
+		if len(k.Components) == 0 {
+			t.Errorf("kid=0x%02X: components empty; the host must surface raw component map even for unknown KIDs", k.KID)
+		}
+	}
+}
+
+// TestClassifyKID_StandardSD_DoesNotInventYubicoVariants is a
+// finer-grained companion to the JSON test above. It pins the
+// classifier function directly: no input that's NOT 0x11/0x13/0x15
+// should ever return one of the SCP11 variant labels under
+// standard-sd. A regression where someone widened the variant
+// matching to e.g. 0x12 would silently mislabel non-YubiKey
+// cards.
+func TestClassifyKID_StandardSD_DoesNotInventYubicoVariants(t *testing.T) {
+	yubicoVariants := map[string]bool{
+		"scp11a-sd": true,
+		"scp11b-sd": true,
+		"scp11c-sd": true,
+	}
+	for kid := 0x00; kid <= 0xFF; kid++ {
+		got := classifyKID(byte(kid), "standard-sd")
+		if yubicoVariants[got] {
+			t.Errorf("classifyKID(0x%02X, standard-sd) = %q; standard-sd profile must NOT emit Yubico variant labels",
+				kid, got)
+		}
+	}
+}

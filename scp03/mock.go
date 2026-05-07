@@ -109,6 +109,14 @@ type MockCard struct {
 	// mock still doesn't support (that's a separate gap, called
 	// out in the design doc — fix when a caller surfaces it).
 	inventory map[uint16]mockKeyEntry
+
+	// FailStoreDataSW, when non-zero, makes the mock return the
+	// configured SW for any STORE DATA (INS=0xE2) reaching the
+	// authenticated dispatch. Used to drive partial-success
+	// recovery tests where PUT KEY succeeds and STORE DATA must
+	// then fail on the same logical command. Default zero
+	// preserves the historical record-and-9000 behavior.
+	FailStoreDataSW uint16
 }
 
 // mockKeyEntry represents one installed key in the mock's
@@ -497,6 +505,13 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 		// or CA-issuer SKIs because no test currently rounds them
 		// trip via GET DATA against the same mock instance.)
 		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		if ins == 0xE2 && c.FailStoreDataSW != 0 {
+			// Forced STORE DATA failure: drive partial-success
+			// recovery tests where PUT KEY commits but STORE
+			// DATA must then fail. Recording happens above so
+			// tests can still assert the wire shape was right.
+			return &apdu.Response{SW1: byte(c.FailStoreDataSW >> 8), SW2: byte(c.FailStoreDataSW)}, nil
+		}
 		if ins == 0xE2 {
 			// Cert-chain STORE DATA is the one shape we DO persist:
 			// it round-trips with GET DATA tag BF21 in the same

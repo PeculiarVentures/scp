@@ -490,3 +490,104 @@ func mustParseCert(t *testing.T, path string) *x509.Certificate {
 	}
 	return c
 }
+
+// TestSDKeysImportSCP11SD_PartialSuccessRemediation pins the
+// reviewer-requested behavior when PUT KEY succeeds but STORE
+// DATA fails. The card now holds an SCP11 SD private key with no
+// cert chain attached, and the operator needs:
+//
+//   - a clear signal that the state is partial-success, not
+//     simply failed
+//   - the precise rollback command (with KID + KVN substituted)
+//     so they can clean up under failure stress without
+//     reconstructing flag values
+//   - guidance on retry-vs-investigate so they don't mash F5 on
+//     a card that's going to keep rejecting the same bytes
+//
+// This test runs the full end-to-end path against scp03.MockCard
+// (so SCP03 open succeeds against factory keys), forces STORE
+// DATA to fail with SW=6A80, and asserts the report contains
+// each part of the remediation message.
+func TestSDKeysImportSCP11SD_PartialSuccessRemediation(t *testing.T) {
+	dir := t.TempDir()
+	priv := genP256TestKey(t)
+	keyPath := writeKeyPEM(t, dir, priv)
+	certPath := writeSelfSignedCert(t, dir, priv, "test")
+
+	env, buf, mockCard := envForSCP03Mock(t)
+	mockCard.FailStoreDataSW = 0x6A80 // wrong parameters in command data
+
+	err := cmdSDKeysImportSCP11SD(context.Background(), env, []string{
+		"--reader", "fake",
+		"--kid", "11", "--kvn", "01",
+		"--key-pem", keyPath,
+		"--certs", certPath,
+		"--scp03-keys-default",
+		"--confirm-write",
+	})
+	if err == nil {
+		t.Fatalf("expected store-cert-chain failure; got success:\n%s", buf.String())
+	}
+	out := buf.String()
+
+	// Sanity: PUT KEY must have succeeded (otherwise we're not
+	// testing the partial-success path, we're testing pre-PUT-KEY
+	// failure).
+	if !strings.Contains(out, "PUT KEY SCP11 P-256 private") {
+		t.Errorf("expected PUT KEY check to appear; got:\n%s", out)
+	}
+	// Find the PUT KEY line: must be PASS.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "PUT KEY SCP11") {
+			if !strings.Contains(line, "PASS") {
+				t.Errorf("expected PUT KEY to PASS before STORE DATA failure; got %q", line)
+			}
+			break
+		}
+	}
+
+	// STORE DATA must be FAIL.
+	if !strings.Contains(out, "STORE DATA cert chain") {
+		t.Errorf("expected STORE DATA cert chain check; got:\n%s", out)
+	}
+	storeFailLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "STORE DATA cert chain") && strings.Contains(line, "FAIL") {
+			storeFailLine = line
+			break
+		}
+	}
+	if storeFailLine == "" {
+		t.Fatalf("expected STORE DATA cert chain FAIL line; got:\n%s", out)
+	}
+
+	// Every part of the remediation must appear.
+	mustContain := []string{
+		"PARTIAL SUCCESS",
+		"key INSTALLED",
+		"cert chain FAILED",
+		"kid=0x11",
+		"kvn=0x01",
+		// The precise rollback command line — KID and KVN
+		// substituted, --confirm-delete-key flag named.
+		"scpctl sd keys delete --kid 11 --kvn 01 --confirm-delete-key",
+		// Retry guidance.
+		"To retry the chain alone",
+		"PUT KEY at the same KID/KVN is idempotent",
+		// Investigate-before-retry guidance.
+		"Investigate cert bundle shape",
+		"PEM order leaf-LAST",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(out, want) {
+			t.Errorf("partial-success remediation missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+
+	// The original SW that triggered the failure must also
+	// appear so an operator can correlate with the card's
+	// behavior log.
+	if !strings.Contains(out, "6A80") {
+		t.Errorf("output should mention the underlying SW (6A80) that triggered partial-success; got:\n%s", out)
+	}
+}

@@ -173,7 +173,12 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 	checkName := fmt.Sprintf("GET DATA tag 0xBF21 kid=0x%02X kvn=0x%02X", kid, kvn)
 	certs, err := sd.GetCertificates(ctx, ref)
 	if err != nil {
-		report.Fail(checkName, err.Error())
+		hint := authRequiredHint(err, channel, "sd keys export")
+		if hint != "" {
+			report.Fail(checkName, hint)
+		} else {
+			report.Fail(checkName, err.Error())
+		}
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("get certificates: %w", err)
 	}

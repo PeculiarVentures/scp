@@ -191,6 +191,28 @@ type Card struct {
 	// single-SCP03-entry behavior used by existing tests.
 	KeyInformationTemplate []byte
 
+	// RequireAuthForReads, when true, makes the mock return
+	// SW=6982 (Security status not satisfied) for unauthenticated
+	// GET DATA calls on the inventory and certificate-store tags
+	// (0x00E0 KIT, 0xBF21 cert store, 0xFF33 KLOC, 0xFF34 KLCC).
+	// Models a card whose registry policy requires authentication
+	// for those reads — operationally the SCP03-rotated case.
+	//
+	// The flag fires only on the unauthenticated SD path; reads
+	// performed inside an SCP03 session reach this handler with
+	// the SM unwrap already done and are not gated.
+	//
+	// Default (false): unauthenticated reads succeed, matching
+	// YubiKey behavior on a fresh card.
+	RequireAuthForReads bool
+
+	// FailStoreDataSW, when non-zero, makes the mock return the
+	// configured SW for any STORE DATA (INS=0xE2). Used to drive
+	// partial-success-recovery tests where PUT KEY succeeds and
+	// STORE DATA must then fail. Default zero preserves the
+	// always-acknowledge behavior.
+	FailStoreDataSW uint16
+
 	// MockSDAID, when non-nil and non-empty, overrides the default
 	// GP-standard ISD AID (A0000001510000) for SELECT matching. Used
 	// to exercise the host-side --sd-aid plumb-through (Finding 2)
@@ -339,7 +361,7 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		return c.doSelect(cmd, underSM)
 
 	case 0xCA: // GET DATA
-		return c.doGetData(cmd)
+		return c.doGetData(cmd, underSM)
 
 	case 0xF2: // GP §11.4.2 GET STATUS
 		return c.doGetStatus(cmd)
@@ -353,6 +375,15 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		// scp03/mock.go does. Used by the SCP11 chaining regression
 		// test to exercise a long-payload command end-to-end through
 		// the wrap-then-chain layering.
+		//
+		// FailStoreDataSW lets a test force a specific SW from
+		// STORE DATA to exercise the partial-success remediation
+		// path in `sd keys import` (key installed but cert chain
+		// failed). Default zero preserves the historical
+		// always-acknowledge behavior.
+		if c.FailStoreDataSW != 0 {
+			return mkSW(c.FailStoreDataSW), nil
+		}
 		return mkSW(0x9000), nil
 
 	case 0x88: // INTERNAL AUTHENTICATE (SCP11b handshake)
@@ -700,8 +731,20 @@ func (c *Card) doSelect(cmd *apdu.Command, underSM bool) (*apdu.Response, error)
 	return mkSW(0x6A82), nil
 }
 
-func (c *Card) doGetData(cmd *apdu.Command) (*apdu.Response, error) {
+func (c *Card) doGetData(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {
 	tag := uint16(cmd.P1)<<8 | uint16(cmd.P2)
+
+	// RequireAuthForReads gates the inventory and certificate-store
+	// tags on the unauthenticated channel. Anything reached after
+	// SCP03 unwrap (underSM=true) bypasses the gate — that's the
+	// authenticated read path.
+	if c.RequireAuthForReads && !underSM {
+		switch tag {
+		case 0x00E0, 0xBF21, 0xFF33, 0xFF34:
+			return mkSW(0x6982), nil
+		}
+	}
+
 	switch tag {
 	case 0x0066:
 		// Card Recognition Data — same synthetic blob the SCP03 mock

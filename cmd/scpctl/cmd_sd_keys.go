@@ -290,3 +290,45 @@ func spkiFingerprint(c *x509.Certificate) string {
 	sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
 	return hexEncode(sum[:])
 }
+
+// authRequiredHint returns a friendly explanation when a card refuses
+// a GET DATA call on the unauthenticated channel with SW=6982
+// (security status not satisfied), and an empty string otherwise.
+//
+// On the unauthenticated `sd keys list/export` path, an SW=6982 from
+// the card means it requires an authenticated channel for the GET
+// DATA tag we asked for. The raw error ("card returned SW=6982 ...")
+// doesn't tell an operator how to recover. The hint names the
+// limitation explicitly:
+//
+//   - SCP03 fallback IS available — pass --scp03-key (or
+//     --scp03-keys-default for factory keys).
+//   - SCP11a-authenticated reads are NOT supported by this command.
+//     Deferred until a concrete deployment surfaces a card that
+//     requires SCP11a for GET DATA. No silent fallback will happen
+//     when SCP11a support arrives later — the operator will opt in
+//     via flags.
+//
+// On any other channel ("scp03"), or any error other than 6982, the
+// hint returns "" and the caller should fall back to the raw
+// error.Error() text.
+func authRequiredHint(err error, channel, command string) string {
+	if err == nil || channel != "unauthenticated" {
+		return ""
+	}
+	// Match on the SW substring rather than typed-error introspection
+	// because *apdu.Response.Error() returns an *errors.errorString
+	// whose only public surface is the message text. The format is
+	// stable: "card returned SW=XXXX (description)".
+	if !strings.Contains(err.Error(), "SW=6982") &&
+		!strings.Contains(err.Error(), "6982") {
+		return ""
+	}
+	return fmt.Sprintf(
+		"card requires authentication for GET DATA (SW=6982 Security status not satisfied) — "+
+			"%s currently supports SCP03 fallback only. "+
+			"Pass --scp03-key (or --scp03-keys-default for the YubiKey factory keys) "+
+			"to authenticate the read. SCP11a-authenticated reads are not implemented "+
+			"in this branch.",
+		command)
+}

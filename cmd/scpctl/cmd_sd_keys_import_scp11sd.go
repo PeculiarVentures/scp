@@ -278,7 +278,45 @@ func cmdSDKeysImportSCP11SD(ctx context.Context, env *runEnv, args []string) err
 	if len(chain) > 0 {
 		storeCertsCheck := fmt.Sprintf("STORE DATA cert chain kid=0x%02X kvn=0x%02X", kid, kvn)
 		if err := sd.StoreCertificates(ctx, ref, chain); err != nil {
-			report.Fail(storeCertsCheck, err.Error())
+			// Partial-success remediation: the key is now on
+			// the card and authenticating against it would
+			// succeed, but the cert chain the OCE expects to
+			// validate during SCP11a is absent. The operator
+			// has two clean recovery paths and one
+			// observation:
+			//
+			//   (a) Retry the chain alone. STORE DATA is
+			//       idempotent for the same chain bytes, so
+			//       re-running the same `sd keys import`
+			//       command will skip the (already
+			//       installed) PUT KEY step on the card and
+			//       try STORE DATA again. This is the right
+			//       move when the failure was transient
+			//       (lost reader, transport timeout, etc).
+			//
+			//   (b) Roll back the key install entirely. Use
+			//       `sd keys delete` with the precise KID
+			//       and KVN to remove the orphaned key from
+			//       the card. After delete, the next import
+			//       attempt starts clean.
+			//
+			//   (c) Investigate before retrying. STORE DATA
+			//       failures on real cards usually mean
+			//       cert bundle shape, TLV nesting, or
+			//       chain order is wrong. Retrying the same
+			//       bytes won't help.
+			//
+			// We surface the precise rollback command line
+			// in the FAIL detail so the operator doesn't
+			// have to reconstruct the KID/KVN under failure
+			// stress.
+			detail := fmt.Sprintf(
+				"%v — PARTIAL SUCCESS: key INSTALLED but cert chain FAILED. Card now holds an SCP11 SD private key at kid=0x%02X kvn=0x%02X with no chain attached. "+
+					"To roll back the key: `scpctl sd keys delete --kid %02X --kvn %02X --confirm-delete-key <SCP03 auth flags>`. "+
+					"To retry the chain alone: re-run the same `sd keys import` command (PUT KEY at the same KID/KVN is idempotent on most cards; STORE DATA will run again). "+
+					"Investigate cert bundle shape (PEM order leaf-LAST, TLV nesting) before retrying.",
+				err, kid, kvn, kid, kvn)
+			report.Fail(storeCertsCheck, detail)
 			_ = report.Emit(env.out, *jsonMode)
 			return fmt.Errorf("sd keys import: store cert chain (key already installed): %w", err)
 		}
