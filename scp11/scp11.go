@@ -638,6 +638,29 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 		return nil, fmt.Errorf("transmit: %w", err)
 	}
 
+	// Inbound chaining: when the card returns SW=61xx, the
+	// secure-messaging-protected payload (encrypted body + R-MAC)
+	// has been split across multiple response APDUs. The card's
+	// MAC was computed over the entire payload, so the host must
+	// concatenate every GET RESPONSE chunk before verifying the
+	// MAC. Skipping this step makes any APDU whose response
+	// exceeds the short-Le bound (attest cert reads, large GET
+	// DATA tags, registry walks with many entries, anything
+	// where ciphertext + MAC tag pushes past 256 bytes) fail
+	// R-MAC and tear down the session — exactly what hardware
+	// verification surfaced on the YubiKey 5.7.4 ATTEST flow.
+	//
+	// Drain via the raw transport, not s.Transmit, so GET
+	// RESPONSE bytes are not wrapped in their own SCP frame.
+	// GET RESPONSE is a transport continuation, not an
+	// application command; the card answers it in cleartext at
+	// the SCP layer and only the assembled inner payload is
+	// covered by the channel's MAC.
+	resp, err = transport.DrainGetResponse(ctx, s.transport, resp)
+	if err != nil {
+		return nil, fmt.Errorf("transmit: drain chained response: %w", err)
+	}
+
 	// GP SCP03 §6.2.4 (applied to SCP11 by Amendment F): R-MAC and
 	// R-ENC are applied only to responses with SW 9000 or warning SW1
 	// 62/63. Card-side error status words (6Axx, 6Bxx, ...) are
