@@ -160,3 +160,136 @@ func TestSetProfile_Nil_ClearsGate(t *testing.T) {
 		t.Errorf("Profile() should return nil after SetProfile(nil)")
 	}
 }
+
+// e2RecordingTransport: same shape as f1RecordingTransport but
+// targets STORE DATA (INS=0xE2) — the wire INS for both
+// StoreAllowlist and ClearAllowlist (which forwards to
+// StoreAllowlist with empty serials). The recorded INS bytes are
+// what the gate-firing tests assert on.
+type e2RecordingTransport struct {
+	sent []byte
+}
+
+func (r *e2RecordingTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	r.sent = append(r.sent, cmd.INS)
+	if cmd.INS == 0xA4 && cmd.P1 == 0x04 {
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+	}
+	return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+}
+func (r *e2RecordingTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return nil, nil
+}
+func (r *e2RecordingTransport) Close() error { return nil }
+func (r *e2RecordingTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryLocalPCSC
+}
+func (r *e2RecordingTransport) sentINS(ins byte) bool {
+	for _, i := range r.sent {
+		if i == ins {
+			return true
+		}
+	}
+	return false
+}
+
+// TestStoreAllowlist_StandardProfile_RefusedBeforeAPDU pins the
+// reviewer-requested behavior: standard-sd reports
+// Allowlist=false because the wire shape we emit is the
+// yubikit/Yubico encoding, not measured against non-YubiKey
+// cards. Calling Session.StoreAllowlist on a session configured
+// with the standard profile must return ErrUnsupportedByProfile
+// without emitting INS=0xE2 to the card. This protects operators
+// from flipping a card to an undefined state by sending Yubico-
+// shaped allowlist bytes against an unmeasured card.
+func TestStoreAllowlist_StandardProfile_RefusedBeforeAPDU(t *testing.T) {
+	rec := &e2RecordingTransport{}
+	sd, err := OpenUnauthenticated(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("OpenUnauthenticated: %v", err)
+	}
+	defer sd.Close()
+	sd.SetProfile(profile.Standard())
+	sd.authenticated = true
+	sd.oceAuthenticated = true
+
+	err = sd.StoreAllowlist(context.Background(), NewKeyReference(0x11, 0x01), nil)
+	if err == nil {
+		t.Fatal("expected ErrUnsupportedByProfile, got nil")
+	}
+	if !errors.Is(err, profile.ErrUnsupportedByProfile) {
+		t.Errorf("expected ErrUnsupportedByProfile, got %v", err)
+	}
+	if rec.sentINS(0xE2) {
+		t.Errorf("INS=0xE2 emitted despite profile refusal; sent: %v", rec.sent)
+	}
+	// The error message must name the operation the caller
+	// actually invoked, not a generic "unsupported" — and must
+	// hint at the path forward (use a profile that claims
+	// Allowlist=true).
+	msg := err.Error()
+	for _, want := range []string{"StoreAllowlist", "yubikit", "non-YubiKey", "Allowlist=true"} {
+		if !contains(msg, want) {
+			t.Errorf("error message should mention %q; got %q", want, msg)
+		}
+	}
+}
+
+// TestClearAllowlist_StandardProfile_RefusedBeforeAPDU is the
+// companion test on the ClearAllowlist path. Critically, the
+// error must name "ClearAllowlist" (the operation the operator
+// invoked), not "StoreAllowlist" (the internal forwarding
+// target). This is the reason ClearAllowlist gates explicitly
+// rather than relying on the StoreAllowlist gate to surface.
+func TestClearAllowlist_StandardProfile_RefusedBeforeAPDU(t *testing.T) {
+	rec := &e2RecordingTransport{}
+	sd, err := OpenUnauthenticated(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("OpenUnauthenticated: %v", err)
+	}
+	defer sd.Close()
+	sd.SetProfile(profile.Standard())
+	sd.authenticated = true
+	sd.oceAuthenticated = true
+
+	err = sd.ClearAllowlist(context.Background(), NewKeyReference(0x11, 0x01))
+	if err == nil {
+		t.Fatal("expected ErrUnsupportedByProfile, got nil")
+	}
+	if !errors.Is(err, profile.ErrUnsupportedByProfile) {
+		t.Errorf("expected ErrUnsupportedByProfile, got %v", err)
+	}
+	if rec.sentINS(0xE2) {
+		t.Errorf("INS=0xE2 emitted despite profile refusal; sent: %v", rec.sent)
+	}
+	if !contains(err.Error(), "ClearAllowlist") {
+		t.Errorf("error must name ClearAllowlist (the invoked operation), got: %v", err)
+	}
+}
+
+// TestStoreAllowlist_YubiKeyProfile_Permitted is the positive
+// case: YubiKey profile claims Allowlist=true (because the wire
+// shape WAS measured against YubiKey hardware), so the method
+// proceeds past the profile gate. We don't run the full STORE
+// DATA path here (it would need OCE auth state we haven't fully
+// wired) — we just assert that the path past the gate does NOT
+// surface ErrUnsupportedByProfile.
+func TestStoreAllowlist_YubiKeyProfile_Permitted(t *testing.T) {
+	rec := &e2RecordingTransport{}
+	sd, err := OpenUnauthenticated(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("OpenUnauthenticated: %v", err)
+	}
+	defer sd.Close()
+	sd.SetProfile(profile.YubiKey())
+	sd.authenticated = true
+	sd.oceAuthenticated = true
+
+	// The call may still error from downstream (the recording
+	// transport's stub response isn't what StoreAllowlist
+	// expects), but the error MUST NOT be ErrUnsupportedByProfile.
+	err = sd.StoreAllowlist(context.Background(), NewKeyReference(0x11, 0x01), nil)
+	if err != nil && errors.Is(err, profile.ErrUnsupportedByProfile) {
+		t.Errorf("YubiKey profile should not gate Allowlist; got %v", err)
+	}
+}

@@ -421,3 +421,94 @@ func TestSDAllowlist_RequiresSCP11KID(t *testing.T) {
 		})
 	}
 }
+
+// TestSDAllowlistSet_StandardProfile_RejectedAtLibrary pins the
+// end-to-end behavior of the StandardSDProfile.Allowlist=false
+// gate. With --profile standard-sd, the CLI must surface the
+// library-level refusal (no APDU emitted, error names the
+// yubikit/Yubico-shape rationale and the path forward) instead
+// of opening an SCP03 session against an unmeasured card and
+// emitting Yubico-shaped allowlist bytes.
+//
+// External-review concern: the previous standard-sd profile
+// claimed Allowlist=true based on GP Amendment F §7.1.5 defining
+// the concept, but the wire shape this library emits (BER-TLV
+// nesting + integer-encoded serial list) is the yubikit/Yubico
+// encoding and was never measured against a non-YubiKey card.
+// This test fails loud if a future change reverts the gate.
+//
+// Note: --scp03-keys-default is rejected when paired with
+// --profile standard-sd (Yubico factory keys are vendor-specific
+// in the CLI's view, so the standard profile must be paired with
+// explicit key material). We therefore pass the actual factory-
+// key triple verbatim; the underlying mock happens to accept
+// these bytes, so the SCP03 session opens, and the allowlist
+// gate is the failure surface.
+func TestSDAllowlistSet_StandardProfile_RejectedAtLibrary(t *testing.T) {
+	env, buf, _ := envForSCP03Mock(t)
+
+	const factoryKey = "404142434445464748494A4B4C4D4E4F"
+	err := cmdSDAllowlist(context.Background(), env, []string{
+		"set",
+		"--reader", "fake",
+		"--profile", "standard-sd",
+		"--kid", "11", "--kvn", "01",
+		"--serial", "1234",
+		"--scp03-kvn", "FF",
+		"--scp03-enc", factoryKey,
+		"--scp03-mac", factoryKey,
+		"--scp03-dek", factoryKey,
+		"--confirm-write",
+	})
+	if err == nil {
+		t.Fatalf("expected refusal under standard-sd profile; got success:\n%s", buf.String())
+	}
+	out := buf.String()
+
+	// FAIL must surface, with the library's rationale visible
+	// to the operator (so they understand WHY this isn't just
+	// a generic "not supported").
+	if !strings.Contains(out, "FAIL") {
+		t.Errorf("expected FAIL line; got:\n%s", out)
+	}
+	for _, want := range []string{
+		"StoreAllowlist",
+		"yubikit",
+		"non-YubiKey",
+		"Allowlist=true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}
+
+// TestSDAllowlistClear_StandardProfile_RejectedAtLibrary is the
+// symmetric test on the clear path. The error message must name
+// "ClearAllowlist" so the operator's command and the error
+// message agree, even though under the hood Clear forwards to
+// Store.
+func TestSDAllowlistClear_StandardProfile_RejectedAtLibrary(t *testing.T) {
+	env, buf, _ := envForSCP03Mock(t)
+
+	const factoryKey = "404142434445464748494A4B4C4D4E4F"
+	err := cmdSDAllowlist(context.Background(), env, []string{
+		"clear",
+		"--reader", "fake",
+		"--profile", "standard-sd",
+		"--kid", "11", "--kvn", "01",
+		"--scp03-kvn", "FF",
+		"--scp03-enc", factoryKey,
+		"--scp03-mac", factoryKey,
+		"--scp03-dek", factoryKey,
+		"--confirm-write",
+	})
+	if err == nil {
+		t.Fatalf("expected refusal under standard-sd profile; got success:\n%s", buf.String())
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "ClearAllowlist") {
+		t.Errorf("error message must name ClearAllowlist (the operation the CLI invoked); got:\n%s", out)
+	}
+}

@@ -14,8 +14,20 @@ func TestStandard_Capabilities(t *testing.T) {
 	if !caps.StandardSD {
 		t.Error("Standard().Capabilities().StandardSD = false, want true")
 	}
-	if !caps.SCP03 || !caps.SCP11 || !caps.CertificateStore || !caps.Allowlist || !caps.KeyDelete {
-		t.Error("Standard profile should claim all standardized GP/Amendment-F surfaces")
+	if !caps.SCP03 || !caps.SCP11 || !caps.CertificateStore || !caps.KeyDelete {
+		t.Error("Standard profile should claim all standardized GP/Amendment-F surfaces (SCP03, SCP11, CertificateStore, KeyDelete)")
+	}
+	// Allowlist is deliberately FALSE on standard-sd. GP Amendment F
+	// §7.1.5 defines the concept, but the wire shape this library
+	// emits (BER-TLV with yubikit/_int2asn1-derived integer encoding)
+	// has not been measured against any non-YubiKey card. Marking
+	// allowlist as a generic GP capability would make an interop
+	// promise we can't keep. Until a non-YubiKey card is measured,
+	// standard-sd reports false and the library refuses StoreAllowlist
+	// / ClearAllowlist on this profile with an explicit error.
+	if caps.Allowlist {
+		t.Error("Standard profile must NOT claim Allowlist: the wire shape is the yubikit/Yubico encoding, " +
+			"not measured against non-YubiKey cards (regression — see standard.go for rationale)")
 	}
 	if caps.GenerateECKey {
 		t.Error("Standard profile must NOT claim GenerateECKey (INS=0xF1 is Yubico-specific)")

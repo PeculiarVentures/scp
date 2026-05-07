@@ -13,10 +13,23 @@ package profile
 //   - SCP03: yes (GP Card Spec §11.1)
 //   - SCP11: yes (GP Amendment F §6, §7)
 //   - CertificateStore: yes (GP Amendment F §7.1.4)
-//   - Allowlist: yes (GP Amendment F §7.1.5)
 //   - KeyDelete: yes (GP Card Spec §11.2)
 //
 // Capabilities deliberately false:
+//
+//   - Allowlist: NO. Although GP Amendment F §7.1.5 defines the
+//     concept of a certificate-serial allowlist, the wire shape
+//     this library emits (the BER-TLV nesting plus the integer-
+//     encoded serial list) is the yubikit/Yubico shape, derived
+//     by reference-implementation parity with yubikit-python's
+//     `store_allowlist` and `_int2asn1`. We have not measured
+//     this wire shape against any non-YubiKey card, and the spec
+//     does not pin a single canonical encoding. A standard-sd
+//     profile that claimed Allowlist=true would be making an
+//     interop promise we can't keep. Until a non-YubiKey card is
+//     measured, the standard profile reports Allowlist=false and
+//     the library refuses StoreAllowlist / ClearAllowlist on this
+//     profile with an explicit error.
 //
 //   - GenerateECKey: NO. INS=0xF1 is a Yubico extension; standard
 //     GP defines on-card key generation only via PUT KEY with
@@ -43,7 +56,7 @@ func (standardSDProfile) Capabilities() Capabilities {
 		SCP03:              true,
 		SCP11:              true,
 		CertificateStore:   true,
-		Allowlist:          true,
+		Allowlist:          false, // Yubico-specific wire shape; not measured on non-YubiKey
 		GenerateECKey:      false, // INS=0xF1 is Yubico-specific
 		KeyDelete:          true,
 		Reset:              false, // YubiKey factory-reset is vendor-specific

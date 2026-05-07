@@ -1159,6 +1159,22 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
+	// Profile gating: the wire shape this library emits for the
+	// allowlist (BER-TLV nesting plus the integer-encoded serial
+	// list) is the yubikit/Yubico shape, derived by reference-
+	// implementation parity with yubikit-python's store_allowlist
+	// and _int2asn1. We have not measured this wire shape against
+	// any non-YubiKey card. Profiles that don't claim Allowlist
+	// (currently: standard-sd) refuse the operation host-side
+	// rather than emitting Yubico bytes against an unmeasured card.
+	// When a non-YubiKey card is measured, lift the gate by setting
+	// Allowlist=true on that profile.
+	if s.profile != nil && !s.profile.Capabilities().Allowlist {
+		return fmt.Errorf("securitydomain: StoreAllowlist: %w (profile %q): "+
+			"the allowlist wire encoding is yubikit/Yubico-shape and has not been measured "+
+			"on non-YubiKey cards; lift the gate by switching to a profile that claims Allowlist=true",
+			profile.ErrUnsupportedByProfile, s.profile.Name())
+	}
 
 	payload, err := storeAllowlistData(ref, serials)
 	if err != nil {
@@ -1178,7 +1194,23 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 
 // ClearAllowlist removes the allowlist for the given key reference.
 // Ref: C# ClearAllowList calls StoreAllowlist with empty list.
+//
+// Profile gating: same rationale as StoreAllowlist — the wire shape
+// is yubikit/Yubico-specific and not measured on non-YubiKey cards.
+// Profiles that don't claim Allowlist refuse the operation host-side.
+// The check is duplicated here (rather than relying on the forwarding
+// call to StoreAllowlist to surface it) so the error names the
+// command the operator actually called.
 func (s *Session) ClearAllowlist(ctx context.Context, ref KeyReference) error {
+	if err := s.requireOCEAuth(); err != nil {
+		return err
+	}
+	if s.profile != nil && !s.profile.Capabilities().Allowlist {
+		return fmt.Errorf("securitydomain: ClearAllowlist: %w (profile %q): "+
+			"the allowlist wire encoding is yubikit/Yubico-shape and has not been measured "+
+			"on non-YubiKey cards; lift the gate by switching to a profile that claims Allowlist=true",
+			profile.ErrUnsupportedByProfile, s.profile.Name())
+	}
 	return s.StoreAllowlist(ctx, ref, nil)
 }
 
