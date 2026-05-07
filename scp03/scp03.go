@@ -381,7 +381,15 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, fmt.Errorf("calculate card cryptogram: %w", err)
 	}
 	if !constantTimeEqual(expectedCC, iur.cardCryptogram) {
-		return nil, fmt.Errorf("%w: card cryptogram mismatch: possible MITM or wrong keys", ErrAuthFailed)
+		// Wrap CryptogramMismatchError so callers can errors.As
+		// for the bytes, and so errors.Is(err, ErrAuthFailed)
+		// still matches via CryptogramMismatchError.Is. The
+		// rendered error mirrors gppro's diagnostic shape; see
+		// the type doc on CryptogramMismatchError for rationale.
+		return nil, &CryptogramMismatchError{
+			Expected: append([]byte(nil), expectedCC...),
+			Received: append([]byte(nil), iur.cardCryptogram...),
+		}
 	}
 
 	// Step 7: Calculate host cryptogram (also derived with S-MAC).
