@@ -18,16 +18,22 @@
 //
 // # Assurance categories
 //
-// The library is standards-oriented and structured around three
-// categories so consumers can match their integration to validated
-// material rather than to a single vendor:
+// The library is vendor-neutral by design. Protocol behavior is
+// implemented against GP / ISO specs, and verified hardware profiles
+// are named explicitly rather than baked into the API surface.
+// Configuration helpers for a specific card vendor live in their own
+// peer package (see the yubikey package); additional verified
+// profiles will land as additional peer packages, not by extending
+// vendor-named symbols inside the protocol packages.
+//
+// Three assurance categories describe what the library promises:
 //
 //   - Verified profiles: behavior validated against hardware AND an
 //     independent reference implementation. YubiKey is the currently
 //     verified profile, covering SCP03 AES-128 end-to-end, SCP11
 //     P-256 / AES-128 / S8 / full security level end-to-end, the
-//     YubiKey-compatible empty-data behavior, and the YubiKey
-//     Security Domain management API surface.
+//     pad-and-encrypt empty-data behavior at the channel layer, and
+//     the YubiKey Security Domain management API surface.
 //
 //   - Implemented GlobalPlatform capabilities: standards-compatible
 //     behavior implemented against the GP / ISO specs and exercisable
