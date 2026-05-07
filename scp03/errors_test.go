@@ -230,3 +230,241 @@ func bytes16(v byte) []byte {
 	}
 	return out
 }
+
+// TestInitializeUpdateError_FieldsAndError pins the rendered shape
+// of InitializeUpdateError for each SW the classifier knows about.
+// Spec-grade SWs (6982, 6985) get the "not a key problem" framing;
+// wrong-key SWs (6A88, 63Cx) get the bare message form so log
+// noise doesn't get in the way when the diagnostic just says
+// "wrong key, try a different one." Operators reading the rendered
+// error can tell which class of failure they hit without parsing
+// the SW themselves.
+func TestInitializeUpdateError_FieldsAndError(t *testing.T) {
+	cases := []struct {
+		name     string
+		sw1, sw2 byte
+		want     []string
+		notWant  []string
+		retry    bool
+	}{
+		{
+			name: "6982 policy block",
+			sw1:  0x69, sw2: 0x82,
+			want: []string{
+				"SW=6982",
+				"Security status not satisfied",
+				"retrying with different keys will not help",
+				"SD lifecycle",
+			},
+			retry: false,
+		},
+		{
+			name: "6985 conditions of use",
+			sw1:  0x69, sw2: 0x85,
+			want: []string{
+				"SW=6985",
+				"Conditions of use not satisfied",
+				"retrying with different keys will not help",
+			},
+			retry: false,
+		},
+		{
+			name: "6A88 missing KVN",
+			sw1:  0x6A, sw2: 0x88,
+			want: []string{
+				"SW=6A88",
+				"Referenced data not found",
+				"KIT",
+			},
+			notWant: []string{"will not help"}, // retry might help here
+			retry:   true,
+		},
+		{
+			name: "63CX counter remaining",
+			sw1:  0x63, sw2: 0xC5,
+			want: []string{
+				"SW=63C5",
+				"5 attempts remaining",
+				"counter is decrementing",
+			},
+			notWant: []string{"will not help"},
+			retry:   true,
+		},
+		{
+			name: "unknown SW",
+			sw1:  0x6F, sw2: 0x00,
+			want: []string{
+				"SW=6F00",
+				"unknown to scp03 diagnostics",
+				"retrying with different keys will not help",
+			},
+			retry: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			diag, retry := scp03.ClassifyInitUpdateSWForTest(c.sw1, c.sw2)
+			if retry != c.retry {
+				t.Errorf("retry flag = %v, want %v", retry, c.retry)
+			}
+			iue := &scp03.InitializeUpdateError{
+				SW1: c.sw1, SW2: c.sw2,
+				Diagnostic: diag, RetryDifferentKeys: retry,
+			}
+			msg := iue.Error()
+			for _, want := range c.want {
+				if !strings.Contains(msg, want) {
+					t.Errorf("Error() should contain %q; got:\n%s", want, msg)
+				}
+			}
+			for _, notWant := range c.notWant {
+				if strings.Contains(msg, notWant) {
+					t.Errorf("Error() should NOT contain %q for retry=%v; got:\n%s",
+						notWant, retry, msg)
+				}
+			}
+
+			// Sentinel chain.
+			if !errors.Is(iue, scp03.ErrAuthFailed) {
+				t.Error("InitializeUpdateError should errors.Is as ErrAuthFailed")
+			}
+
+			// SW() helper.
+			wantSW := uint16(c.sw1)<<8 | uint16(c.sw2)
+			if iue.SW() != wantSW {
+				t.Errorf("SW() = 0x%04X, want 0x%04X", iue.SW(), wantSW)
+			}
+		})
+	}
+}
+
+// TestInitializeUpdateError_DistinctFromCryptogramMismatch confirms
+// the two rich error types are indeed distinct under errors.As, so
+// callers branching on type can route 6982 (state-block) and
+// cryptogram-mismatch (wrong keys) to different remediation
+// guidance. Both still satisfy errors.Is(err, ErrAuthFailed) so
+// existing callers don't break.
+func TestInitializeUpdateError_DistinctFromCryptogramMismatch(t *testing.T) {
+	iue := &scp03.InitializeUpdateError{
+		SW1: 0x69, SW2: 0x82,
+		Diagnostic:         "Security status not satisfied",
+		RetryDifferentKeys: false,
+	}
+	cm := &scp03.CryptogramMismatchError{
+		Expected: []byte{0x00, 0x01},
+		Received: []byte{0x10, 0x11},
+	}
+
+	// Each type errors.As into itself but not into the other.
+	var asIUE *scp03.InitializeUpdateError
+	if !errors.As(error(iue), &asIUE) {
+		t.Error("InitializeUpdateError should errors.As into InitializeUpdateError")
+	}
+	if errors.As(error(cm), &asIUE) {
+		t.Error("CryptogramMismatchError should NOT errors.As into InitializeUpdateError")
+	}
+
+	var asCM *scp03.CryptogramMismatchError
+	if !errors.As(error(cm), &asCM) {
+		t.Error("CryptogramMismatchError should errors.As into CryptogramMismatchError")
+	}
+	if errors.As(error(iue), &asCM) {
+		t.Error("InitializeUpdateError should NOT errors.As into CryptogramMismatchError")
+	}
+
+	// Both still match ErrAuthFailed.
+	if !errors.Is(iue, scp03.ErrAuthFailed) {
+		t.Error("InitializeUpdateError should errors.Is as ErrAuthFailed")
+	}
+	if !errors.Is(cm, scp03.ErrAuthFailed) {
+		t.Error("CryptogramMismatchError should errors.Is as ErrAuthFailed")
+	}
+}
+
+// TestOpen_InitializeUpdate6982_NotKeyProblem is the integration-
+// level assertion that ChatGPT's parallel session against a
+// real SafeNet Token JC motivated. When the card returns SW=6982
+// to INITIALIZE UPDATE before any cryptogram exchange, scp03.Open
+// must surface that as an InitializeUpdateError with
+// RetryDifferentKeys=false and a diagnostic message that explicitly
+// says retrying with different keys won't help. Operators triaging
+// this case shouldn't burn another counter slot guessing keys.
+func TestOpen_InitializeUpdate6982_NotKeyProblem(t *testing.T) {
+	card := scp03.NewMockCard(scp03.DefaultKeys)
+	card.ForceInitUpdateSW = 0x6982 // Security status not satisfied
+
+	_, err := scp03.Open(context.Background(), card.Transport(), &scp03.Config{
+		Keys: scp03.DefaultKeys,
+	})
+	if err == nil {
+		t.Fatal("expected error when card returns 6982 on IU; got nil")
+	}
+
+	// Sentinel chain still matches.
+	if !errors.Is(err, scp03.ErrAuthFailed) {
+		t.Errorf("errors.Is(err, ErrAuthFailed) = false; err = %v", err)
+	}
+
+	// Concrete type recovers.
+	var iue *scp03.InitializeUpdateError
+	if !errors.As(err, &iue) {
+		t.Fatalf("errors.As should recover *InitializeUpdateError; err = %v", err)
+	}
+	if iue.SW() != 0x6982 {
+		t.Errorf("SW = 0x%04X, want 0x6982", iue.SW())
+	}
+	if iue.RetryDifferentKeys {
+		t.Error("RetryDifferentKeys should be false for SW=6982")
+	}
+
+	// Should NOT also recover as a CryptogramMismatchError. Cards
+	// that return 6982 before any cryptogram exchange aren't a
+	// cryptogram-mismatch failure mode.
+	var cm *scp03.CryptogramMismatchError
+	if errors.As(err, &cm) {
+		t.Error("err should not also recover as CryptogramMismatchError")
+	}
+
+	// Rendered message should explicitly say keys aren't the
+	// gate, so log readers see the right next step.
+	msg := err.Error()
+	for _, want := range []string{"6982", "retrying with different keys will not help"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() should contain %q; got:\n%s", want, msg)
+		}
+	}
+}
+
+// TestOpen_InitializeUpdate6A88_RetryWithDifferentKVN confirms the
+// retry-different-keys flag stays true when the SW indicates a
+// missing key version (rather than a state lock). 6A88 means "the
+// requested KVN isn't installed" — caller should investigate KIT
+// and try a different KeyVersion, which is a sensible action that
+// the diagnostic should encourage rather than discourage.
+func TestOpen_InitializeUpdate6A88_RetryWithDifferentKVN(t *testing.T) {
+	card := scp03.NewMockCard(scp03.DefaultKeys)
+	card.ForceInitUpdateSW = 0x6A88
+
+	_, err := scp03.Open(context.Background(), card.Transport(), &scp03.Config{
+		Keys: scp03.DefaultKeys,
+	})
+	if err == nil {
+		t.Fatal("expected error when card returns 6A88 on IU; got nil")
+	}
+
+	var iue *scp03.InitializeUpdateError
+	if !errors.As(err, &iue) {
+		t.Fatalf("errors.As should recover *InitializeUpdateError; err = %v", err)
+	}
+	if !iue.RetryDifferentKeys {
+		t.Error("RetryDifferentKeys should be true for SW=6A88 (missing KVN)")
+	}
+
+	// Rendered message should NOT carry the brick-ish "won't help"
+	// language since retry might in fact succeed with a different
+	// KVN.
+	msg := err.Error()
+	if strings.Contains(msg, "will not help") {
+		t.Errorf("Error() should NOT discourage retry for 6A88; got:\n%s", msg)
+	}
+}
