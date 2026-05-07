@@ -197,7 +197,9 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 	// we override are scalars / nil-able pointers, so a shallow copy
 	// is enough to isolate the side effect.
 	local := *cfg
-	local.SelectAID = AIDSecurityDomain
+	if local.SelectAID == nil {
+		local.SelectAID = AIDSecurityDomain
+	}
 	local.SecurityLevel = channel.LevelFull
 
 	scpSess, err := scp03.Open(ctx, t, &local)
@@ -344,17 +346,25 @@ func validateDEK(dek []byte) error {
 }
 
 // OpenUnauthenticated opens a read-only session to the Security Domain.
-func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, error) {
+// OpenUnauthenticated opens a read-only session to the Security
+// Domain by SELECTing the named AID. Pass nil for sdAID to use
+// the GP-default ISD AID (AIDSecurityDomain). Pass a vendor- or
+// deployment-specific AID for cards that do not respond to the
+// default (some SafeNet/Fusion variants, custom JCOP installs).
+func OpenUnauthenticated(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
-	cmd := apdu.NewSelect(AIDSecurityDomain)
+	if len(sdAID) == 0 {
+		sdAID = AIDSecurityDomain
+	}
+	cmd := apdu.NewSelect(sdAID)
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("securitydomain: select SD: %w", resp.Error())
+		return nil, &APDUError{Operation: "SELECT SD", SW: resp.StatusWord()}
 	}
 	return &Session{transport: t, authenticated: false}, nil
 }
@@ -546,7 +556,7 @@ func (s *Session) GetKeyInformation(ctx context.Context) ([]KeyInfo, error) {
 		return nil, fmt.Errorf("securitydomain: get key information: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("securitydomain: get key information: %w: %w", ErrCardStatus, resp.Error())
+		return nil, &APDUError{Operation: "get key information", SW: resp.StatusWord()}
 	}
 	return parseKeyInformation(resp.Data)
 }
@@ -559,7 +569,7 @@ func (s *Session) GetCardRecognitionData(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("securitydomain: get card recognition data: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("securitydomain: get card recognition data: %w: %w", ErrCardStatus, resp.Error())
+		return nil, &APDUError{Operation: "get card recognition data", SW: resp.StatusWord()}
 	}
 	return resp.Data, nil
 }
@@ -631,7 +641,7 @@ func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.
 		return fmt.Errorf("securitydomain: put SCP03 key: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: put SCP03 key: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "put SCP03 key", SW: resp.StatusWord()}
 	}
 
 	// Verify checksum: response should be KVN + KCV_enc + KCV_mac + KCV_dek.
@@ -657,7 +667,7 @@ func (s *Session) GenerateECKey(ctx context.Context, ref KeyReference, replaceKv
 		return nil, fmt.Errorf("securitydomain: generate EC key: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("securitydomain: generate EC key: %w: %w", ErrCardStatus, resp.Error())
+		return nil, &APDUError{Operation: "generate EC key", SW: resp.StatusWord()}
 	}
 
 	return parseGeneratedPublicKey(resp.Data)
@@ -685,7 +695,7 @@ func (s *Session) PutECPrivateKey(ctx context.Context, ref KeyReference, key *ec
 		return fmt.Errorf("securitydomain: put EC private key: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: put EC private key: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "put EC private key", SW: resp.StatusWord()}
 	}
 
 	return nil
@@ -709,7 +719,7 @@ func (s *Session) PutECPublicKey(ctx context.Context, ref KeyReference, key *ecd
 		return fmt.Errorf("securitydomain: put EC public key: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: put EC public key: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "put EC public key", SW: resp.StatusWord()}
 	}
 
 	return nil
@@ -747,7 +757,7 @@ func (s *Session) DeleteKey(ctx context.Context, ref KeyReference, deleteLast bo
 		return fmt.Errorf("securitydomain: delete key: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: delete key: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "delete key", SW: resp.StatusWord()}
 	}
 
 	return nil
@@ -891,7 +901,7 @@ func (s *Session) StoreCertificates(ctx context.Context, ref KeyReference, certs
 		return fmt.Errorf("securitydomain: store certificates: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: store certificates: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "store certificates", SW: resp.StatusWord()}
 	}
 
 	return nil
@@ -912,7 +922,7 @@ func (s *Session) GetCertificates(ctx context.Context, ref KeyReference) ([]*x50
 		if resp.StatusWord() == 0x6A88 {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("securitydomain: get certificates: %w: %w", ErrCardStatus, resp.Error())
+		return nil, &APDUError{Operation: "get certificates", SW: resp.StatusWord()}
 	}
 
 	derCerts, err := parseCertificates(resp.Data)
@@ -944,7 +954,7 @@ func (s *Session) StoreCaIssuer(ctx context.Context, ref KeyReference, ski []byt
 		return fmt.Errorf("securitydomain: store CA issuer: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: store CA issuer: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "store CA issuer", SW: resp.StatusWord()}
 	}
 
 	return nil
@@ -988,7 +998,7 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 		return fmt.Errorf("securitydomain: store allowlist: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: store allowlist: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "store allowlist", SW: resp.StatusWord()}
 	}
 
 	return nil
@@ -1010,7 +1020,7 @@ func (s *Session) GetData(ctx context.Context, tag uint16, data []byte) ([]byte,
 		return nil, fmt.Errorf("securitydomain: get data: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("securitydomain: get data: %w: %w", ErrCardStatus, resp.Error())
+		return nil, &APDUError{Operation: "get data", SW: resp.StatusWord()}
 	}
 	return resp.Data, nil
 }
@@ -1026,7 +1036,7 @@ func (s *Session) StoreData(ctx context.Context, data []byte) error {
 		return fmt.Errorf("securitydomain: store data: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return fmt.Errorf("securitydomain: store data: %w: %w", ErrCardStatus, resp.Error())
+		return &APDUError{Operation: "store data", SW: resp.StatusWord()}
 	}
 	return nil
 }

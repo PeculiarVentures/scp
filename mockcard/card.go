@@ -171,9 +171,31 @@ type Card struct {
 	// The SCP11b/SCP03 unwrap is unaffected — GET STATUS reaches the
 	// dispatch only when a session is open, so tests must establish
 	// authentication first.
-	RegistryISD       []MockRegistryEntry
-	RegistryApps      []MockRegistryEntry
-	RegistryLoadFiles []MockRegistryEntry
+	// GPState is the embedded GP card-content state (registries
+	// + in-flight INSTALL [for load] context). Embedding promotes
+	// RegistryISD/RegistryApps/RegistryLoadFiles for direct field
+	// access by tests; the actual GP command handlers are methods
+	// on *GPState defined in mockcard/gpstate.go and shared with
+	// the SCP03+GP combined mock (see scp03card.go).
+	*GPState
+
+	// Faults is an ordered list of *Fault entries that test
+	// code can register via AddFault. Each command passes
+	// through the fault list before dispatch — see
+	// dispatchINS. Mirrors the SCP03Card.Faults shape so
+	// tests can target either mock with the same builder
+	// helpers (FailINS, FailLoadAtSeq, etc.).
+	Faults []*Fault
+}
+
+// AddFault registers a fault to fire on a matching APDU. Faults
+// evaluate in registration order before any command handler;
+// the first match short-circuits dispatch and returns its
+// Response. Faults marked Once unregister themselves after
+// firing exactly once.
+func (c *Card) AddFault(f *Fault) *Card {
+	c.Faults = append(c.Faults, f)
+	return c
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -223,6 +245,7 @@ func New() (*Card, error) {
 		pivPINCounter: 3,
 		pivPUKCounter: 3,
 		pivObjects:    make(map[string][]byte),
+		GPState:       NewGPState(),
 	}, nil
 }
 
@@ -305,18 +328,37 @@ func (c *Card) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 // switch missed it for several months until #50 fixed the symptom.
 // Collapsing them removes the duplication permanently.
 func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {
+	// Fault evaluation runs first so tests can force any
+	// command path to a specific SW. Faults are removed after
+	// firing if Once=true (matches SCP03Card semantics).
+	for _, f := range c.Faults {
+		if !f.fired && f.Match(cmd) {
+			if f.Once {
+				f.fired = true
+			}
+			return f.Response, nil
+		}
+	}
 	switch cmd.INS {
 	case 0xA4: // SELECT
 		return c.doSelect(cmd, underSM)
 
 	case 0xCA: // GET DATA
+		// GPState answers identity tags (0x42 IIN, 0x45 CIN)
+		// when configured; everything else falls through to the
+		// SCP11 mock's own GET DATA handler.
+		if resp, ok := c.GPState.HandleGPCommand(cmd); ok {
+			return resp, nil
+		}
 		return c.doGetData(cmd)
 
-	case 0xF2: // GP §11.4.2 GET STATUS
-		return c.doGetStatus(cmd)
-
-	case 0xF0: // GP §11.1.10 SET STATUS
-		return c.doSetStatus(cmd)
+	case 0xF2, 0xF0, 0xE6, 0xE8, 0xE4:
+		// GP card-content management (GET STATUS, SET STATUS,
+		// INSTALL, LOAD, DELETE). Single delegation point shared
+		// with mockcard.SCP03Card so a regression in any handler
+		// surfaces in both protocols' tests.
+		resp, _ := c.GPState.HandleGPCommand(cmd)
+		return resp, nil
 
 	case 0xE2: // GP §11.11 STORE DATA
 		// Mock just acknowledges — validating wire format is the

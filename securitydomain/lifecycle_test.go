@@ -89,7 +89,7 @@ func TestSetISDLifecycle_Wire(t *testing.T) {
 func TestSetISDLifecycle_RequiresOCEAuth(t *testing.T) {
 	ctx := context.Background()
 	card := scp03.NewMockCard(scp03.DefaultKeys)
-	sess, err := securitydomain.OpenUnauthenticated(ctx, card.Transport())
+	sess, err := securitydomain.OpenUnauthenticated(ctx, card.Transport(), nil)
 	if err != nil {
 		t.Fatalf("OpenUnauthenticated: %v", err)
 	}

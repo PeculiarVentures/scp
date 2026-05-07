@@ -276,3 +276,81 @@ func TestDispatch_TopLevelUtilities(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatch_GPHelpMentionsAllVerbs catches drift between
+// the gp dispatch table (gpCommands map in main.go) and the
+// gp usage banner (gpUsage in cmd_gp.go). The brief flagged
+// that adding a new gp verb without updating the help text
+// produces a verb that works but isn't discoverable — and
+// nothing in the build catches it.
+//
+// The test runs 'scpctl gp help' and asserts every key in
+// gpCommands appears in the output. A future verb registered
+// without a corresponding line in gpUsage's Subcommands
+// section fails this test loudly, before the discrepancy
+// reaches an operator.
+//
+// Whitespace normalization (strings.Fields) handles line wraps
+// in the help text — the verb name might land mid-paragraph
+// after a wrap.
+func TestDispatch_GPHelpMentionsAllVerbs(t *testing.T) {
+	stdout, stderr, code := runScpctl(t, "gp", "help")
+	if code != 0 {
+		t.Fatalf("'gp help' exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	// strings.Fields collapses runs of whitespace (including
+	// newlines from wraps) into single spaces, so a verb at
+	// the start of a wrapped line still matches.
+	tokens := make(map[string]bool, 64)
+	for _, tok := range strings.Fields(stdout) {
+		tokens[tok] = true
+	}
+	for verb := range gpCommands {
+		if !tokens[verb] {
+			t.Errorf("gp help text missing verb %q registered in gpCommands; "+
+				"adding verbs without updating gpUsage's Subcommands section "+
+				"produces undiscoverable commands.\n--- output ---\n%s",
+				verb, stdout)
+		}
+	}
+}
+
+// TestDispatch_SDHelpMentionsAllVerbs: same drift check for
+// the sd group. Built alongside the gp version because the sd
+// group is the other multi-verb group; future top-level
+// groups should each have an analogous test.
+func TestDispatch_SDHelpMentionsAllVerbs(t *testing.T) {
+	stdout, stderr, code := runScpctl(t, "sd", "help")
+	if code != 0 {
+		t.Fatalf("'sd help' exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	tokens := make(map[string]bool, 64)
+	for _, tok := range strings.Fields(stdout) {
+		tokens[tok] = true
+	}
+	for verb := range sdCommands {
+		if !tokens[verb] {
+			t.Errorf("sd help text missing verb %q registered in sdCommands\n--- output ---\n%s",
+				verb, stdout)
+		}
+	}
+}
+
+// TestDispatch_PIVHelpMentionsAllVerbs: same drift check for
+// the piv group.
+func TestDispatch_PIVHelpMentionsAllVerbs(t *testing.T) {
+	stdout, stderr, code := runScpctl(t, "piv", "help")
+	if code != 0 {
+		t.Fatalf("'piv help' exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	tokens := make(map[string]bool, 64)
+	for _, tok := range strings.Fields(stdout) {
+		tokens[tok] = true
+	}
+	for verb := range pivCommands {
+		if !tokens[verb] {
+			t.Errorf("piv help text missing verb %q registered in pivCommands\n--- output ---\n%s",
+				verb, stdout)
+		}
+	}
+}

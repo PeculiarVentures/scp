@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/mockcard"
@@ -100,9 +101,31 @@ func TestRegistryEntry_LifecycleString(t *testing.T) {
 		{StatusScopeISD, 0x0F, "SECURED"},
 		{StatusScopeISD, 0x07, "INITIALIZED"},
 		{StatusScopeISD, 0xFF, "TERMINATED"},
+		// Application scope: legitimate base states render to
+		// their GP §11.1.1 names.
+		{StatusScopeApplications, 0x03, "INSTALLED"},
 		{StatusScopeApplications, 0x07, "SELECTABLE"},
-		{StatusScopeApplications, 0x83, "LOCKED"},  // high bit set
 		{StatusScopeApplications, 0x0F, "PERSONALIZED"},
+		// Application LOCKED encoding: the spec defines bit 7
+		// (0x80) as the locked modifier ORed onto a base state.
+		// All three legitimate locked-state encodings render
+		// LOCKED. Mirrors GlobalPlatformPro's
+		// `(v & 0x83) == 0x83` predicate, extended for the
+		// SELECTABLE-derived (0x87) and PERSONALIZED-derived
+		// (0x8F) variants.
+		{StatusScopeApplications, 0x83, "LOCKED"}, // locked from INSTALLED
+		{StatusScopeApplications, 0x87, "LOCKED"}, // locked from SELECTABLE
+		{StatusScopeApplications, 0x8F, "LOCKED"}, // locked from PERSONALIZED
+		// Application high-bit-set values that are NOT one of
+		// the three legitimate locked encodings render as
+		// unknown — earlier code over-labeled all of these as
+		// LOCKED, which obscured malformed cards.
+		{StatusScopeApplications, 0x80, "unknown(0x80)"}, // bare locked bit, no base state
+		{StatusScopeApplications, 0xFF, "unknown(0xFF)"}, // 0xFF means TERMINATED on ISD; nonsense on app row
+		{StatusScopeApplications, 0x84, "unknown(0x84)"}, // locked + invalid base
+		// Application scope: low-bits-only invalid combinations
+		// render unknown rather than guessing.
+		{StatusScopeApplications, 0x01, "unknown(0x01)"},
 		{StatusScopeLoadFiles, 0x01, "LOADED"},
 		{StatusScopeLoadFiles, 0x99, "unknown(0x99)"},
 	}
@@ -282,5 +305,64 @@ func TestGetStatus_MultipleApplications(t *testing.T) {
 	if !bytes.Equal(entries[1].AssociatedSDAID, mc.RegistryApps[1].AssociatedSDAID) {
 		t.Errorf("entry 1 AssociatedSDAID = %X, want %X",
 			entries[1].AssociatedSDAID, mc.RegistryApps[1].AssociatedSDAID)
+	}
+}
+
+
+// TestGetStatus_TLVRejected_ReturnsExplicitError pins that
+// when a card refuses the TLV-format request (SW=6A86 or
+// SW=6D00), GetStatus surfaces an APDUError that names the
+// limitation explicitly. There is no silent fallback to the
+// pre-TLV "Application" format — this codebase is TLV-only by
+// design (no users yet, no installed base of legacy cards).
+//
+// The error message must mention 'TLV' and 'legacy' so an
+// operator reading it knows the failure mode is a card-format
+// mismatch, not a card or session error.
+func TestGetStatus_TLVRejected_ReturnsExplicitError(t *testing.T) {
+	cases := []struct {
+		name string
+		sw   uint16
+	}{
+		{"6A86_incorrect_p1p2", 0x6A86},
+		{"6D00_ins_not_supported", 0x6D00},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc, err := mockcard.New()
+			if err != nil {
+				t.Fatalf("mockcard.New: %v", err)
+			}
+			mc.RegistryApps = []mockcard.MockRegistryEntry{
+				{AID: []byte{0xA0, 0x00, 0x00, 0x03, 0x08}, Lifecycle: 0x07},
+			}
+			// Force GET STATUS TLV-first to fail with the
+			// configured SW.
+			mc.AddFault(mockcard.FailINS(0xF2, byte(StatusScopeApplications), 0x02, tc.sw))
+
+			sess := openSCP11bAgainstMock(t, mc)
+			defer sess.Close()
+
+			_, err = sess.GetStatus(context.Background(), StatusScopeApplications)
+			if err == nil {
+				t.Fatalf("expected APDUError; got nil")
+			}
+			var apduErr *APDUError
+			if !errors.As(err, &apduErr) {
+				t.Fatalf("err = %v (%T); want *APDUError", err, err)
+			}
+			if apduErr.SW != tc.sw {
+				t.Errorf("apduErr.SW = 0x%04X, want 0x%04X", apduErr.SW, tc.sw)
+			}
+			msg := err.Error()
+			// Must signal the format-mismatch nature of the
+			// failure so an operator can diagnose the card.
+			if !strings.Contains(msg, "TLV") {
+				t.Errorf("error should mention TLV; got %q", msg)
+			}
+			if !strings.Contains(msg, "legacy") {
+				t.Errorf("error should reference the unsupported legacy format; got %q", msg)
+			}
+		})
 	}
 }

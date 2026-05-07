@@ -1,0 +1,2 @@
+# Local build output; main.go's `go build` compiles to this name.
+demo
