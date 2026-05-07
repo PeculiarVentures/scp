@@ -183,6 +183,26 @@ By default the CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK) 
 
 The OCE certificate chain is **NOT stored on the card**. It travels on the wire at SCP11 session-open via PSO (GP §7.5.3), and the card validates it against the registered CA pubkey + SKI. `bootstrap-oce` thus performs two writes: `PUT KEY` to install the OCE CA pubkey at KID=0x10, and `STORE DATA` to register the CA SKI. The leaf cert's pubkey and the chain bytes themselves are never written to card storage — that would be a category error (the card has no slot for OCE chains), and earlier versions that tried to do this got SW=6A80 from retail YubiKeys. If you need to store an *SD* attestation chain (a chain whose leaf certifies the on-card SD pubkey), that's a separate provisioning step against the SD key reference, not part of `bootstrap-oce`.
 
+### sd reset — restore the Issuer Security Domain to factory state
+
+Erases custom Security Domain key material and restores the factory SCP03 key set, regenerating the SCP11b key at `KID=0x13/KVN=0x01`. Does NOT touch the PIV applet — that lives in a separate applet with separate state, recoverable via `piv reset`.
+
+```bash
+scpctl sd reset \
+  --reader "YubiKey" \
+  --confirm-reset-sd
+```
+
+The flow:
+
+1. Read the pre-reset key inventory (for the operator-visible diff).
+2. For every installed SCP key, send 65 wrong-credential attempts to block it (`6983`). The card's own footgun guard is that destructive SD reset only fires when every key is in the BLOCKED state.
+3. The card auto-restores factory SCP03 (`KID=0x01/0x02/0x03 at KVN=0xFF`, the publicly documented `404142...4F` AES-128 key set) and regenerates a fresh SCP11b key at `KID=0x13/KVN=0x01`.
+
+**Power-cycle the card before issuing further APDUs.** The SD lifecycle transition does not fully apply until the next reader power-up. Hammering the card with `SELECT` immediately after `sd reset` returns `SW=6A82` on every applet — not because the reset failed, but because the card hasn't completed its self-restoration yet. Unplug + replug (or remove + replace from an NFC reader). The success message from `sd reset` includes a reminder to do this.
+
+`--confirm-reset-sd` (not `--confirm-write`) is required to mutate, by design: SD reset clears credentials at a different blast radius than `piv reset`, and a shared confirmation flag would let a single careless invocation against the wrong subcommand clear keys the operator didn't intend to touch.
+
 ### piv reset — restore the PIV applet to factory state
 
 Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other PIV state you want to undo without physically swapping the hardware. Erases ALL 24 PIV slot keypairs and certificates, returns PIN to `123456` and PUK to `12345678`, and resets the management key (to the well-known 3DES default on pre-5.7 firmware, or a randomly regenerated AES-192 key in protected metadata on 5.7+). Does NOT touch installed OCE roots or the Issuer Security Domain — those live outside the PIV applet.
@@ -260,6 +280,21 @@ scpctl test all \
   --lab-skip-scp11-trust
 ```
 
+`test all` accepts the same `--scp03-*` flag set as `scp03-sd-read` and forwards them to that subcheck. Use this on cards whose SCP03 keys have been rotated (the implicit factory-keys default fails on rotated cards), on standard GP cards (no Yubico factory keys), or on cards where `bootstrap-*` invalidated factory SCP03 as a documented side effect.
+
+```bash
+# Pass factory keys explicitly (same behavior as omitting; visible in scripts)
+scpctl test all --reader "YubiKey" --scp03-keys-default --pin 123456 --lab-skip-scp11-trust
+
+# Rotated AES-128 set
+scpctl test all --reader "YubiKey" \
+  --scp03-kvn 01 \
+  --scp03-enc 11111111111111111111111111111111 \
+  --scp03-mac 22222222222222222222222222222222 \
+  --scp03-dek 33333333333333333333333333333333 \
+  --pin 123456 --lab-skip-scp11-trust
+```
+
 Process exit code is 1 if any check failed; 0 otherwise (including SKIP results). The SCP11a check is skipped automatically if `--oce-key`/`--oce-cert` are not supplied.
 
 ## Group structure
@@ -281,6 +316,8 @@ Every generic SD command (`info`, `reset`, `lock`/`unlock`/`terminate`, `keys li
 `gp probe` is functionally equivalent to the legacy top-level `probe` under a `gp probe` report label (unauthenticated SELECT, GET DATA tag 0x66 for CRD).
 
 `gp registry` opens an authenticated SCP03 session and walks the GP registry across three scopes (ISD, Applications, LoadFiles+Modules) via GET STATUS. Per-scope failure policy reports SW=6A88 (no entries) as PASS and SW=6982 (auth required) as SKIP. The LoadFiles+Modules scope automatically falls back to LoadFiles-only when the card rejects the modules-included form (SW=6A86 or SW=6D00); the report flags this as "modules omitted" so the operator knows the data is partial because of card behavior, not a tool limitation. JSON output carries `load_files_requested_scope` and `load_files_actual_scope` fields (omitempty) so consumers can detect when the fallback fired and avoid asserting module presence on cards that returned LoadFiles-only.
+
+**YubiKey 5.7+ note.** YubiKey 5.7+ returns `SW=6A86` or `SW=6D00` across every GET STATUS scope by design — the SD does not expose the GP registry, and `ykman`'s equivalent inventory uses out-of-band APIs. This is expected, not a tool failure. The SKIP detail in the report appends an operator-friendly hint (`"card refuses GET STATUS INS entirely on this scope (typical of cards that don't expose the GP registry; e.g. YubiKey 5.7+)"`) so the empty `gp registry` output on a YubiKey doesn't get misread as a misconfiguration.
 
 `gp install` loads and installs an applet from a CAP file. The flow runs INSTALL [for load], a sequence of LOAD chunks, then INSTALL [for install] with P1=0x0C (combined install + make-selectable per GP §11.5.2.1, the standard one-shot form). `--load-block-size` controls the chunk size (default 200, hard-capped at 231 to stay within the 255-byte short-Lc limit after SCP03 LevelFull SM overhead). Mid-flow failure surfaces as `PartialInstallError` with the stage, bytes loaded, and last sequence number, so the operator knows whether to clean up the load file, the install, or both. Dry-run by default; pass `--confirm-write` to transmit. The dry-run preflight prints the components actually going into the load image (Debug / Descriptor exclusion takes effect here), the LOAD chunk plan (count, size, final block bytes), the raw privilege bytes, the hash policy, and the final INSTALL [for install] data field hex (`install_data_hex` in JSON) so JC applet operators can verify their install-params TLV form before authorizing the write. Re-running with `--confirm-write` produces the same preflight lines so a JSON consumer can diff the two and detect drift between preview and execution.
 
