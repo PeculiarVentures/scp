@@ -468,12 +468,29 @@ func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, 
 // surface a clear error.
 //
 // Per the third external review, Section 9.
+//
+// Callers that need to send a literal empty SELECT (no AID, the
+// ISO/IEC 7816-4 §5.3.1 default-selection probe used by DiscoverISD
+// against cards whose ISD AID is unknown) must use openSelectAIDLiteral
+// instead — this function applies the nil/empty fallback by design.
 func OpenUnauthenticatedWithAID(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
+	return openSelectAIDLiteral(ctx, t, effectiveSDAID(sdAID))
+}
+
+// openSelectAIDLiteral sends SELECT with the given AID byte-for-byte,
+// without the effectiveSDAID convenience fallback. A nil or empty
+// sdAID produces a SELECT with empty data field — the ISO/IEC 7816-4
+// §5.3.1 default-selection probe. Used by DiscoverISD so that the
+// curated candidate list's nil-AID entry actually exercises empty
+// SELECT rather than collapsing to AIDSecurityDomain.
+//
+// Other callers should use OpenUnauthenticatedWithAID, which keeps
+// the convenience that "no AID supplied" means "the standard ISD."
+func openSelectAIDLiteral(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
-	aid := effectiveSDAID(sdAID)
-	cmd := apdu.NewSelect(aid)
+	cmd := apdu.NewSelect(sdAID)
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", err)
@@ -498,7 +515,7 @@ func OpenUnauthenticatedWithAID(ctx context.Context, t transport.Transport, sdAI
 	return &Session{
 		transport:     t,
 		authenticated: false,
-		sdAID:         cloneAID(aid),
+		sdAID:         cloneAID(sdAID),
 		cardLocked:    locked,
 	}, nil
 }

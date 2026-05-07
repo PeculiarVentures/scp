@@ -311,3 +311,113 @@ func (s *scriptedTransport) Close() error { return nil }
 func (s *scriptedTransport) TrustBoundary() transport.TrustBoundary {
 	return transport.TrustBoundaryUnknown
 }
+
+// recordingTransport records every APDU's data field in the order
+// they were sent. SELECT for any AID returns SW=6A82 except the
+// final empty-SELECT which returns 9000 — lets a test verify that
+// an empty-AID candidate produces an empty data field on the wire,
+// not the AIDSecurityDomain bytes.
+type recordingTransport struct {
+	dataSeen [][]byte
+}
+
+func (r *recordingTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	if cmd.INS != 0xA4 {
+		return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
+	}
+	// Clone the data so a later mutation can't change what we
+	// recorded; the caller may pool or reuse the buffer.
+	d := make([]byte, len(cmd.Data))
+	copy(d, cmd.Data)
+	r.dataSeen = append(r.dataSeen, d)
+	if len(cmd.Data) == 0 {
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+	}
+	return &apdu.Response{SW1: 0x6A, SW2: 0x82}, nil
+}
+
+func (r *recordingTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return nil, errors.New("recordingTransport: TransmitRaw not implemented")
+}
+func (*recordingTransport) Close() error { return nil }
+func (*recordingTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
+
+// TestDiscoverISD_NilCandidateSendsEmptySelect pins the bug fix that
+// motivated the openSelectAIDLiteral split. Before that fix,
+// DiscoverISD called OpenUnauthenticatedWithAID, which routed nil
+// AIDs through effectiveSDAID and silently substituted
+// AIDSecurityDomain. The curated list's nil-AID entry (intended as
+// the ISO/IEC 7816-4 §5.3.1 default-selection probe) collapsed to
+// the first candidate. This test fails the regression by asserting
+// that one of the SELECTs DiscoverISD sends has an empty data field.
+func TestDiscoverISD_NilCandidateSendsEmptySelect(t *testing.T) {
+	rec := &recordingTransport{}
+
+	// Use the production curated list so the test exercises the
+	// real ordering rather than a synthetic one.
+	sess, match, err := securitydomain.DiscoverISD(context.Background(), rec, gp.ISDDiscoveryAIDs, nil)
+	if err != nil {
+		t.Fatalf("DiscoverISD: %v", err)
+	}
+	defer sess.Close()
+
+	if match.AID != nil {
+		t.Errorf("matched AID = %X, want nil (empty-SELECT candidate)", match.AID)
+	}
+
+	var sawEmpty bool
+	for i, d := range rec.dataSeen {
+		if len(d) == 0 {
+			sawEmpty = true
+			t.Logf("attempt[%d]: empty SELECT (data field 0 bytes)", i)
+		} else {
+			t.Logf("attempt[%d]: SELECT data=%X", i, d)
+		}
+	}
+	if !sawEmpty {
+		t.Errorf("DiscoverISD never sent SELECT with empty data field; "+
+			"every attempt carried data, suggesting effectiveSDAID "+
+			"is silently substituting AIDSecurityDomain for nil candidates. "+
+			"data fields seen: %v", rec.dataSeen)
+	}
+}
+
+// TestDiscoverISD_GemPlusCardManagerAID pins the curated list's
+// GemPlus / Gemalto Card Manager entry. Cards in the SafeNet eToken
+// Fusion / IDPrime / IDCore / GemXpresso families default-select
+// this AID; without it in the curated list, --discover-sd would
+// require operators to pass --sd-aid manually for any Thales-built
+// token even though discovery should resolve it automatically.
+func TestDiscoverISD_GemPlusCardManagerAID(t *testing.T) {
+	gemPlusAID, _ := hex.DecodeString("A000000018434D00")
+
+	// Confirm the curated list contains it.
+	var found bool
+	for _, c := range gp.ISDDiscoveryAIDs {
+		if bytes.Equal(c.AID, gemPlusAID) {
+			found = true
+			if !strings.Contains(c.Source, "GemPlus") &&
+				!strings.Contains(c.Source, "Gemalto") &&
+				!strings.Contains(c.Source, "Thales") {
+				t.Errorf("Source citation should mention vendor heritage; got %q", c.Source)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ISDDiscoveryAIDs is missing the GemPlus Card Manager AID %X", gemPlusAID)
+	}
+
+	// Confirm a card that only answers the GemPlus AID gets resolved.
+	tt := &selectiveTransport{accept: [][]byte{gemPlusAID}}
+	sess, match, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs, nil)
+	if err != nil {
+		t.Fatalf("DiscoverISD against GemPlus-only card: %v", err)
+	}
+	defer sess.Close()
+	if !bytes.Equal(match.AID, gemPlusAID) {
+		t.Errorf("matched AID = %X, want %X (GemPlus Card Manager)", match.AID, gemPlusAID)
+	}
+}
