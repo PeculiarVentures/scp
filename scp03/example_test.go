@@ -6,13 +6,14 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // Example demonstrates opening an SCP03 session against a YubiKey
 // in factory state and transmitting a single APDU through the
 // resulting authenticated, encrypted channel.
 //
-// FactoryYubiKeyConfig holds publicly-known default keys (KVN 0xFF,
+// yubikey.FactorySCP03Config holds publicly-known default keys (KVN 0xFF,
 // AES-128 with the well-known 40 41 42 ... 4F key material). Real
 // deployments rotate to caller-controlled keys before going to
 // production; see scp03.Config and securitydomain.Session.PutSCP03Key
@@ -25,7 +26,7 @@ func Example() {
 	ctx := context.Background()
 	card := scp03.NewMockCard(scp03.DefaultKeys)
 
-	sess, err := scp03.Open(ctx, card.Transport(), scp03.FactoryYubiKeyConfig())
+	sess, err := scp03.Open(ctx, card.Transport(), yubikey.FactorySCP03Config())
 	if err != nil {
 		fmt.Println("open:", err)
 		return

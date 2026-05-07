@@ -13,6 +13,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // TestOpenSCP11_PopulatesSessionDEK confirms that an SCP11
@@ -74,7 +75,7 @@ func TestOpenSCP11_PopulatesSessionDEK(t *testing.T) {
 		t.Fatalf("parse cert: %v", err)
 	}
 
-	cfg := scp11.YubiKeyDefaultSCP11aConfig()
+	cfg := yubikey.SCP11aConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	cfg.OCEPrivateKey = oceKey
 	cfg.OCECertificates = []*x509.Certificate{caCert, oceCert}

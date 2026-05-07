@@ -7,6 +7,7 @@ import (
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // ExampleSession_PutSCP03Key shows the canonical key-rotation flow:
@@ -31,10 +32,10 @@ func ExampleSession_PutSCP03Key() {
 	ctx := context.Background()
 	var t transport.Transport // transport/pcsc, transport/grpc, etc.
 
-	// Open the SD over SCP03 with the current key set. FactoryYubiKeyConfig
+	// Open the SD over SCP03 with the current key set. yubikey.FactorySCP03Config
 	// targets KVN 0xFF (factory keys); use a hand-built scp03.Config with
 	// caller-supplied keys for the post-rotation case.
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03.FactoryYubiKeyConfig())
+	sd, err := securitydomain.OpenSCP03(ctx, t, yubikey.FactorySCP03Config())
 	if err != nil {
 		fmt.Println("open:", err)
 		return

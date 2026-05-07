@@ -14,6 +14,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 func TestEndToEnd_SCP11b_Handshake(t *testing.T) {
@@ -31,7 +32,7 @@ func TestEndToEnd_SCP11b_Handshake(t *testing.T) {
 	//   3. INTERNAL AUTHENTICATE (ECDH key agreement)
 	//   4. Session key derivation + receipt verification
 	//   5. SELECT PIV application (encrypted + MACed)
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true // mock card self-signed key
 	sess, err := scp11.Open(ctx, transport, cfg)
 	if err != nil {
@@ -141,7 +142,7 @@ func TestEndToEnd_SCP11b_PIVGenerateKey(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.ApplicationAID = scp11.AIDPIV
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := scp11.Open(ctx, card.Transport(), cfg)
@@ -445,7 +446,7 @@ func TestCard_HandshakeINS_RefusedUnderSM(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := scp11.Open(ctx, card.Transport(), cfg)
 	if err != nil {
@@ -495,7 +496,7 @@ func TestCard_SecureMessaging_ExtendedLcMAC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := scp11.Open(ctx, card.Transport(), cfg)
 	if err != nil {

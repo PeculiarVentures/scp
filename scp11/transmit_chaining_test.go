@@ -38,7 +38,7 @@ func TestSCP11_Transmit_LongPayloadIsWrapThenChain(t *testing.T) {
 		t.Fatalf("mockcard.New: %v", err)
 	}
 	rec := &chainRecordingTransport{inner: mc.Transport()}
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sess, err := Open(context.Background(), rec, cfg)

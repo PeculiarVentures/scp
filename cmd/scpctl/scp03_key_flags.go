@@ -9,6 +9,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/securitydomain/profile"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // scp03KeyFlags is the flag set SCP03-aware commands share for
@@ -355,7 +356,7 @@ func (kf *scp03KeyFlags) applyToConfig() (*scp03.Config, error) {
 
 	if !custom && !shorthand {
 		// Implicit or explicit factory default — same result.
-		return scp03.FactoryYubiKeyConfig(), nil
+		return yubikey.FactorySCP03Config(), nil
 	}
 
 	if shorthand {
@@ -434,7 +435,7 @@ func (kf *scp03KeyFlags) applyToConfig() (*scp03.Config, error) {
 // which key mode is in effect. Names "factory" or "custom (KVN 0xNN,
 // AES-N)" — never logs key bytes.
 func (kf *scp03KeyFlags) describeKeys(cfg *scp03.Config) string {
-	if cfg.KeyVersion == scp03.YubiKeyFactoryKeyVersion &&
+	if cfg.KeyVersion == yubikey.FactoryKeyVersion &&
 		bytesEqualKey(cfg.Keys.ENC, scp03.DefaultKeys.ENC) {
 		return "factory (KVN 0xFF, AES-128 well-known)"
 	}

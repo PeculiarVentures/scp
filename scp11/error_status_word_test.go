@@ -10,6 +10,7 @@ import (
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // TestSCP11_ErrorStatusWord_NoMACVerification covers the GP SCP03
@@ -46,7 +47,7 @@ func TestSCP11_ErrorStatusWord_NoMACVerification(t *testing.T) {
 	// the error case, and only the SW for the unprotected error.
 	rec := &errorPassThroughRecorder{inner: card.Transport()}
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := scp11.Open(ctx, rec, cfg)
 	if err != nil {

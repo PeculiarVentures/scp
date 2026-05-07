@@ -64,7 +64,7 @@
 //	// the example is runnable. Production code MUST set
 //	// CardTrustPolicy or CardTrustAnchors instead.
 //	card, _ := mockcard.New()
-//	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+//	cfg := yubikey.SCP11bConfig()
 //	cfg.InsecureSkipCardAuthentication = true
 //	sess, _ := scp11.Open(ctx, card.Transport(), cfg)
 //	defer sess.Close()

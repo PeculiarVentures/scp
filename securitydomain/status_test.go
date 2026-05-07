@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/PeculiarVentures/scp/mockcard"
-	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // --- ParsePrivileges -----------------------------------------------------
@@ -146,7 +146,7 @@ func TestRegistryEntry_LifecycleString(t *testing.T) {
 // semantics, not the SCP11 trust path.
 func openSCP11bAgainstMock(t *testing.T, mc *mockcard.Card) *Session {
 	t.Helper()
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	sess, err := OpenSCP11(context.Background(), mc.Transport(), cfg)
 	if err != nil {

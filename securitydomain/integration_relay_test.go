@@ -20,6 +20,7 @@ import (
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // TestSCP11a_SecurityDomain_OverRelay_EndToEnd is the full-topology
@@ -114,7 +115,7 @@ func TestSCP11a_SecurityDomain_OverRelay_EndToEnd(t *testing.T) {
 	rt := &integrationRelayTransport{reqCh: reqCh, respCh: respCh}
 
 	// --- Server-side: open SCP11a Security Domain across the relay ---
-	cfg := scp11.YubiKeyDefaultSCP11aConfig()
+	cfg := yubikey.SCP11aConfig()
 	cfg.OCEPrivateKey = oceKey
 	cfg.OCECertificates = chain
 	cfg.OCEKeyReference = scp11.KeyRef{KID: 0x10, KVN: 0x03}

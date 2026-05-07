@@ -6,8 +6,8 @@ import (
 
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp03"
-	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // TestSecurityDomain_SCP03_ReadAfterAuth is the end-to-end path the
@@ -72,7 +72,7 @@ func TestSecurityDomain_SCP11b_ReadAfterAuth(t *testing.T) {
 		t.Fatalf("mockcard.New: %v", err)
 	}
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
+	cfg := yubikey.SCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 
 	sess, err := securitydomain.OpenSCP11(ctx, card.Transport(), cfg)

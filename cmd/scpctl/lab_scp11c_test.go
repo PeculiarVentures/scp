@@ -63,6 +63,7 @@ import (
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport/pcsc"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // labConfig captures the environment-supplied test parameters in one
@@ -185,7 +186,7 @@ func TestSCP11c_LabMeasurement(t *testing.T) {
 
 	// --- Phase C: open SCP11c session ---
 
-	scp11cCfg := scp11.YubiKeyDefaultSCP11cConfig()
+	scp11cCfg := yubikey.SCP11cConfig()
 	scp11cCfg.KeyVersion = cfg.disposableKVN
 	scp11cCfg.OCECertificates = oceChain
 	scp11cCfg.OCEKeyReference = scp11.KeyRef{KID: cfg.oceKID, KVN: cfg.oceKVN}

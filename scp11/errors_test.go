@@ -37,7 +37,7 @@ func TestErrInvalidConfig_NilConfig(t *testing.T) {
 // TestErrInvalidConfig_NilTransport confirms a missing transport is
 // reported as ErrInvalidConfig.
 func TestErrInvalidConfig_NilTransport(t *testing.T) {
-	_, err := Open(context.Background(), nil, YubiKeyDefaultSCP11bConfig())
+	_, err := Open(context.Background(), nil, testYubiKeySCP11bConfig())
 	if err == nil {
 		t.Fatal("expected error for nil transport; got nil")
 	}
@@ -54,7 +54,7 @@ func TestErrInvalidConfig_NoTrustPosture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	// Deliberately leave CardTrustPolicy / CardTrustAnchors /
 	// InsecureSkipCardAuthentication unset.
 	_, err = Open(context.Background(), mc.Transport(), cfg)
@@ -77,7 +77,7 @@ func TestErrInvalidConfig_HostIDRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.InsecureSkipCardAuthentication = true
 	cfg.HostID = []byte{0x01, 0x02, 0x03}
 	_, err = Open(context.Background(), mc.Transport(), cfg)

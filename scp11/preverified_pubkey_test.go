@@ -40,7 +40,7 @@ func TestOpen_PreverifiedKey_SkipsBF21(t *testing.T) {
 		},
 	}
 
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.SelectAID = AIDPIV
 	cfg.PreverifiedCardStaticPublicKey = pubKey
 	cfg.InsecureSkipCardAuthentication = true
@@ -84,7 +84,7 @@ func TestOpen_NoPreverifiedKey_StillFetchesBF21(t *testing.T) {
 		},
 	}
 
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.SelectAID = AIDSecurityDomain
 	cfg.InsecureSkipCardAuthentication = true
 	// PreverifiedCardStaticPublicKey deliberately left nil.
@@ -113,7 +113,7 @@ func TestOpen_NoPreverifiedKey_StillFetchesBF21(t *testing.T) {
 func TestOpen_NoTrustPosture_FailsClosed(t *testing.T) {
 	pubKey := mustGenerateP256ECDHPub(t)
 
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.SelectAID = AIDPIV
 	cfg.PreverifiedCardStaticPublicKey = pubKey
 	// All three trust fields deliberately unset.
@@ -214,7 +214,7 @@ func mustGenerateP256ECDHPub(t *testing.T) *ecdh.PublicKey {
 func TestOpen_PreverifiedKey_RejectsCardTrustPolicy(t *testing.T) {
 	pubKey := mustGenerateP256ECDHPub(t)
 
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.SelectAID = AIDPIV
 	cfg.PreverifiedCardStaticPublicKey = pubKey
 	cfg.CardTrustPolicy = &trust.Policy{Roots: x509.NewCertPool()}
@@ -241,7 +241,7 @@ func TestOpen_PreverifiedKey_RejectsCardTrustPolicy(t *testing.T) {
 func TestOpen_PreverifiedKey_RejectsCardTrustAnchors(t *testing.T) {
 	pubKey := mustGenerateP256ECDHPub(t)
 
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.SelectAID = AIDPIV
 	cfg.PreverifiedCardStaticPublicKey = pubKey
 	cfg.CardTrustAnchors = x509.NewCertPool()
@@ -268,7 +268,7 @@ func TestOpen_PreverifiedKey_RejectsCardTrustAnchors(t *testing.T) {
 func TestOpen_PreverifiedKey_AcceptsInsecureSkipCardAuthentication(t *testing.T) {
 	pubKey := mustGenerateP256ECDHPub(t)
 
-	cfg := YubiKeyDefaultSCP11bConfig()
+	cfg := testYubiKeySCP11bConfig()
 	cfg.SelectAID = AIDPIV
 	cfg.PreverifiedCardStaticPublicKey = pubKey
 	cfg.InsecureSkipCardAuthentication = true

@@ -56,6 +56,7 @@ import (
 	"strings"
 
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // scp11Variant is the operator-facing variant selector, parsed from
@@ -286,7 +287,7 @@ func (kf *scp11KeyFlags) applyToConfig() (*scp11.Config, error) {
 	var cfg *scp11.Config
 	switch v {
 	case scp11VariantSCP11a:
-		cfg = scp11.YubiKeyDefaultSCP11aConfig()
+		cfg = yubikey.SCP11aConfig()
 		defaultSDKID = 0x11
 	case scp11VariantSCP11c:
 		cfg = scp11.StrictGPSCP11cConfig()

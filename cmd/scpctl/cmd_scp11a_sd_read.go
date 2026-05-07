@@ -7,6 +7,7 @@ import (
 	"github.com/PeculiarVentures/scp/scp11"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport/trace"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 type scp11aSDReadData struct {
@@ -134,12 +135,12 @@ func cmdSCP11aSDRead(ctx context.Context, env *runEnv, args []string) error {
 		t = rec
 	}
 
-	cfg := scp11.YubiKeyDefaultSCP11aConfig()
+	cfg := yubikey.SCP11aConfig()
 	cfg.OCEPrivateKey = oceKey
 	cfg.OCECertificates = oceChain
 	cfg.OCEKeyReference = scp11.KeyRef{KID: byte(*oceKID), KVN: byte(*oceKVN)}
 	// Override the card-side SCP11a key reference. The default from
-	// YubiKeyDefaultSCP11aConfig is KID=0x11 KVN=0x01, which matches
+	// yubikey.SCP11aConfig is KID=0x11 KVN=0x01, which matches
 	// Yubico factory provisioning when SCP11a has been installed; the
 	// flags exist so non-Yubico cards or cards with a custom KVN can
 	// still be exercised by this smoke test.

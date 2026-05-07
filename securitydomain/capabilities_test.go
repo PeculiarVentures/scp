@@ -7,6 +7,7 @@ import (
 	"github.com/PeculiarVentures/scp/apdu"
 	scp03 "github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/yubikey"
 )
 
 // Compile-time assertions: both production session types must
@@ -107,7 +108,7 @@ func TestOpenSCP03_NilTransport(t *testing.T) {
 }
 
 func TestOpenSCP11_NilTransport(t *testing.T) {
-	_, err := OpenSCP11(context.Background(), nil, scp11.YubiKeyDefaultSCP11bConfig())
+	_, err := OpenSCP11(context.Background(), nil, yubikey.SCP11bConfig())
 	if err == nil {
 		t.Fatal("OpenSCP11(nil transport) should return an error")
 	}
