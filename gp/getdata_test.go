@@ -191,23 +191,59 @@ func TestReadSSC_SafeNet(t *testing.T) {
 	}
 }
 
-// TestReadCardCapabilities_Present pins the raw-bytes path. The
-// fixture is a synthetic Card Capability Information blob shaped
-// per GP §H.4: tag 67, length 12, sub-tags 64 (SCP options) and
-// 65 (key info). Real cards in the test population (SafeNet
-// eToken Fusion, YubiKey 5.x) return SW=6A88 for this tag, so
-// the synthetic fixture is the only available regression target
-// today; when a card that does answer 0x67 lands in the test
-// matrix the synthetic fixture stays as the no-hardware coverage
-// and a real-card fixture pins byte-exact decoding.
+// TestReadCardCapabilities_Present pins the raw-bytes path against
+// real-card bytes captured 2026-05-08 from a SafeNet eToken Fusion
+// (the second physical card in the test population — the first
+// SafeNet returns SW=6A88 for tag 0x67, the second returns this
+// 64-byte BER-TLV blob). Both physical cards are Thales-built but
+// they differ in chip variant and OS release level (see the CPLC
+// fixtures in gp/cplc); only this card's firmware exposes Card
+// Capability Information, so this is the only real-card sample
+// available for the structure today.
+//
+// The blob structure (per visual inspection of the bytes; semantic
+// decoding requires GP Card Spec v2.3.1 §H.4 cross-reference and
+// hasn't shipped):
+//
+//	67 3E                                outer GET DATA wrapper
+//	  67 3C                              Card Capability Information template
+//	    A0 07 80 01 01 81 02 05 15       constructed entry (likely SCP01)
+//	    A0 09 80 01 02 81 04 05 15 45 55 constructed entry (likely SCP02)
+//	    A0 0A 80 01 03 81 02 00 10 82 01 07
+//	                                     constructed entry (likely SCP03; sub-tag
+//	                                     81's value 00 10 includes i=0x10 which
+//	                                     matches the SCP03 i-parameter the CRD
+//	                                     advertises)
+//	    81 03 FF FE 80                   primitive
+//	    82 03 1E 06 00                   primitive
+//	    83 04 01 02 03 04                primitive
+//	    85 02 3B 00                      primitive
+//	    86 02 3C 00                      primitive
+//	    87 02 3F 00                      primitive
+//
+// The structural-only check below validates length and the wrapper
+// pattern; structured decoding lands when GP §H.4 is cross-referenced
+// against this fixture (and ideally against a second card that also
+// answers tag 0x67 so semantics can be validated against more than
+// one firmware build).
 func TestReadCardCapabilities_Present(t *testing.T) {
-	// Synthetic value: 67 0C 64 04 06 02 04 80 65 04 06 02 04 81
-	//   67 0C        = Card Capability Information, 12 bytes
-	//     64 04      = SCP options, 4 bytes
-	//       06 02 04 80   = OID-shaped, 2 bytes (e.g. SCP02 marker)
-	//     65 04      = key info, 4 bytes
-	//       06 02 04 81   = OID-shaped, 2 bytes
-	value := mustHex(t, "670C640406020480650406020481")
+	// 64-byte response captured from the second SafeNet eToken
+	// Fusion 2026-05-08. Layout annotated above.
+	value := mustHex(t,
+		"673E673C"+
+			"A00780010181020515"+
+			"A009800102810405154555"+
+			"A00A80010381020010820107"+
+			"8103FFFE80"+
+			"82031E0600"+
+			"830401020304"+
+			"85023B00"+
+			"86023C00"+
+			"87023F00")
+	if len(value) != 64 {
+		t.Fatalf("test fixture: real SafeNet Card Capabilities is 64 bytes; got %d", len(value))
+	}
+
 	tt := &scriptedTx{responses: map[uint16]apdu.Response{
 		0x0067: {Data: value, SW1: 0x90, SW2: 0x00},
 	}}
@@ -217,6 +253,11 @@ func TestReadCardCapabilities_Present(t *testing.T) {
 	}
 	if string(got) != string(value) {
 		t.Errorf("ReadCardCapabilities = %X, want %X", got, value)
+	}
+	// Outer wrapper sanity check: response begins with 67 3E
+	// (tag 0x67, length 0x3E = 62 bytes of inner content).
+	if got[0] != 0x67 || got[1] != 0x3E {
+		t.Errorf("response should begin with 67 3E (Card Capability Information tag/length); got %02X %02X", got[0], got[1])
 	}
 }
 

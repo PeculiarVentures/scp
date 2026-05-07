@@ -48,6 +48,52 @@ const safeNetEtokenFusionCPLCHex = "9F7F2A" +
 	"00009004" +
 	"0000" + "0000" + "00000000"
 
+// safeNetEtokenFusion2CPLCHex is a second SafeNet eToken Fusion CPLC
+// blob captured 2026-05-08 from a different physical card than the
+// first fixture above. The two cards have the same OS family (1291,
+// Thales-built) but differ in chip variant (ICType 7897 vs 7861), OS
+// release date (2017-03-31 vs 2017-11-30), OS release level (0400 vs
+// 0100), production dates (2022-01-04 vs 2023-08-11), ICC manufacturer
+// (6153 vs 3293), and pre-personalizer (6155 vs 3294). Pinning both
+// confirms the parser handles the encoding surface a single Thales
+// build produces consistently across vendor-code variation, two
+// different decade-resolved years (Y=2 -> 2022, Y=3 -> 2023), and
+// two different valid BCD day-of-year values.
+//
+// Decoded fields per gppro's interpretation of the same bytes:
+//
+//	ICFabricator             = 4090
+//	ICType                   = 7897
+//	OperatingSystemID        = 1291
+//	OperatingSystemReleaseDate = 7090  (Y=7 DDD=090 -> 2017-03-31)
+//	OperatingSystemReleaseLevel = 0400
+//	ICFabricationDate        = 2004   (Y=2 DDD=004 -> 2022-01-04)
+//	ICSerialNumber           = 32196A53
+//	ICBatchIdentifier        = A152
+//	ICModuleFabricator       = 1292
+//	ICModulePackagingDate    = 2004   (2022-01-04)
+//	ICCManufacturer          = 6153
+//	ICEmbeddingDate          = 2004   (2022-01-04)
+//	ICPrePersonalizer        = 6155
+//	ICPrePersonalizationEquipmentDate = 2004 (2022-01-04)
+//	ICPrePersonalizationEquipmentID   = 00000002
+//	ICPersonalizer           = 0000  (uninitialized)
+//	ICPersonalizationDate    = 0000  (uninitialized)
+//	ICPersonalizationEquipmentID = 00000000 (uninitialized)
+const safeNetEtokenFusion2CPLCHex = "9F7F2A" +
+	"4090" +
+	"7897" +
+	"1291" +
+	"7090" + "0400" +
+	"2004" +
+	"32196A53" +
+	"A152" +
+	"1292" + "2004" +
+	"6153" + "2004" +
+	"6155" + "2004" +
+	"00000002" +
+	"0000" + "0000" + "00000000"
+
 // yubiKey5CPLC is the CPLC blob captured from a YubiKey 5C NFC
 // firmware 5.7.4 on 2026-05-07. The post-fabrication date fields
 // hold per-card serial-derived bytes that don't decode as valid
@@ -212,6 +258,75 @@ func TestParse_YubiKey_TolerantOfMalformedDates(t *testing.T) {
 		if c.got.Raw == ([2]byte{}) {
 			t.Errorf("%s.Raw should be populated even when invalid", c.name)
 		}
+	}
+}
+
+// TestParse_SafeNet_SecondCard exercises the parser against a second
+// physical SafeNet eToken Fusion's CPLC. The two cards differ in
+// chip variant, OS release level, ICC manufacturer, pre-personalizer,
+// and every production date, so the test covers a different point in
+// the input space than TestParse_SafeNet without changing any parser
+// invariant. Both Y=2 (resolves to 2022) and Y=7 (resolves to 2017)
+// are exercised against a 2026 clock, and DDD=004 (January 4) and
+// DDD=090 (March 31) both decode without error.
+func TestParse_SafeNet_SecondCard(t *testing.T) {
+	clock := time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC)
+	d, err := cplc.Parse(mustHex(t, safeNetEtokenFusion2CPLCHex), fixedClock(clock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// Spot-check the vendor codes that differ from the first fixture.
+	if d.ICType != [2]byte{0x78, 0x97} {
+		t.Errorf("ICType = %X, want 7897 (this card's chip variant)", d.ICType)
+	}
+	if d.ICCManufacturer != [2]byte{0x61, 0x53} {
+		t.Errorf("ICCManufacturer = %X, want 6153", d.ICCManufacturer)
+	}
+	if d.ICPrePersonalizer != [2]byte{0x61, 0x55} {
+		t.Errorf("ICPrePersonalizer = %X, want 6155", d.ICPrePersonalizer)
+	}
+	if d.OperatingSystemReleaseLevel != [2]byte{0x04, 0x00} {
+		t.Errorf("OperatingSystemReleaseLevel = %X, want 0400", d.OperatingSystemReleaseLevel)
+	}
+	if d.ICSerialNumber != [4]byte{0x32, 0x19, 0x6A, 0x53} {
+		t.Errorf("ICSerialNumber = %X, want 32196A53", d.ICSerialNumber)
+	}
+
+	// Date resolution.
+	wantOSReleaseDate := time.Date(2017, 3, 31, 0, 0, 0, 0, time.UTC)
+	if !d.OperatingSystemReleaseDate.Valid {
+		t.Fatal("OperatingSystemReleaseDate should be valid")
+	}
+	if got := d.OperatingSystemReleaseDate.Time(); !got.Equal(wantOSReleaseDate) {
+		t.Errorf("OS release date = %s, want %s", got, wantOSReleaseDate)
+	}
+
+	wantFabDate := time.Date(2022, 1, 4, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		got  cplc.DateField
+	}{
+		{"ICFabricationDate", d.ICFabricationDate},
+		{"ICModulePackagingDate", d.ICModulePackagingDate},
+		{"ICEmbeddingDate", d.ICEmbeddingDate},
+		{"ICPrePersonalizationEquipmentDate", d.ICPrePersonalizationEquipmentDate},
+	} {
+		if !c.got.Valid {
+			t.Errorf("%s should be valid (raw=%X)", c.name, c.got.Raw)
+			continue
+		}
+		if got := c.got.Time(); !got.Equal(wantFabDate) {
+			t.Errorf("%s = %s, want %s", c.name, got, wantFabDate)
+		}
+	}
+
+	// Personalization fields are uninitialized on this card too.
+	if d.ICPersonalizationDate.Valid {
+		t.Errorf("ICPersonalizationDate should be invalid (uninitialized)")
+	}
+	if d.ICPersonalizationEquipmentID != [4]byte{0, 0, 0, 0} {
+		t.Errorf("ICPersonalizationEquipmentID = %X, want 00000000", d.ICPersonalizationEquipmentID)
 	}
 }
 
