@@ -273,6 +273,8 @@ Four command groups, non-overlapping purposes:
 
 `scpctl sd` is the **operator surface for Security Domain operations**. `info` reads CRD and key-info template over an unauthenticated session. `reset` factory-resets SD key material. `lock` and `unlock` toggle the ISD between SECURED and CARD_LOCKED via GP SET STATUS; both are reversible and gated by `--confirm-write`. `terminate` transitions the ISD to TERMINATED — IRREVERSIBLE — gated by a distinct `--confirm-terminate-card` flag so a careless invocation of `--confirm-write` on the wrong command can never brick a card. `bootstrap-oce`, `bootstrap-scp11a`, and `bootstrap-scp11a-sd` are the day-1 provisioning flows that install OCE material and the SCP11a SD ECDH key on fresh cards; all are state-changing and gated by `--confirm-write`.
 
+Every generic SD command (`info`, `reset`, `lock`/`unlock`/`terminate`, `keys list|export|delete|generate|import`, `allowlist set|clear`) accepts `--sd-aid` to target a non-default Security Domain AID. Empty (the default) targets the GP-standard ISD `A0000001510000`; non-empty SELECTs the named AID instead — useful for vendor cards whose ISD lives at a different AID, or for Supplementary Security Domains addressed by AID. Hex input is permissive: bare hex, colon-separated, space-separated, or dash-separated (`A0:00:00:01:51:00:00:00`, `A0 00 00 01 51 00 00 00`, `a0000001510000` all parse identically). Length must be 5-16 bytes per ISO 7816-5; out-of-range input surfaces as a usage error before any transport activity. The bootstrap commands (`bootstrap-oce`, `bootstrap-scp11a`, `bootstrap-scp11a-sd`) deliberately do not accept `--sd-aid` — they target the standard ISD by definition.
+
 `scpctl oce` is **off-card OCE certificate diagnostics**. `verify` validates a chain off-card; `gen` produces a fresh known-good chain. Host-only — does not touch a card.
 
 ## `piv info` and `sd info`
@@ -294,11 +296,15 @@ Output names the active profile (`yubikey-5.7.2`, `standard-piv`, or `probed:<in
 
 Opens an unauthenticated Security Domain session and reports the card's identity: parsed Card Recognition Data (issuer identification number, card image number, application provider, application version) plus the Key Information Template if available. No authentication, no state change.
 
-`--full` extends the report with a GP §11.4.2 GET STATUS walk across three scopes: ISD, Applications + SSDs, and Load Files + Modules. Each entry reports its AID, lifecycle (parsed for the scope's state machine), privilege bits set, and — for Load Files — version and module AIDs. Cards typically permit GET STATUS on the ISD without authentication but require auth for the other scopes; auth-required scopes appear as SKIP rather than FAIL, so an operator can see exactly which scopes need an authenticated session for a complete view. JSON output structures the registry under `data.registry.{isd, applications, load_files}` for programmatic consumers.
+`--full` extends the report with a GP §11.4.2 GET STATUS walk across three scopes: ISD, Applications + SSDs, and Load Files + Modules. Each entry reports its AID, lifecycle (parsed for the scope's state machine), privilege bits set, and — for Load Files — version and module AIDs. Cards typically permit GET STATUS on the ISD without authentication but require auth for the other scopes; auth-required scopes appear as SKIP rather than FAIL, so an operator can see exactly which scopes need an authenticated session for a complete view. Pass `--scp03-keys-default` (or the explicit `--scp03-{kvn,enc,mac,dek}` triple for a card with rotated keys) alongside `--full` to authenticate the registry walk and replace the SKIPs with populated entries. JSON output structures the registry under `data.registry.{isd, applications, load_files}` and reports the auth posture in `data.auth_mode` (`"none"` or `"scp03"`) for programmatic consumers.
+
+`--sd-aid` targets a non-default Security Domain AID (see the `scpctl sd` group description above for the input shapes accepted). Required when the card uses a vendor-specific ISD AID; without it, SELECT against the GP-standard AID returns `6A82` (file not found) and the command fails on the first APDU.
 
 ```bash
 scpctl sd info --reader "YubiKey" --full
 scpctl sd info --reader "YubiKey" --full --json
+scpctl sd info --reader "YubiKey" --full --scp03-keys-default --json
+scpctl sd info --reader "VendorCard" --sd-aid A0:00:00:06:47:2F:00:01 --full
 ```
 
 ## Design notes worth knowing
