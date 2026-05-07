@@ -9,6 +9,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/gp"
+	"github.com/PeculiarVentures/scp/gp/cardcaps"
 	"github.com/PeculiarVentures/scp/gp/cplc"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/securitydomain/profile"
@@ -126,12 +127,48 @@ type probeData struct {
 	// CardCapabilities is the raw hex of GET DATA tag 0x0067 (Card
 	// Capability Information per GP Card Spec v2.3.1 §H.4) when the
 	// card carries it. Most cards in the test population return
-	// SW=6A88 here; this field stays empty for those. No structured
-	// parsing yet — the value is the operator-visible counterpart of
-	// what gppro shows for this tag, useful for cards we eventually
-	// validate against. Parsing lands when there's a real-card
-	// fixture to pin against.
+	// SW=6A88 here; this field stays empty for those. The raw hex
+	// is preserved alongside the structured CardCapabilitiesParsed
+	// field so an operator can still see the bytes when the parser
+	// returns nothing (e.g. on a malformed response from non-
+	// conformant firmware).
 	CardCapabilities string `json:"card_capabilities,omitempty"`
+
+	// CardCapabilitiesParsed is the structured projection of Card
+	// Capability Information when the bytes parse cleanly. SCP
+	// versions and supported i-parameter values decode to named
+	// entries; LFDB hash algorithms decode to spec names (SHA-1,
+	// SHA-256, SHA-384, SHA-512); privilege bitmaps and cipher
+	// suite bitmaps surface as raw hex pending GP §H.4 cross-
+	// reference for bit-to-name mapping. Operators reading the
+	// JSON see the same SCP-version and hash output gppro produces
+	// for the same bytes.
+	CardCapabilitiesParsed *cardCapsView `json:"card_capabilities_parsed,omitempty"`
+}
+
+// cardCapsView is the JSON projection of cardcaps.Data. SCP entries
+// render as e.g. "SCP03 i=00 i=10 (AES-128, AES-192, AES-256)";
+// hash algorithms render as their named values; the privilege and
+// cipher bitmaps render as uppercase hex. Mirrors the rendering
+// shape gppro uses where possible.
+type cardCapsView struct {
+	SCPEntries     []scpEntryView `json:"scp_entries,omitempty"`
+	DOMPrivileges  string         `json:"dom_privileges,omitempty"`
+	APPPrivileges  string         `json:"app_privileges,omitempty"`
+	HashAlgorithms []string       `json:"hash_algorithms,omitempty"`
+	TokenCiphers   string         `json:"token_verification_ciphers,omitempty"`
+	ReceiptCiphers string         `json:"receipt_generation_ciphers,omitempty"`
+	DAPCiphers     string         `json:"dap_verification_ciphers,omitempty"`
+}
+
+// scpEntryView is one SCP entry in the JSON projection. Version
+// renders as "SCP01" / "SCP02" / "SCP03" (matching gppro). IValues
+// is a list of uppercase-hex bytes. KeySizes lists the AES sizes
+// the entry advertises (typically only populated for SCP03 entries).
+type scpEntryView struct {
+	Version  string   `json:"version"`
+	IValues  []string `json:"i_values"`
+	KeySizes []string `json:"key_sizes,omitempty"`
 }
 
 // cplcView is the JSON projection of cplc.Data. Vendor codes render
@@ -672,7 +709,6 @@ func probeOptionalGetData(ctx context.Context, sd *securitydomain.Session, data 
 		{"CIN", "0x0045", gp.ReadCIN, func(d *probeData, s string) { d.CIN = s }},
 		{"KDD", "0x00CF", gp.ReadKDD, func(d *probeData, s string) { d.KDD = s }},
 		{"SSC", "0x00C1", gp.ReadSSC, func(d *probeData, s string) { d.SSC = s }},
-		{"Card Capabilities", "0x0067", gp.ReadCardCapabilities, func(d *probeData, s string) { d.CardCapabilities = s }},
 	} {
 		raw, err := c.read(ctx, sd)
 		label := fmt.Sprintf("GET DATA tag %s (%s)", c.tag, c.name)
@@ -686,6 +722,88 @@ func probeOptionalGetData(ctx context.Context, sd *securitydomain.Session, data 
 			report.Pass(label, fmt.Sprintf("%d bytes", len(raw)))
 		}
 	}
+
+	// Card Capabilities (tag 0x67) gets its own path because the
+	// structured decode produces a richer report line than the
+	// "N bytes" format the loop above uses. Raw hex stays
+	// alongside in CardCapabilities so the bytes are visible
+	// even when the parser can't decode them (malformed firmware).
+	probeCardCapabilities(ctx, sd, data, report)
+}
+
+// probeCardCapabilities reads tag 0x67 and surfaces both the raw
+// hex and the structured cardcaps decode in the report. Parse
+// failures don't drop the raw bytes — those still appear in the
+// JSON via CardCapabilities so an operator can inspect what the
+// card emitted even when the parser rejected it.
+func probeCardCapabilities(ctx context.Context, sd *securitydomain.Session, data *probeData, report *Report) {
+	raw, err := gp.ReadCardCapabilities(ctx, sd)
+	const label = "GET DATA tag 0x0067 (Card Capabilities)"
+	switch {
+	case err != nil:
+		report.Skip(label, err.Error())
+		return
+	case raw == nil:
+		report.Skip(label, "not present (SW=6A88)")
+		return
+	}
+	data.CardCapabilities = hexEncode(raw)
+
+	cc, parseErr := cardcaps.Parse(raw)
+	if parseErr != nil {
+		report.Pass(label, fmt.Sprintf("%d bytes (parse error: %v)", len(raw), parseErr))
+		return
+	}
+	data.CardCapabilitiesParsed = cardCapsViewFrom(cc)
+	report.Pass(label, fmt.Sprintf("%d bytes, %d SCP entries, %d hash algorithms",
+		len(raw), len(cc.SCPEntries), len(cc.HashAlgorithms)))
+}
+
+// cardCapsViewFrom projects a *cardcaps.Data into the JSON-friendly
+// cardCapsView. SCP entries get rendered with named version strings
+// (SCP01/02/03) and AES-size labels for the key-size bitmap; hash
+// algorithms render as their named values; bitmap-shape fields
+// stay raw hex pending GP §H.4 cross-reference.
+func cardCapsViewFrom(d *cardcaps.Data) *cardCapsView {
+	v := &cardCapsView{}
+	for _, e := range d.SCPEntries {
+		entry := scpEntryView{
+			Version: fmt.Sprintf("SCP%02d", e.Version),
+			IValues: make([]string, len(e.IValues)),
+		}
+		for i, b := range e.IValues {
+			entry.IValues[i] = fmt.Sprintf("%02X", b)
+		}
+		if e.HasAES128() {
+			entry.KeySizes = append(entry.KeySizes, "AES-128")
+		}
+		if e.HasAES192() {
+			entry.KeySizes = append(entry.KeySizes, "AES-192")
+		}
+		if e.HasAES256() {
+			entry.KeySizes = append(entry.KeySizes, "AES-256")
+		}
+		v.SCPEntries = append(v.SCPEntries, entry)
+	}
+	if len(d.DOMPrivileges) > 0 {
+		v.DOMPrivileges = hexEncode(d.DOMPrivileges)
+	}
+	if len(d.APPPrivileges) > 0 {
+		v.APPPrivileges = hexEncode(d.APPPrivileges)
+	}
+	for _, h := range d.HashAlgorithms {
+		v.HashAlgorithms = append(v.HashAlgorithms, h.String())
+	}
+	if len(d.TokenVerificationCiphers) > 0 {
+		v.TokenCiphers = hexEncode(d.TokenVerificationCiphers)
+	}
+	if len(d.ReceiptGenerationCiphers) > 0 {
+		v.ReceiptCiphers = hexEncode(d.ReceiptGenerationCiphers)
+	}
+	if len(d.DAPVerificationCiphers) > 0 {
+		v.DAPCiphers = hexEncode(d.DAPVerificationCiphers)
+	}
+	return v
 }
 
 // cplcViewFrom projects a *cplc.Data into the JSON-friendly cplcView.

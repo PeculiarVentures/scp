@@ -192,6 +192,17 @@ type Card struct {
 	// single-SCP03-entry behavior used by existing tests.
 	KeyInformationTemplate []byte
 
+	// CardCapabilitiesData, when non-nil, replaces the default 6A88
+	// ("not present") response from GET DATA tag 0x0067 (Card
+	// Capability Information per GP §H.4) with the supplied bytes.
+	// Default (nil) matches YubiKey 5.x behavior, which the mock
+	// otherwise mirrors. Tests that exercise the gp/cardcaps parser
+	// or scpctl probe's structured-decode path through end-to-end
+	// transport set this to a real-card capture (SafeNet Token JC
+	// is the only known sample today; see gp/cardcaps for byte
+	// fixtures).
+	CardCapabilitiesData []byte
+
 	// RequireAuthForReads, when true, makes the mock return
 	// SW=6982 (Security status not satisfied) for unauthenticated
 	// GET DATA calls on the inventory and certificate-store tags
@@ -845,6 +856,20 @@ func (c *Card) doGetData(cmd *apdu.Command, underSM bool) (*apdu.Response, error
 		// CPLC so tests drive either through gp/cplc.Parse and
 		// see identical shape.
 		return &apdu.Response{Data: append([]byte(nil), syntheticCPLC...), SW1: 0x90, SW2: 0x00}, nil
+	case 0x0067:
+		// Card Capabilities. Default behavior is 6A88 ("not
+		// present") to match YubiKey 5.x firmware, which doesn't
+		// expose this tag. Tests that need the structured-decode
+		// path through end-to-end transport set CardCapabilitiesData
+		// to a real-card capture; the SafeNet Token JC fixture in
+		// gp/cardcaps is the canonical sample.
+		if len(c.CardCapabilitiesData) > 0 {
+			return &apdu.Response{
+				Data: append([]byte(nil), c.CardCapabilitiesData...),
+				SW1:  0x90, SW2: 0x00,
+			}, nil
+		}
+		return mkSW(0x6A88), nil
 	case 0x0066:
 		// Card Recognition Data — same synthetic blob the SCP03 mock
 		// returns. Both mocks return identical CRD so a test that
