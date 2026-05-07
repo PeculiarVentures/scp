@@ -64,6 +64,7 @@ A capability in this category is implemented against the GP/ISO specs and exerci
 | BER-TLV parsing and construction | The `tlv` package handles GP-relevant BER-TLV constructs used in INITIALIZE UPDATE responses, EXTERNAL AUTHENTICATE payloads, OCE certificate stores (BF21), and Security Domain command/response data. |
 | Transport-independent APDU construction | The `transport.Transport` interface is the integration boundary. Any byte-pipe that can carry ISO 7816-4 APDUs in either parsed (`*apdu.Command` / `*apdu.Response`) or raw (`[]byte`) form satisfies the interface. PC/SC, in-memory mock cards, and gRPC-style remote APDU relays (see [`docs/remote-apdu-transport.md`](docs/remote-apdu-transport.md)) all plug in here. |
 | ISO 7816-4 CLA encoding | The `channel` package centralizes CLA decoding for first-interindustry, further-interindustry, and proprietary classes. Secure-messaging bit position differs by class (0x04 vs 0x20); `Wrap` uses `channel.SecureMessagingCLA` so the same secure-messaging stack drives basic-channel and logical-channel commands without silently miscoding. See [CLA encoding and logical channels](#cla-encoding-and-logical-channels). |
+| GlobalPlatform card-content management | `securitydomain.Session.Install` and `Session.Delete` issue INSTALL [for load] + LOAD chunks + INSTALL [for install] and DELETE per GP §11.5 / §11.2. `PartialInstallError` reports stage, bytes loaded, and last sequence number on mid-flow failure so an operator knows whether to clean up the load file, the install, or both. The `gp` package provides the on-wire builders (`BuildInstallForLoadPayload`, `BuildInstallForInstallPayload`) and a CAP file parser that decodes Header, Applet, and Import components and infers the required Java Card runtime from the imported `javacard.framework` version. ISD discovery walks a curated candidate list (`gp.ISDDiscoveryAIDs`); the LoadFilesAndModules → LoadFiles fallback handles cards that reject the modules-included scope. Implemented against the GP Card Spec v2.3.1 and JC VM Spec; verified end-to-end against `mockcard.SCP03Card`; real-card validation against JCOP is the next step (see [expansion targets](#expansion-targets)). |
 
 ### Expansion targets
 
@@ -153,12 +154,13 @@ sess.Close()
 | `apdu` | ISO 7816-4 command / response APDU types |
 | `cardrecognition` | Parser for GlobalPlatform Card Recognition Data (`GET DATA` tag `0x66`); decodes claimed GP version, SCP version + parameter, and identification OIDs |
 | `aid` | Curated AID prefix database for SELECT-command annotation (GP, PIV, FIDO, OpenPGP, EMV, eID, health) |
+| `gp` | GlobalPlatform card-content management primitives: AID type, CAP file parser (Header, Applet, Import components with Java Card runtime version inference), INSTALL [for load] / [for install] wire builders, ISD discovery candidate list, LoadImage policy. No card-side dependencies; sits below `securitydomain`. |
 | `transport` | Transport interface, GET RESPONSE chaining, response collection caps |
 | `transport/pcsc` | PC/SC transport for USB CCID and NFC readers (CGO; separate `go.mod`) |
 | `transport/grpc` | CardRelay gRPC transport — server wraps a real card, client implements `transport.Transport`. Separate `go.mod` so gRPC is opt-in. |
 | `transport/trace` | Record/replay decorator for `transport.Transport`; SELECT exchanges auto-annotated with AID name; CRD captured into trace metadata |
 | `piv` | YubiKey-flavored PIV command builders (APDU only — no PIV session layer; see package doc) |
-| `mockcard` | In-memory SCP11 Security Domain for testing |
+| `mockcard` | In-memory card mocks for testing. `Card` is a YubiKey-shaped SCP11 + PIV + GP mock; `SCP03Card` is a focused SCP03 + GP mock for applet-management tests; `GPState` is the shared registry + INSTALL/LOAD/DELETE handler embedded by both. |
 
 A separate hardware-validation binary lives in [`cmd/scpctl`](./cmd/scpctl). It exercises SCP03, SCP11b, and SCP11b-over-PIV against a real PC/SC card and prints PASS/FAIL/SKIP results. See its README for details.
 
@@ -475,6 +477,9 @@ For end-to-end verification against an actual card, the [`cmd/scpctl`](./cmd/scp
 | `sd` | `reset` | Factory-reset SD key material. Destructive; `--confirm-reset-sd` gate (distinct from `--confirm-write` so SD reset and PIV reset can't be conflated). |
 | `sd` | `lock` / `unlock` | Toggle the ISD between SECURED and CARD_LOCKED via GP SET STATUS. Recoverable; `--confirm-write` gate. |
 | `sd` | `terminate` | IRREVERSIBLE: transition the ISD to TERMINATED. The card cannot be recovered by any operation after this. Gated by a distinct `--confirm-terminate-card` flag (NOT `--confirm-write`) so a careless invocation can't brick a card. |
+| `gp` | `probe` | Open an unauthenticated SD session and report Card Recognition Data, GP version, and supported SCPs. Same flow as the legacy top-level `probe` under a `gp probe` report label. Read-only. |
+| `gp` | `registry` | Open an authenticated SCP03 session and walk the GP registry (ISD, Applications, LoadFiles+Modules) via GET STATUS. JSON registry shape matches `sd info --full --json` so scripts can switch between the two unchanged. |
+| `gp` | `cap inspect` | Read a CAP file from disk and print its package AID, package version, applet inventory, and component manifest. Host-only; does not touch a card. |
 | `piv` | `provision` | Generate a PIV slot keypair, optionally install a cert and fetch attestation, all over an SCP11b session. Includes management-key mutual auth and cert-to-pubkey binding check. Destructive; `--confirm-write` gate. |
 | `piv` | `reset` | Block PIN and PUK, then send the YubiKey PIV reset APDU. Erases ALL 24 PIV slots, certs, and resets PIN/PUK/management key to factory defaults. Destructive; gated by `--confirm-write` AND `--confirm-reset-piv`. |
 | `piv` | `info` / `pin` / `puk` / `mgmt` / `key` / `cert` / `object` | Full PIV operator surface — see [`cmd/scpctl/README.md`](./cmd/scpctl/README.md). |

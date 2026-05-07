@@ -2,14 +2,26 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/PeculiarVentures/scp/cardrecognition"
+	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/securitydomain"
 	"github.com/PeculiarVentures/scp/transport"
 )
+
+// candidateAIDStr formats a gp.ISDCandidate's AID for human-
+// readable report lines: an empty (default-SELECT) AID becomes
+// "(default)", non-empty AIDs become uppercase hex.
+func candidateAIDStr(c gp.ISDCandidate) string {
+	if len(c.AID) == 0 {
+		return "(default)"
+	}
+	return strings.ToUpper(hex.EncodeToString(c.AID))
+}
 
 // probeData is the JSON-friendly payload of the probe report. Strings
 // for OIDs (decimal-dotted) so JSON output is human-readable without
@@ -75,10 +87,21 @@ type probeData struct {
 }
 
 // registryDump is the JSON shape of a --full GP registry walk.
+// LoadFilesRequestedScope and LoadFilesActualScope let consumers
+// detect when the LoadFilesAndModules->LoadFiles fallback fired:
+// 'requested' is always 'load_files_and_modules' (the preferred
+// path that includes module enumeration); 'actual' is whichever
+// scope the card actually returned. When they differ, the
+// returned LoadFiles entries lack module names, so JSON
+// consumers can branch on the mismatch to avoid asserting
+// module presence on cards that don't expose it.
 type registryDump struct {
 	ISD          []registryEntryView `json:"isd,omitempty"`
 	Applications []registryEntryView `json:"applications,omitempty"`
 	LoadFiles    []registryEntryView `json:"load_files,omitempty"`
+
+	LoadFilesRequestedScope string `json:"load_files_requested_scope,omitempty"`
+	LoadFilesActualScope    string `json:"load_files_actual_scope,omitempty"`
 }
 
 // registryEntryView is the JSON projection of a securitydomain.RegistryEntry.
@@ -159,10 +182,12 @@ type probeOptions struct {
 func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions) error {
 	fs := newSubcommandFlagSet(opts.flagSetName, env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
+	sdAIDFlag := registerSDAIDFlag(fs)
+	discoverSD := fs.Bool("discover-sd", false,
+		"Walk a curated list of candidate Security Domain AIDs (gp.ISDDiscoveryAIDs) and use the first one that responds 9000. Mutually exclusive with --sd-aid. Probes return SW=6A82 on absent AIDs; any other non-9000 SW aborts discovery. The chosen AID appears in the report so subsequent runs can pin it via --sd-aid.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	var fullMode *bool
 	var scp03Flags *scp03KeyFlags
-	var sdAIDFlag *sdAIDFlag
 	if opts.allowFullStatus {
 		fullMode = fs.Bool("full", false,
 			"Walk the GP registry via GET STATUS (GP §11.4.2): "+
@@ -183,10 +208,6 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		// The unauthenticated default is correct for a probe, but
 		// the SKIP shouldn't be the only way to see the registry.'
 		scp03Flags = registerSCP03KeyFlags(fs, scp03Optional)
-		// --sd-aid targets a non-default Security Domain AID. Empty
-		// (the default) targets the GP-standard ISD; non-empty
-		// SELECTs the named AID instead. Per Finding 2.
-		sdAIDFlag = registerSDAIDFlag(fs)
 	}
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -211,6 +232,9 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	if err != nil {
 		return err
 	}
+	if *discoverSD && sdAID != nil {
+		return &usageError{msg: "--discover-sd and --sd-aid are mutually exclusive (pick one)"}
+	}
 
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
@@ -220,10 +244,43 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 
 	report := &Report{Subcommand: opts.reportLabel, Reader: *reader}
 
-	sd, authMode, err := openProbeSession(ctx, t, scp03Flags, fullMode, sdAID, report)
-	if err != nil {
-		_ = report.Emit(env.out, *jsonMode)
-		return err
+	var sd *securitydomain.Session
+	var authMode string
+	if *discoverSD {
+		// Walk the curated AID list. Trace each SELECT attempt
+		// into the report so an operator hitting a discovery
+		// failure can see which AIDs were tried and what SW
+		// each returned, rather than one aggregate error.
+		var match gp.ISDCandidate
+		trace := func(a securitydomain.DiscoveryAttempt) {
+			label := candidateAIDStr(a.Candidate)
+			detail := fmt.Sprintf("%s — %s", label, a.Candidate.Source)
+			if a.Selected {
+				report.Pass("discover ISD attempt", detail+" — SW=9000")
+				return
+			}
+			swText := "transport-error"
+			if a.SW != 0 {
+				swText = fmt.Sprintf("SW=%04X", a.SW)
+			}
+			report.Skip("discover ISD attempt",
+				fmt.Sprintf("%s — %s", detail, swText))
+		}
+		sd, match, err = securitydomain.DiscoverISD(ctx, t, gp.ISDDiscoveryAIDs, trace)
+		if err != nil {
+			report.Fail("discover ISD", err.Error())
+			_ = report.Emit(env.out, *jsonMode)
+			return fmt.Errorf("discover ISD: %w", err)
+		}
+		report.Pass("discover ISD",
+			fmt.Sprintf("matched %s — %s", candidateAIDStr(match), match.Source))
+		authMode = "none"
+	} else {
+		sd, authMode, err = openProbeSession(ctx, t, scp03Flags, fullMode, sdAID, report)
+		if err != nil {
+			_ = report.Emit(env.out, *jsonMode)
+			return err
+		}
 	}
 	defer sd.Close()
 
@@ -363,7 +420,12 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		dump := &registryDump{}
 		dump.ISD = walkRegistry(ctx, sd, securitydomain.StatusScopeISD, "ISD", report)
 		dump.Applications = walkRegistry(ctx, sd, securitydomain.StatusScopeApplications, "Applications", report)
-		dump.LoadFiles = walkRegistry(ctx, sd, securitydomain.StatusScopeLoadFilesAndModules, "LoadFiles", report)
+		dump.LoadFiles, dump.LoadFilesRequestedScope, dump.LoadFilesActualScope = walkLoadFiles(ctx, sd, report)
+		if dump.LoadFilesRequestedScope != dump.LoadFilesActualScope {
+			report.Pass("load files scope fallback",
+				fmt.Sprintf("requested %s, card returned %s",
+					dump.LoadFilesRequestedScope, dump.LoadFilesActualScope))
+		}
 		// Only attach Registry to Data if at least one scope produced
 		// or attempted output; otherwise the JSON has a meaningless
 		// empty registry object alongside the unrelated CRD fields.
@@ -514,8 +576,71 @@ func formatSCP(s cardrecognition.SCPInfo) string {
 // non-nil slice when the card returned no entries (SW=6A88), or a
 // populated slice when entries were returned.
 func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securitydomain.StatusScope, label string, report *Report) []registryEntryView {
+	return walkRegistryFetched(label, report, func() ([]securitydomain.RegistryEntry, string, error) {
+		entries, err := sd.GetStatus(ctx, scope)
+		return entries, "", err
+	})
+}
+
+// walkLoadFiles walks the Executable Load Files scope with the
+// LoadFilesAndModules -> LoadFiles fallback (see
+// securitydomain.GetStatusLoadFiles). The report check name is
+// always "GET STATUS scope=LoadFiles"; the detail string mentions
+// "modules omitted" when the card forced the fallback so the
+// operator can tell module names are absent from this card's
+// response rather than just absent from the data.
+//
+// Returns (entries, requested-scope, actual-scope). The two scope
+// strings let JSON consumers detect when the fallback fired:
+// requested is always "load_files_and_modules"; actual is whichever
+// scope the card returned. They differ on cards that reject
+// LoadFilesAndModules with SW=6A86 / 6D00.
+func walkLoadFiles(ctx context.Context, sd *securitydomain.Session, report *Report) ([]registryEntryView, string, string) {
+	requested := scopeName(securitydomain.StatusScopeLoadFilesAndModules)
+	actual := requested // overwritten by the fetcher below
+	views := walkRegistryFetched("LoadFiles", report, func() ([]securitydomain.RegistryEntry, string, error) {
+		res, err := sd.GetStatusLoadFiles(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		actual = scopeName(res.Scope)
+		var note string
+		if res.Scope == securitydomain.StatusScopeLoadFiles {
+			note = "modules omitted (card rejected LoadFilesAndModules; fell back to LoadFiles-only)"
+		}
+		return res.Entries, note, nil
+	})
+	return views, requested, actual
+}
+
+// scopeName returns the snake-case JSON-friendly name of a
+// StatusScope, used to populate registryDump's
+// LoadFilesRequestedScope / LoadFilesActualScope fields. The
+// names mirror the GP §11.4.2 scope identifiers so an operator
+// reading the JSON sees the same vocabulary as the spec.
+func scopeName(s securitydomain.StatusScope) string {
+	switch s {
+	case securitydomain.StatusScopeISD:
+		return "isd"
+	case securitydomain.StatusScopeApplications:
+		return "applications"
+	case securitydomain.StatusScopeLoadFiles:
+		return "load_files"
+	case securitydomain.StatusScopeLoadFilesAndModules:
+		return "load_files_and_modules"
+	default:
+		return fmt.Sprintf("unknown_0x%02X", byte(s))
+	}
+}
+
+// walkRegistryFetched is the shared shape for walkRegistry and
+// walkLoadFiles: invoke the supplied fetcher, classify the
+// result (skip/empty/populated), and translate to registry
+// entry views. The fetch closure returns (entries, fallbackNote,
+// err); the note is appended to the PASS detail when non-empty.
+func walkRegistryFetched(label string, report *Report, fetch func() ([]securitydomain.RegistryEntry, string, error)) []registryEntryView {
 	checkName := fmt.Sprintf("GET STATUS scope=%s", label)
-	entries, err := sd.GetStatus(ctx, scope)
+	entries, note, err := fetch()
 	if err != nil {
 		// SW=6982 (security status not satisfied) is the common
 		// authentication-required signal. Other SWs are reported
@@ -527,7 +652,11 @@ func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securit
 		// Empty (SW=6A88) is a successful "card has nothing in this
 		// scope" result, not an error. Record as PASS with a clear
 		// detail so consumers don't confuse empty with skipped.
-		report.Pass(checkName, "no entries")
+		detail := "no entries"
+		if note != "" {
+			detail = "no entries; " + note
+		}
+		report.Pass(checkName, detail)
 		return []registryEntryView{}
 	}
 
@@ -538,6 +667,9 @@ func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securit
 		aids = append(aids, hexEncode(e.AID))
 	}
 	summary := fmt.Sprintf("%d entries: %s", len(entries), strings.Join(aids, ", "))
+	if note != "" {
+		summary += "; " + note
+	}
 	report.Pass(checkName, summary)
 
 	views := make([]registryEntryView, 0, len(entries))

@@ -18,6 +18,7 @@ package securitydomain
 import (
 	"context"
 	"errors"
+	"math/big"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/apdu"
@@ -213,7 +214,7 @@ func TestStoreAllowlist_StandardProfile_RefusedBeforeAPDU(t *testing.T) {
 	sd.authenticated = true
 	sd.oceAuthenticated = true
 
-	err = sd.StoreAllowlist(context.Background(), NewKeyReference(0x11, 0x01), nil)
+	err = sd.StoreAllowlist(context.Background(), NewKeyReference(0x11, 0x01), []*big.Int{big.NewInt(1)})
 	if err == nil {
 		t.Fatal("expected ErrUnsupportedByProfile, got nil")
 	}
@@ -288,7 +289,7 @@ func TestStoreAllowlist_YubiKeyProfile_Permitted(t *testing.T) {
 	// The call may still error from downstream (the recording
 	// transport's stub response isn't what StoreAllowlist
 	// expects), but the error MUST NOT be ErrUnsupportedByProfile.
-	err = sd.StoreAllowlist(context.Background(), NewKeyReference(0x11, 0x01), nil)
+	err = sd.StoreAllowlist(context.Background(), NewKeyReference(0x11, 0x01), []*big.Int{big.NewInt(1)})
 	if err != nil && errors.Is(err, profile.ErrUnsupportedByProfile) {
 		t.Errorf("YubiKey profile should not gate Allowlist; got %v", err)
 	}

@@ -97,13 +97,25 @@ func (e RegistryEntry) LifecycleString() string {
 			return "TERMINATED"
 		}
 	case StatusScopeApplications:
-		// Applications: 0x03 INSTALLED, 0x07 SELECTABLE, 0x0F PERSONALIZED.
-		// Higher bits (0x80) indicate LOCKED. SSDs reuse the ISD
-		// states. We test the bits rather than equality so that
-		// LOCKED variants get a clear render.
-		if e.Lifecycle&0x80 != 0 {
-			return "LOCKED"
-		}
+		// Applications per GP Card Spec §11.1.1 Table 11-1:
+		//   0x03 INSTALLED
+		//   0x07 SELECTABLE
+		//   0x0F PERSONALIZED
+		//   0x83 LOCKED (locked from INSTALLED)
+		//   0x87 LOCKED (locked from SELECTABLE)
+		//   0x8F LOCKED (locked from PERSONALIZED)
+		//
+		// LOCKED is encoded as the underlying state with bit 7
+		// (0x80) set. We match only the three legitimate
+		// locked-state encodings rather than any high-bit byte.
+		// An earlier revision used `e.Lifecycle&0x80 != 0` which
+		// would over-label values like 0x80 (no underlying state)
+		// or 0xFF (TERMINATED on the ISD; nonsensical on an app
+		// row but observed on cards in unusual states) as LOCKED.
+		// GlobalPlatformPro uses the more precise predicate
+		// `(v & 0x83) == 0x83` for the same reason; we extend
+		// that to cover the SELECTABLE-derived (0x87) and
+		// PERSONALIZED-derived (0x8F) locked states too.
 		switch e.Lifecycle {
 		case 0x03:
 			return "INSTALLED"
@@ -111,6 +123,8 @@ func (e RegistryEntry) LifecycleString() string {
 			return "SELECTABLE"
 		case 0x0F:
 			return "PERSONALIZED"
+		case 0x83, 0x87, 0x8F:
+			return "LOCKED"
 		}
 	case StatusScopeLoadFiles, StatusScopeLoadFilesAndModules:
 		// Executable Load Files: 0x01 LOADED is the only legal
@@ -360,8 +374,15 @@ const (
 	insGetStatus byte = 0xF2
 
 	// P2 controls the response format and continuation flag.
-	// 0x02 = TLV format, first call.
-	// 0x03 = TLV format, subsequent call (continuation after SW=6310).
+	// Per GP Card Spec §11.4.2.1:
+	//   b2: 0 = legacy "Application" response data structure
+	//       1 = TLV response data structure
+	//   b1: 0 = first or all occurrences
+	//       1 = subsequent occurrences (continuation)
+	//
+	// This implementation REQUIRES the TLV format. The legacy
+	// "Application" structure is not supported by design — see
+	// GetStatus's docstring for the rationale.
 	p2GetStatusTLVFirst byte = 0x02
 	p2GetStatusTLVNext  byte = 0x03
 
@@ -380,16 +401,26 @@ const (
 // GetStatus queries the card's GP registry per GP §11.4.2 and returns
 // every entry matching the given scope.
 //
-// The TLV-formatted response (P2 = 0x02) is requested. Cards that do
-// not support the TLV variant return SW=6A86; callers that need the
-// pre-TLV "Application" format are not supported.
+// Format: TLV only. The request uses P2 = 0x02 (TLV first call) and
+// P2 = 0x03 (TLV continuation). Cards that don't support the
+// TLV-format request answer SW=6A86 ("incorrect parameters P1-P2")
+// or SW=6D00 ("instruction not supported"); GetStatus surfaces
+// those as APDUError with an explicit message naming the
+// limitation. The pre-TLV "Application" response structure
+// (P2 = 0x00) is intentionally NOT supported — this codebase has
+// no users yet, so there is no installed base to preserve, and
+// the byte-1-only privileges encoding (no AuthorizedManagement,
+// no GlobalDelete, no contactless flags) would force SD/SSD
+// classification logic to special-case "did this entry come from
+// a card that knows about byte-2 flags?". That complexity is
+// deferred until a concrete deployment surfaces a non-TLV card.
 //
 // The card may signal a multi-segment response with SW=6310 ("more
-// data"); GetStatus issues continuation calls (P2 = 0x03) until the
-// card responds 0x9000 or returns a non-success SW. SW=6A88
+// data"); GetStatus issues continuation calls (P2 = 0x03) until
+// the card responds 0x9000 or returns a non-success SW. SW=6A88
 // ("referenced data not found") is treated as an empty registry —
-// common when querying Load Files on a card with nothing installed
-// beyond the ISD.
+// common when querying Load Files on a card with nothing
+// installed beyond the ISD.
 //
 // The returned entries each carry the scope they were collected
 // under, so RegistryEntry.LifecycleString and downstream consumers
@@ -433,8 +464,20 @@ func (s *Session) GetStatus(ctx context.Context, scope StatusScope) ([]RegistryE
 		case sw == 0x6A88:
 			// Referenced data not found: empty registry for this scope.
 			return nil, nil
+		case sw == 0x6A86 || sw == 0x6D00:
+			// Card rejected the TLV-format request. This is the
+			// signal that we're talking to a pre-TLV card; we
+			// don't fall back to legacy by design (see
+			// GetStatus docstring).
+			return nil, &APDUError{
+				Operation: fmt.Sprintf("GET STATUS scope=%s: card refused TLV format (SW=%04X); legacy 'Application' format is not supported by this library — see securitydomain.GetStatus docstring", scope, sw),
+				SW:        sw,
+			}
 		default:
-			return nil, fmt.Errorf("%w: GET STATUS scope=%s: SW=%04X", ErrCardStatus, scope, sw)
+			return nil, &APDUError{
+				Operation: fmt.Sprintf("GET STATUS scope=%s", scope),
+				SW:        sw,
+			}
 		}
 	}
 }

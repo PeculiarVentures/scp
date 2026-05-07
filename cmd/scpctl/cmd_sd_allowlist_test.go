@@ -408,14 +408,12 @@ func TestSDAllowlist_RequiresSCP11KID(t *testing.T) {
 					// hitting the connect path. Asserting no
 					// usageError suffices.
 					err = v.fn(context.Background(), env, v.args(ac.kid))
-					if err != nil {
-						if _, ok := err.(*usageError); ok {
-							t.Errorf("kid=%s on %s should pass KID validation; got usageError: %v",
-								ac.kid, v.name, err)
-						}
-						// non-usage errors (e.g. dry-run-related)
-						// are fine; we're testing the KID gate.
+					if _, ok := err.(*usageError); ok {
+						t.Errorf("kid=%s on %s should pass KID validation; got usageError: %v",
+							ac.kid, v.name, err)
 					}
+					// non-usage errors (e.g. dry-run-related)
+					// are fine; we're testing the KID gate.
 				})
 			}
 		})

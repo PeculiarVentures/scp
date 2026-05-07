@@ -42,6 +42,14 @@ import (
 //	                        specification is a usage error so a
 //	                        half-completed key rotation is impossible
 //	                        to misfire.
+//
+//	--scp03-kvn <byte>
+//	--scp03-key <hex>       Single-key shorthand: same hex value used
+//	                        for ENC, MAC, and DEK. Common on GP cards
+//	                        provisioned with a single master key
+//	                        rather than three independent ones.
+//	                        Mutually exclusive with the split
+//	                        --scp03-{enc,mac,dek} flags above.
 type scp03KeyFlags struct {
 	mode       scp03FlagMode
 	useDefault *bool
@@ -49,6 +57,7 @@ type scp03KeyFlags struct {
 	enc        *string
 	mac        *string
 	dek        *string
+	key        *string
 
 	// profile selection: "auto" (default, probe at session open),
 	// "yubikey-sd" (force YubiKey profile), or "standard-sd"
@@ -124,6 +133,10 @@ func registerSCP03KeyFlags(fs *flag.FlagSet, mode scp03FlagMode) *scp03KeyFlags 
 			"SCP03 channel MAC key, hex; same length as --scp03-enc."),
 		dek: fs.String("scp03-dek", "",
 			"SCP03 data encryption key, hex; same length as --scp03-enc."),
+		key: fs.String("scp03-key", "",
+			"SCP03 single-key shorthand: same hex value used for ENC, MAC, and DEK. "+
+				"Common on GP cards provisioned with a single master key. Requires "+
+				"--scp03-kvn. Mutually exclusive with the split --scp03-{enc,mac,dek} flags."),
 		vendor: fs.String("profile", "auto",
 			"Card profile selection. 'auto' (default) probes the card "+
 				"non-destructively at session open and selects YubiKey or "+
@@ -224,19 +237,30 @@ func (kf *scp03KeyFlags) applyToConfigOptional() (*scp03.Config, error) {
 	return kf.applyToConfig()
 }
 
-// anyFlagSet reports whether any of the four custom-key fields is
-// non-empty or --scp03-keys-default was passed. Private helper for
-// applyToConfigOptional.
+// anyFlagSet reports whether any of the SCP03 key flags is set.
+// Includes --scp03-keys-default, the four split-key flags
+// (--scp03-{kvn,enc,mac,dek}), and the --scp03-key shorthand.
+// Used by applyToConfigOptional and by callers that need to know
+// whether the operator made an explicit SCP03 choice.
 func (kf *scp03KeyFlags) anyFlagSet() bool {
 	if kf.useDefault != nil && *kf.useDefault {
 		return true
 	}
-	for _, p := range []*string{kf.kvn, kf.enc, kf.mac, kf.dek} {
+	for _, p := range []*string{kf.kvn, kf.enc, kf.mac, kf.dek, kf.key} {
 		if p != nil && *p != "" {
 			return true
 		}
 	}
 	return false
+}
+
+// explicitlyConfigured is an alias for anyFlagSet kept for legacy
+// gp/main-body call-sites that prefer the more descriptive name.
+// Used by gp registry to refuse running without an explicit SCP03
+// choice (since silently trying YubiKey factory keys against an
+// unknown card would be surprising).
+func (kf *scp03KeyFlags) explicitlyConfigured() bool {
+	return kf.anyFlagSet()
 }
 
 // applyToConfig builds a *scp03.Config matching the flag selection.
@@ -247,8 +271,14 @@ func (kf *scp03KeyFlags) applyToConfig() (*scp03.Config, error) {
 		return nil, err
 	}
 	custom := kf.kvn != nil && (*kf.kvn != "" || *kf.enc != "" || *kf.mac != "" || *kf.dek != "")
-	if *kf.useDefault && custom {
-		return nil, &usageError{msg: "--scp03-keys-default and --scp03-{kvn,enc,mac,dek} are mutually exclusive"}
+	shorthand := kf.key != nil && *kf.key != ""
+
+	if *kf.useDefault && (custom || shorthand) {
+		return nil, &usageError{msg: "--scp03-keys-default and the custom-key flags are mutually exclusive"}
+	}
+
+	if shorthand && (*kf.enc != "" || *kf.mac != "" || *kf.dek != "") {
+		return nil, &usageError{msg: "--scp03-key and --scp03-{enc,mac,dek} are mutually exclusive (use one form or the other)"}
 	}
 
 	// Profile gates: the YubiKey factory keys are vendor-specific
@@ -280,17 +310,43 @@ func (kf *scp03KeyFlags) applyToConfig() (*scp03.Config, error) {
 				"(YubiKey factory keys don't apply to standard GP cards). Pass the explicit " +
 				"--scp03-{kvn,enc,mac,dek} triple instead."}
 		}
-		if !custom {
-			return nil, &usageError{msg: "--profile standard-sd requires explicit --scp03-{kvn,enc,mac,dek} " +
+		if !custom && !shorthand {
+			return nil, &usageError{msg: "--profile standard-sd requires explicit --scp03-{kvn,enc,mac,dek} or --scp03-key " +
 				"(no implicit YubiKey factory-key fallback for standard GP cards)."}
 		}
 	}
 
-	if !custom {
+	if !custom && !shorthand {
 		// Implicit or explicit factory default — same result.
 		return scp03.FactoryYubiKeyConfig(), nil
 	}
-	// Custom: all four sub-flags required.
+
+	if shorthand {
+		if *kf.kvn == "" {
+			return nil, &usageError{msg: "--scp03-key requires --scp03-kvn (the key version number is independent of the key bytes)"}
+		}
+		kvn, err := parseHexByte(*kf.kvn)
+		if err != nil {
+			return nil, &usageError{msg: fmt.Sprintf("--scp03-kvn: %v", err)}
+		}
+		keyBytes, err := parseSCP03KeyHex("--scp03-key", *kf.key)
+		if err != nil {
+			return nil, err
+		}
+		// Single-key shorthand: same bytes for ENC, MAC, DEK. Each
+		// gets its own copy so a downstream caller mutating one does
+		// not corrupt the others — the scp03 layer is not expected
+		// to mutate, but the invariant should hold by construction.
+		enc := append([]byte(nil), keyBytes...)
+		mac := append([]byte(nil), keyBytes...)
+		dek := append([]byte(nil), keyBytes...)
+		return &scp03.Config{
+			Keys:       scp03.StaticKeys{ENC: enc, MAC: mac, DEK: dek},
+			KeyVersion: kvn,
+		}, nil
+	}
+
+	// Custom split-key: all four sub-flags required.
 	missing := []string{}
 	if *kf.kvn == "" {
 		missing = append(missing, "--scp03-kvn")
@@ -306,7 +362,8 @@ func (kf *scp03KeyFlags) applyToConfig() (*scp03.Config, error) {
 	}
 	if len(missing) > 0 {
 		return nil, &usageError{msg: "custom SCP03 keys: missing " + strings.Join(missing, ", ") +
-			" (all four of --scp03-kvn, --scp03-enc, --scp03-mac, --scp03-dek must be supplied together)"}
+			" (all four of --scp03-kvn, --scp03-enc, --scp03-mac, --scp03-dek must be supplied together; " +
+			"or use --scp03-key for the single-key shorthand)"}
 	}
 
 	kvn, err := parseHexByte(*kf.kvn)

@@ -14,6 +14,17 @@ const (
 	ResultPass Result = "PASS"
 	ResultFail Result = "FAIL"
 	ResultSkip Result = "SKIP"
+	// ResultWarn means the check completed successfully but the
+	// result has a known caveat the operator should notice. The
+	// archetypal case is parsing a CAP whose package name was
+	// inferred from the ZIP directory layout rather than the
+	// Header component — the parse succeeds, but if the archive
+	// was repackaged the inferred name may be stale. Warn keeps
+	// HasFailure false so the exit code stays 0; only Fail flips
+	// the bit. JSON consumers can branch on ResultWarn directly;
+	// text-mode output renders WARN like PASS so the operator
+	// reads the detail.
+	ResultWarn Result = "WARN"
 )
 
 // Check is one named line of output: "X: PASS — extra info." A
@@ -72,6 +83,17 @@ func (r *Report) Fail(name, detail string) {
 // Skip appends a skipped check.
 func (r *Report) Skip(name, detail string) {
 	r.Checks = append(r.Checks, Check{Name: name, Result: ResultSkip, Detail: detail})
+}
+
+// Warn appends a passing-but-caveated check. Used when a check
+// completed and produced a result, but the operator should know
+// the result has a known shortcoming (e.g. CAP package name
+// inferred from ZIP path rather than read from the Header
+// component). Does not flip HasFailure, so the exit code stays
+// 0; differs from Pass only in surfacing the caveat to text
+// readers and to JSON consumers that branch on Result.
+func (r *Report) Warn(name, detail string) {
+	r.Checks = append(r.Checks, Check{Name: name, Result: ResultWarn, Detail: detail})
 }
 
 // HasFailure reports whether any check is FAIL. Used to set the

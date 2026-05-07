@@ -88,3 +88,26 @@ func (f *sdAIDFlag) Resolve() ([]byte, error) {
 	}
 	return aid, nil
 }
+
+// decodeSDAIDFlag decodes the --sd-aid CLI flag value into bytes.
+// Empty string means "use the GP-default ISD AID"; the returned
+// nil slice signals callers to fall through to whatever default
+// the underlying API uses (securitydomain.AIDSecurityDomain for
+// OpenUnauthenticated, scp03.Config.SelectAID nil for OpenSCP03,
+// etc.).
+//
+// This is the simpler decoder used by gp install / gp delete /
+// gp registry and the cmd_probe path. The flag-set registration
+// helper registerSDAIDFlag (above) is the richer API used by the
+// sd subcommands. Both decode the same wire format; coexistence
+// is intentional pending a unification pass.
+func decodeSDAIDFlag(value string) ([]byte, error) {
+	if value == "" {
+		return nil, nil
+	}
+	aid, err := decodeHexAID(value, "sd-aid")
+	if err != nil {
+		return nil, fmt.Errorf("--sd-aid: %w", err)
+	}
+	return aid, nil
+}

@@ -1,7 +1,6 @@
 package mockcard
 
 import (
-	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/tlv"
 )
 
@@ -29,7 +28,6 @@ func (e *MockRegistryEntry) encode(includeModules bool) *tlv.Node {
 	var children []*tlv.Node
 	children = append(children, tlv.Build(0x4F, append([]byte(nil), e.AID...)))
 
-	// Modern combined encoding: lifecycle byte + 3-byte privilege mask.
 	combined := append([]byte{e.Lifecycle}, e.Privileges[0], e.Privileges[1], e.Privileges[2])
 	children = append(children, tlv.Build(0x9F70, combined))
 
@@ -54,98 +52,3 @@ const (
 	statusScopeLoadFiles           byte = 0x20
 	statusScopeLoadFilesAndModules byte = 0x10
 )
-
-// doGetStatus is the GP §11.4.2 GET STATUS handler. P2 must be 0x02
-// (TLV format, first call) — the mock does not signal multi-segment
-// responses, so continuation (P2=0x03) is not needed and is rejected.
-//
-// P1 selects the registry slice to return:
-//
-//	0x80  RegistryISD
-//	0x40  RegistryApps (also returns SSDs in real GP; the mock
-//	      doesn't distinguish — callers can put SSDs into the
-//	      Apps slice with the SecurityDomain privilege bit set)
-//	0x20  RegistryLoadFiles, modules omitted
-//	0x10  RegistryLoadFiles, modules included
-//
-// Empty slices return SW=6A88 (referenced data not found), matching
-// the real-card behavior the production parser relies on.
-func (c *Card) doGetStatus(cmd *apdu.Command) (*apdu.Response, error) {
-	if cmd.P2 != 0x02 {
-		return mkSW(0x6A86), nil // incorrect P1/P2
-	}
-
-	var (
-		entries        []MockRegistryEntry
-		includeModules bool
-	)
-	switch cmd.P1 {
-	case statusScopeISD:
-		entries = c.RegistryISD
-	case statusScopeApplications:
-		entries = c.RegistryApps
-	case statusScopeLoadFiles:
-		entries = c.RegistryLoadFiles
-	case statusScopeLoadFilesAndModules:
-		entries = c.RegistryLoadFiles
-		includeModules = true
-	default:
-		return mkSW(0x6A86), nil
-	}
-
-	if len(entries) == 0 {
-		return mkSW(0x6A88), nil // referenced data not found
-	}
-
-	var nodes []*tlv.Node
-	for i := range entries {
-		nodes = append(nodes, entries[i].encode(includeModules))
-	}
-	var body []byte
-	for _, n := range nodes {
-		body = append(body, n.Encode()...)
-	}
-	return &apdu.Response{Data: body, SW1: 0x90, SW2: 0x00}, nil
-}
-
-// doSetStatus is the GP §11.1.10 SET STATUS handler. Only ISD-scoped
-// transitions (P1=0x80) are supported; the application/SD scopes
-// (P1=0x40) are not exercised by current callers and would need
-// AID matching against RegistryApps to be meaningful.
-//
-// Behavior:
-//   - P1=0x80 with any P2: update RegistryISD[0].Lifecycle to P2.
-//     Auto-create a synthetic ISD entry if RegistryISD is empty so
-//     pre-check / post-check GET STATUS round trips work in tests
-//     that didn't explicitly populate the registry. The new entry
-//     uses the GP-standard ISD AID and zero privileges; tests that
-//     need richer ISD state should populate RegistryISD before
-//     issuing SET STATUS.
-//   - Once Lifecycle is set to TERMINATED (0xFF) the card no
-//     longer responds to anything but SELECT — but enforcing that
-//     is out of scope for this mock; tests that need to exercise
-//     post-terminate APDU rejection should drive that path
-//     explicitly.
-//
-// Real cards reject illegal transitions (e.g. SECURED → OP_READY)
-// with SW=6985. The mock does NOT enforce a transition table —
-// tests that need transition-rejection coverage should set up the
-// expected SW themselves. Cards that require auth to SET STATUS
-// surface that as 6982 from the SCP layer above this; the mock's
-// processSecure already rejects unauthenticated SM-tagged commands
-// post-session.
-func (c *Card) doSetStatus(cmd *apdu.Command) (*apdu.Response, error) {
-	if cmd.P1 != 0x80 {
-		// Application/SD scope not implemented in the mock.
-		return mkSW(0x6A86), nil // incorrect P1/P2
-	}
-	if len(c.RegistryISD) == 0 {
-		c.RegistryISD = []MockRegistryEntry{{
-			AID:       []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00},
-			Lifecycle: cmd.P2,
-		}}
-	} else {
-		c.RegistryISD[0].Lifecycle = cmd.P2
-	}
-	return mkSW(0x9000), nil
-}

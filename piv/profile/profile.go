@@ -140,9 +140,37 @@ type Capabilities struct {
 	// byte (YubiKey extension).
 	TouchPolicy bool
 
-	// ProtectedManagementKey reports support for storing the PIV
-	// management key inside the card protected by the PIN
-	// (YubiKey-specific feature using object 5FC109).
+	// ProtectedManagementKey reports support for the PIVMAN
+	// protected-management-key scheme: the PIV management key is
+	// stored on the card under PIN protection so an operator can
+	// authenticate with PIN-only and the management key is
+	// retrieved transparently. This is a YubiKey-only behavior
+	// (PIVMAN, named after Yubico's pivman tooling); it is NOT
+	// part of NIST SP 800-73-4 and Standard PIV cards do not
+	// implement it.
+	//
+	// PIVMAN uses two PIV data objects:
+	//
+	//   0x5FFF00  PIVMAN_DATA           — unprotected configuration
+	//                                     flags (PIN policy hints,
+	//                                     device-specific state).
+	//   0x5FC109  PIVMAN_PROTECTED_DATA — the protected management
+	//                                     key blob; lives at the
+	//                                     PRINTED data object slot
+	//                                     and is PIN-gated.
+	//
+	// This field is a capability declaration consumed by the
+	// host-side profile gating layer: when false, the cmd/scpctl
+	// surface refuses operations that would read or write either
+	// object before any APDU is sent. The PIVMAN read/write
+	// semantics themselves are NOT implemented in this library
+	// today — capability declaration without implementation. If
+	// a future change adds the read path, both objects above
+	// must be addressed and yubikit-python's pivman.py is the
+	// reference for the on-card data shape.
+	//
+	// Per the third external review on feat/sd-keys-cli, Section 4
+	// (PIVMAN / protected management key behavior).
 	ProtectedManagementKey bool
 
 	// SCP11bPIV reports whether the card terminates an SCP11b secure
