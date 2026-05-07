@@ -3,7 +3,7 @@
 Administrative CLI for the [`PeculiarVentures/scp`](https://github.com/PeculiarVentures/scp) library. Four command groups:
 
 - `test` runs the hardware regression checks: against a real card, validate that the SCP library produces wire bytes the card accepts (`scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`), and that the wire layer survives being wrapped around a higher-level applet protocol (`scp11b-piv-verify`). Read-only against the card. Renamed from the earlier `smoke` group; same checks, clearer name.
-- `piv` is the user-facing PIV operation surface backed by `piv/session`. The full surface is wired: `info`, `pin verify|change|unblock`, `puk change`, `mgmt auth|change-key`, `key generate|attest`, `cert get|put|delete`, `object get|put`, `reset`, and `provision`. Destructive and credential-bearing commands require an explicit channel-mode choice (`--scp11b` or `--raw-local-ok`) and either `--confirm-write` or, for `reset`, both `--confirm-write` and `--confirm-reset-piv`.
+- `piv` is the user-facing PIV operation surface backed by `piv/session`. The full surface is wired: `info`, `pin verify|change|unblock`, `puk change`, `mgmt auth|change-key`, `key generate|attest`, `cert get|put|delete`, `object get|put`, `reset`, and `provision`. Destructive and credential-bearing commands require an explicit channel-mode choice (`--scp11b` or `--raw-local-ok`) and either `--confirm-write` (for slot-scoped operations) or `--confirm-reset-piv` (for the applet-wide `reset`).
 - `sd` is the Security Domain operation surface. Wired today: `info`, `reset`, `lock`, `unlock`, `terminate`, `bootstrap-oce`, `bootstrap-scp11a`, `bootstrap-scp11a-sd`. State-changing commands are gated: bootstraps and `lock`/`unlock` use `--confirm-write`; `reset` uses `--confirm-reset-sd`; `terminate` (irreversible) uses `--confirm-terminate-card`. The distinct flag for each scope of irreversibility is the foot-gun mitigation.
 - `oce` is host-only OCE certificate diagnostics: `verify` validates a chain off-card, `gen` produces a fresh known-good chain. Does not touch a card.
 
@@ -30,8 +30,8 @@ The `test` group is read-only and behaves as it always did: no key rotation, no 
 
 The `piv` group writes to the card. The safety model rests on four explicit gates:
 
-- **`--confirm-write`** is required for every destructive PIV operation (`key generate`, `cert put`, `cert delete`, `object put`, `mgmt change-key`, `reset`). The flag exists so destructive commands can never run without an explicit operator decision.
-- **`--confirm-reset-piv`** is required *in addition* for `piv reset`, because a full applet wipe is qualitatively different from a single-slot operation. The two-flag pattern prevents an operator who pastes a stale slot-rotation command line from accidentally turning it into a full reset.
+- **`--confirm-write`** is required for every destructive *slot-scoped* PIV operation (`key generate`, `cert put`, `cert delete`, `object put`, `mgmt change-key`). The flag exists so destructive commands can never run without an explicit operator decision.
+- **`--confirm-reset-piv`** is required for `piv reset` (the applet-wide wipe). The distinct flag is the foot-gun mitigation: a full applet wipe is qualitatively different from a single-slot operation, and giving it its own confirm flag prevents an operator who pastes a stale slot-rotation command line from accidentally turning it into a full reset. `--confirm-write` is accepted on `piv reset` for stale-script compatibility but on its own falls through to dry-run with a deprecation notice; `--confirm-reset-piv` is the one that actually mutates.
 - **`--scp11b` or `--raw-local-ok`** must be specified explicitly on every destructive or credential-bearing PIV command. Specifying neither is a usage error; specifying both is a usage error. This fail-closed default ensures a missed channel-mode flag cannot silently downgrade an SCP11b-secured operation to raw transport.
 - **Cert-to-public-key binding is on by default.** `piv cert put` requires `--expected-pubkey <path>` unless `--no-pubkey-binding` is explicitly passed; the safe default rejects installing a certificate whose public key does not match the slot's generated key.
 
@@ -178,11 +178,11 @@ scpctl sd bootstrap-oce \
 
 Without `--confirm-write` the command runs in **dry-run mode**: it loads and validates the cert chain, types the public key, prints what it would do, and exits without transmitting any APDU that mutates card state. This mirrors the safety pattern in the destructive-ops note above and gives operators a way to sanity-check inputs before flipping the card.
 
-The CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK). A card whose SCP03 keys have already been rotated will get an authentication error from `OpenSCP03` — custom-keys flags (`--kvn`, `--enc`, `--mac`, `--dek`) are follow-up work; the structural mechanism is straightforward (build an `scp03.Config` from the flags rather than calling `FactoryYubiKeyConfig`).
+By default the CLI assumes SCP03 factory keys (KVN `0xFF`, default ENC/MAC/DEK) — the typical state of a fresh YubiKey. For cards whose SCP03 keys have been rotated, pass the explicit triple via `--scp03-kvn`, `--scp03-enc`, `--scp03-mac`, `--scp03-dek` (all four required together; partial specification is a usage error). Pinning `--profile=standard-sd` requires the explicit triple — there's no implicit factory-key fallback for non-YubiKey cards.
 
 The OCE certificate chain is **NOT stored on the card**. It travels on the wire at SCP11 session-open via PSO (GP §7.5.3), and the card validates it against the registered CA pubkey + SKI. `bootstrap-oce` thus performs two writes: `PUT KEY` to install the OCE CA pubkey at KID=0x10, and `STORE DATA` to register the CA SKI. The leaf cert's pubkey and the chain bytes themselves are never written to card storage — that would be a category error (the card has no slot for OCE chains), and earlier versions that tried to do this got SW=6A80 from retail YubiKeys. If you need to store an *SD* attestation chain (a chain whose leaf certifies the on-card SD pubkey), that's a separate provisioning step against the SD key reference, not part of `bootstrap-oce`.
 
-### piv-reset — restore the PIV applet to factory state
+### piv reset — restore the PIV applet to factory state
 
 Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other PIV state you want to undo without physically swapping the hardware. Erases ALL 24 PIV slot keypairs and certificates, returns PIN to `123456` and PUK to `12345678`, and resets the management key (to the well-known 3DES default on pre-5.7 firmware, or a randomly regenerated AES-192 key in protected metadata on 5.7+). Does NOT touch installed OCE roots or the Issuer Security Domain — those live outside the PIV applet.
 
@@ -190,7 +190,7 @@ Recovers a YubiKey from a wrong-cert provisioning, an unknown PIN, or any other 
 scpctl piv reset \
   --reader "YubiKey" \
   --lab-skip-scp11-trust \
-  --confirm-write
+  --confirm-reset-piv
 ```
 
 The flow:
@@ -200,13 +200,11 @@ The flow:
 3. Block the PUK by sending RESET RETRY COUNTER with deliberately wrong PUKs until the card returns `6983`. Typically 3 attempts.
 4. Send the YubiKey-specific PIV reset APDU (`INS=0xFB`).
 
-The card's own foot-gun guard is the precondition that BOTH PIN and PUK retry counters must be exhausted before `INS=0xFB` is accepted. A casual operator can't accidentally wipe a slot by sending one APDU; they have to first deliberately block both credentials, which this command does only when `--confirm-write` is supplied. Without `--confirm-write`, `piv-reset` runs in dry-run mode and prints what would happen.
+The card's own foot-gun guard is the precondition that BOTH PIN and PUK retry counters must be exhausted before `INS=0xFB` is accepted. A casual operator can't accidentally wipe a slot by sending one APDU; they have to first deliberately block both credentials, which this command does only when `--confirm-reset-piv` is supplied. Without `--confirm-reset-piv`, `piv reset` runs in dry-run mode and prints what would happen. (`--confirm-write` is also accepted for stale-script compatibility but on its own falls through to dry-run with a deprecation notice; pass `--confirm-reset-piv` to actually mutate.)
 
-After a successful reset, you can immediately re-run `piv-provision` against the now-clean card.
+After a successful reset, you can immediately re-run `piv provision` against the now-clean card.
 
-The `--max-block-attempts` flag (default 16) caps the wrong-PIN/wrong-PUK loop. YubiKey defaults to 3 retries so 3 attempts is the typical answer; the cap exists so a card returning unexpected status can't loop forever. Yubico documents retry counts up to 255 — raise `--max-block-attempts` for cards configured with high retry counts.
-
-### piv-provision — generate a slot keypair (and optionally install a cert)
+### piv provision — generate a slot keypair (and optionally install a cert)
 
 Provisions a PIV slot through an SCP11b-secured channel: `VERIFY PIN` → `GENERATE KEY` → optional `PUT CERTIFICATE` → optional `ATTESTATION`. Same `--confirm-write` dry-run gating as `bootstrap-oce`.
 
@@ -224,7 +222,7 @@ scpctl piv provision \
 
 Slots: `9a` (PIV Authentication), `9c` (Digital Signature), `9d` (Key Management), `9e` (Card Authentication), `82`–`95` (Retired Key Management 1–20), and `f9` (YubiKey Attestation). Algorithms: `rsa2048`, `eccp256`, `eccp384`, plus YubiKey 5.7+ exclusives `ed25519` and `x25519`.
 
-**Cert-to-pubkey binding check.** When `--cert` is supplied, after `GENERATE KEY` succeeds, `piv-provision` parses the public key returned by the card and refuses to install the cert if its public key does not match. Without this check, a wrong cert (different slot, stale chain, typo'd path that resolved to something unintended) would install onto a slot whose keypair doesn't actually correspond — the slot would then attest to an identity it can't prove possession of. Mismatch produces a `cert binding FAIL` line and a non-zero exit; `PUT CERTIFICATE` is not transmitted.
+**Cert-to-pubkey binding check.** When `--cert` is supplied, after `GENERATE KEY` succeeds, `piv provision` parses the public key returned by the card and refuses to install the cert if its public key does not match. Without this check, a wrong cert (different slot, stale chain, typo'd path that resolved to something unintended) would install onto a slot whose keypair doesn't actually correspond — the slot would then attest to an identity it can't prove possession of. Mismatch produces a `cert binding FAIL` line and a non-zero exit; `PUT CERTIFICATE` is not transmitted.
 
 The check runs against the parsed public key for the relevant algorithm: RSA (modulus + exponent), ECDSA (curve + X/Y), Ed25519 (32-byte raw). X25519 keys are not bound by X.509 certs, so the binding step is skipped with a `parse pubkey SKIP` note.
 
@@ -322,7 +320,7 @@ The library implementations and behaviors validated by this tool are documented 
 
 ## Trust configuration for SCP11 commands
 
-Every SCP11 subcommand (`scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision`, `piv-reset`) accepts the same two mutually-exclusive trust flags:
+Every SCP11 subcommand (`scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv provision`, `piv reset`) accepts the same two mutually-exclusive trust flags:
 
 | Flag | Purpose |
 |---|---|
@@ -380,6 +378,6 @@ The CLI never logs key bytes — the report shows `SCP03 keys PASS — custom (K
 
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (mgmt-key auth + cert-binding), `piv-reset`, `test`. SCP11 commands accept `--trust-roots <pem>` for production trust validation. SCP03 commands accept `--scp03-{kvn,enc,mac,dek}` for rotated-key cards.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv provision` (mgmt-key auth + cert-binding), `piv reset`, `test`. SCP11 commands accept `--trust-roots <pem>` for production trust validation. SCP03 commands accept `--scp03-{kvn,enc,mac,dek}` for rotated-key cards.
 - Next: `GET METADATA` (Yubico extension) for auto-detecting management-key algorithm against a card whose state isn't known up front.
 - Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
