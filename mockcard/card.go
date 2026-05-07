@@ -178,6 +178,24 @@ type Card struct {
 	// on *GPState defined in mockcard/gpstate.go and shared with
 	// the SCP03+GP combined mock (see scp03card.go).
 	*GPState
+
+	// Faults is an ordered list of *Fault entries that test
+	// code can register via AddFault. Each command passes
+	// through the fault list before dispatch — see
+	// dispatchINS. Mirrors the SCP03Card.Faults shape so
+	// tests can target either mock with the same builder
+	// helpers (FailINS, FailLoadAtSeq, etc.).
+	Faults []*Fault
+}
+
+// AddFault registers a fault to fire on a matching APDU. Faults
+// evaluate in registration order before any command handler;
+// the first match short-circuits dispatch and returns its
+// Response. Faults marked Once unregister themselves after
+// firing exactly once.
+func (c *Card) AddFault(f *Fault) *Card {
+	c.Faults = append(c.Faults, f)
+	return c
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -310,6 +328,17 @@ func (c *Card) processAPDU(cmd *apdu.Command) (*apdu.Response, error) {
 // switch missed it for several months until #50 fixed the symptom.
 // Collapsing them removes the duplication permanently.
 func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {
+	// Fault evaluation runs first so tests can force any
+	// command path to a specific SW. Faults are removed after
+	// firing if Once=true (matches SCP03Card semantics).
+	for _, f := range c.Faults {
+		if !f.fired && f.Match(cmd) {
+			if f.Once {
+				f.fired = true
+			}
+			return f.Response, nil
+		}
+	}
 	switch cmd.INS {
 	case 0xA4: // SELECT
 		return c.doSelect(cmd, underSM)
