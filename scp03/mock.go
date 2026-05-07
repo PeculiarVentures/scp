@@ -135,6 +135,15 @@ type MockCard struct {
 	// then fail on the same logical command. Default zero
 	// preserves the historical record-and-9000 behavior.
 	FailStoreDataSW uint16
+
+	// ForceInitUpdateSW, when non-zero, makes the mock return the
+	// configured SW for INITIALIZE UPDATE (INS=0x50) without doing
+	// any cryptogram computation. Lets tests drive the
+	// InitializeUpdateError diagnostic path end-to-end against the
+	// SWs cards return in real-world failure modes (6982 for
+	// SD-locked, 6A88 for missing KVN, etc). Default zero preserves
+	// the historical "process IU normally" behavior.
+	ForceInitUpdateSW uint16
 }
 
 // mockKeyEntry represents one installed key in the mock's
@@ -305,6 +314,17 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 }
 
 func (c *MockCard) doInitializeUpdate(cmd *apdu.Command) (*apdu.Response, error) {
+	// Test hook: ForceInitUpdateSW lets a test drive the host-side
+	// InitializeUpdateError diagnostic path without modeling real
+	// SD lifecycle state. Returns the configured SW with no data,
+	// matching how cards actually emit these responses on policy
+	// rejection.
+	if c.ForceInitUpdateSW != 0 {
+		return &apdu.Response{
+			SW1: byte(c.ForceInitUpdateSW >> 8),
+			SW2: byte(c.ForceInitUpdateSW & 0xFF),
+		}, nil
+	}
 	if len(cmd.Data) != 8 {
 		return &apdu.Response{SW1: 0x6A, SW2: 0x80}, nil
 	}

@@ -321,7 +321,19 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		return nil, fmt.Errorf("INITIALIZE UPDATE: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("INITIALIZE UPDATE: %w", resp.Error())
+		// The card rejected INITIALIZE UPDATE before any cryptogram
+		// exchange. Surface the SW with a diagnostic interpretation
+		// and an explicit retry-keys flag, so an operator triaging
+		// this doesn't burn more attempts when keys aren't even the
+		// thing being tested. See InitializeUpdateError doc for the
+		// distinction from CryptogramMismatchError.
+		diag, retry := classifyInitUpdateSW(resp.SW1, resp.SW2)
+		return nil, &InitializeUpdateError{
+			SW1:                resp.SW1,
+			SW2:                resp.SW2,
+			Diagnostic:         diag,
+			RetryDifferentKeys: retry,
+		}
 	}
 
 	// Step 4: Parse INITIALIZE UPDATE response.
