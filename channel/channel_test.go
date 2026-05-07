@@ -577,7 +577,7 @@ func TestS16_RejectsPartialMACMatch(t *testing.T) {
 	}
 }
 
-// TestEmptyData_YubicoDefault confirms the default empty-data
+// TestEmptyData_PadAndEncrypt_Default confirms the default empty-data
 // encryption behavior pads with 0x80||0x00*15 and encrypts as one
 // AES block. Matches yubikit's ScpState.encrypt:
 //
@@ -585,10 +585,9 @@ func TestS16_RejectsPartialMACMatch(t *testing.T) {
 //
 // Earlier the code skipped encryption entirely for empty data, which
 // is what GP §6.2.4 literally says, but YubiKey rejects that. We now
-// default to Yubico's interpretation (EmptyDataYubico) and have a
-// fallback (EmptyDataGPLiteral) for cards that follow the literal
-// spec.
-func TestEmptyData_YubicoDefault_PadsAndEncrypts(t *testing.T) {
+// default to EmptyDataPadAndEncrypt and have a fallback
+// (EmptyDataNoOp) for cards that follow the literal spec.
+func TestEmptyData_PadAndEncrypt_Default(t *testing.T) {
 	keys := &kdf.SessionKeys{
 		SENC:     bytes.Repeat([]byte{0xAA}, 16),
 		SMAC:     bytes.Repeat([]byte{0xBB}, 16),
@@ -597,9 +596,9 @@ func TestEmptyData_YubicoDefault_PadsAndEncrypts(t *testing.T) {
 		MACChain: make([]byte, 16),
 	}
 	sc := New(keys, LevelFull)
-	// Default policy is EmptyDataYubico — verify.
-	if sc.EmptyDataEncryption != EmptyDataYubico {
-		t.Errorf("default EmptyDataEncryption = %v, want EmptyDataYubico", sc.EmptyDataEncryption)
+	// Default policy is EmptyDataPadAndEncrypt; verify.
+	if sc.EmptyDataEncryption != EmptyDataPadAndEncrypt {
+		t.Errorf("default EmptyDataEncryption = %v, want EmptyDataPadAndEncrypt", sc.EmptyDataEncryption)
 	}
 
 	cmd := &apdu.Command{CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0x00, Data: nil, Le: -1}
@@ -612,12 +611,12 @@ func TestEmptyData_YubicoDefault_PadsAndEncrypts(t *testing.T) {
 	// If we had skipped encryption, the data field would be just the
 	// 8-byte MAC.
 	if len(wrapped.Data) != 24 {
-		t.Errorf("wrapped data length = %d, want 24 (16 encrypted + 8 MAC) under EmptyDataYubico",
+		t.Errorf("wrapped data length = %d, want 24 (16 encrypted + 8 MAC) under EmptyDataPadAndEncrypt",
 			len(wrapped.Data))
 	}
 }
 
-func TestEmptyData_GPLiteral_SkipsEncryption(t *testing.T) {
+func TestEmptyData_NoOp_SkipsEncryption(t *testing.T) {
 	keys := &kdf.SessionKeys{
 		SENC:     bytes.Repeat([]byte{0xAA}, 16),
 		SMAC:     bytes.Repeat([]byte{0xBB}, 16),
@@ -626,7 +625,7 @@ func TestEmptyData_GPLiteral_SkipsEncryption(t *testing.T) {
 		MACChain: make([]byte, 16),
 	}
 	sc := New(keys, LevelFull)
-	sc.EmptyDataEncryption = EmptyDataGPLiteral
+	sc.EmptyDataEncryption = EmptyDataNoOp
 
 	cmd := &apdu.Command{CLA: 0x80, INS: 0xCA, P1: 0x00, P2: 0x00, Data: nil, Le: -1}
 	wrapped, err := sc.Wrap(cmd)
@@ -634,23 +633,23 @@ func TestEmptyData_GPLiteral_SkipsEncryption(t *testing.T) {
 		t.Fatalf("Wrap: %v", err)
 	}
 
-	// GP-literal path skips encryption: data field is just the 8-byte MAC.
+	// NoOp path skips encryption: data field is just the 8-byte MAC.
 	if len(wrapped.Data) != 8 {
-		t.Errorf("wrapped data length = %d, want 8 (MAC only) under EmptyDataGPLiteral",
+		t.Errorf("wrapped data length = %d, want 8 (MAC only) under EmptyDataNoOp",
 			len(wrapped.Data))
 	}
 }
 
 // TestEmptyData_BothModes_AdvanceCounter confirms both empty-data
-// policies still advance the encryption counter — even GP-literal,
+// policies still advance the encryption counter, including NoOp,
 // which advances the counter without producing ciphertext.
 func TestEmptyData_BothModes_AdvanceCounter(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		policy EmptyDataPolicy
 	}{
-		{"Yubico", EmptyDataYubico},
-		{"GPLiteral", EmptyDataGPLiteral},
+		{"PadAndEncrypt", EmptyDataPadAndEncrypt},
+		{"NoOp", EmptyDataNoOp},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			keys := &kdf.SessionKeys{
@@ -672,6 +671,19 @@ func TestEmptyData_BothModes_AdvanceCounter(t *testing.T) {
 				t.Errorf("counter not advanced under %s: before=%d after=%d", tc.name, before, sc.encCounter)
 			}
 		})
+	}
+}
+
+// TestEmptyDataPolicy_ZeroValueIsPadAndEncrypt pins the default
+// behavior of an unset EmptyDataEncryption field. Callers rely on
+// the zero value matching the verified card profile; if a future
+// change reorders the iota the default flips silently and every
+// empty-data command goes out wrong.
+func TestEmptyDataPolicy_ZeroValueIsPadAndEncrypt(t *testing.T) {
+	var p EmptyDataPolicy
+	if p != EmptyDataPadAndEncrypt {
+		t.Errorf("zero-value EmptyDataPolicy = %v, want EmptyDataPadAndEncrypt = %v",
+			p, EmptyDataPadAndEncrypt)
 	}
 }
 

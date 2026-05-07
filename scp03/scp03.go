@@ -118,7 +118,7 @@ func FactoryYubiKeyConfig() *Config {
 // StrictGPConfig returns an SCP03 Config with spec-literal defaults
 // for the given key set: KeyVersion 0 ("any version" per GP), full
 // security level by default, and EmptyDataEncryption set explicitly
-// to channel.EmptyDataGPLiteral. Use this against cards that
+// to channel.EmptyDataNoOp. Use this against cards that
 // strictly implement GP Amendment D §6.2.4 rather than the YubiKey
 // pad-and-encrypt interpretation.
 //
@@ -129,7 +129,7 @@ func StrictGPConfig(keys StaticKeys) *Config {
 	return &Config{
 		Keys:                keys,
 		KeyVersion:          0x00,
-		EmptyDataEncryption: channel.EmptyDataGPLiteral,
+		EmptyDataEncryption: channel.EmptyDataNoOp,
 	}
 }
 
@@ -197,14 +197,15 @@ type Config struct {
 	InsecureAllowPartialSecurityLevel bool
 
 	// EmptyDataEncryption controls how the C-DECRYPT step handles a
-	// command APDU with no data field. Two interpretations exist:
+	// command APDU with no data field. Two interpretations ship in
+	// the wild:
 	//
-	//   - channel.EmptyDataYubico (default): pad empty data with
-	//     0x80 || 0x00*15 and encrypt as one block. Matches Yubico's
-	//     yubikit and works against YubiKey 5.x.
+	//   - channel.EmptyDataPadAndEncrypt (default): pad empty data
+	//     with 0x80 || 0x00*15 and encrypt as one block. Verified
+	//     against YubiKey 5.x and matches Yubico's yubikit.
 	//
-	//   - channel.EmptyDataGPLiteral: skip encryption entirely when
-	//     data is empty (counter still increments). Matches a literal
+	//   - channel.EmptyDataNoOp: skip encryption entirely when data
+	//     is empty (counter still increments). Matches a literal
 	//     reading of GP Amendment D §6.2.4 and is the right choice
 	//     for cards that strictly implement that text.
 	//

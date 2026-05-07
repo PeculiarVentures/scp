@@ -283,11 +283,11 @@ type Config struct {
 
 	// EmptyDataEncryption controls how the C-DECRYPT step handles a
 	// command APDU with no data field. Default is
-	// channel.EmptyDataYubico (pad-and-encrypt) which matches Yubico
-	// yubikit and works against YubiKey 5.x. Set to
-	// channel.EmptyDataGPLiteral for cards that strictly implement
-	// the GP Amendment D §6.2.4 reading (skip encryption when data
-	// is empty). See scp03.Config for fuller context.
+	// channel.EmptyDataPadAndEncrypt, the behavior verified against
+	// YubiKey 5.x. Set to channel.EmptyDataNoOp for cards that
+	// strictly implement the GP Amendment D §6.2.4 reading (skip
+	// encryption when data is empty). See scp03.Config for fuller
+	// context.
 	EmptyDataEncryption channel.EmptyDataPolicy
 }
 
@@ -310,9 +310,9 @@ var (
 // YubiKeyDefaultSCP11bConfig returns a starting Config for SCP11b
 // (one-way card-to-host authentication) tuned for YubiKey defaults:
 // SD applet, KID 0x13, KVN 0x01, full security level, and the
-// YubiKey-compatible empty-data encryption policy
-// (channel.EmptyDataYubico, the zero value). The caller still has to
-// configure card-trust validation: set CardTrustPolicy or
+// pad-and-encrypt empty-data policy (channel.EmptyDataPadAndEncrypt,
+// the zero value, verified against YubiKey 5.x). The caller still
+// has to configure card-trust validation: set CardTrustPolicy or
 // CardTrustAnchors, or InsecureSkipCardAuthentication for tests.
 //
 // For spec-literal defaults that don't bake in YubiKey assumptions,
@@ -357,15 +357,16 @@ func YubiKeyDefaultSCP11cConfig() *Config {
 }
 
 // StrictGPSCP11bConfig returns an SCP11b Config with spec-literal
-// defaults — no YubiKey-specific tinting. It explicitly sets
-// EmptyDataEncryption to channel.EmptyDataGPLiteral, which matches
-// the literal reading of GP Amendment D §6.2.4 (skip C-DEC encryption
+// defaults and no YubiKey-specific tinting. It explicitly sets
+// EmptyDataEncryption to channel.EmptyDataNoOp, which matches the
+// literal reading of GP Amendment D §6.2.4 (skip C-DEC encryption
 // when data is empty). KeyVersion is left at zero ("any version"),
 // since the GP-spec default does not pin a specific KVN.
 //
 // Use this against cards that strictly implement the GP spec rather
-// than the YubiKey-compatible interpretation. Trust configuration
-// requirements are the same as the YubiKey-default variant.
+// than the pad-and-encrypt interpretation YubiKey ships with. Trust
+// configuration requirements are the same as the YubiKey-default
+// variant.
 func StrictGPSCP11bConfig() *Config {
 	return &Config{
 		Variant:             SCP11b,
@@ -373,7 +374,7 @@ func StrictGPSCP11bConfig() *Config {
 		KeyID:               0x13, // GP §7.1.1 SCP11b
 		KeyVersion:          0x00, // GP-spec "any version"
 		SecurityLevel:       channel.LevelFull,
-		EmptyDataEncryption: channel.EmptyDataGPLiteral,
+		EmptyDataEncryption: channel.EmptyDataNoOp,
 	}
 }
 

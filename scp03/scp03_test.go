@@ -322,8 +322,8 @@ func TestStrictGPConfig(t *testing.T) {
 	if cfg.KeyVersion != 0x00 {
 		t.Errorf("KeyVersion = 0x%02X, want 0x00", cfg.KeyVersion)
 	}
-	if cfg.EmptyDataEncryption != channel.EmptyDataGPLiteral {
-		t.Errorf("EmptyDataEncryption = %v, want EmptyDataGPLiteral", cfg.EmptyDataEncryption)
+	if cfg.EmptyDataEncryption != channel.EmptyDataNoOp {
+		t.Errorf("EmptyDataEncryption = %v, want EmptyDataNoOp", cfg.EmptyDataEncryption)
 	}
 	if len(cfg.Keys.ENC) != 16 {
 		t.Errorf("Keys.ENC length = %d, want 16", len(cfg.Keys.ENC))
