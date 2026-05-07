@@ -17,17 +17,22 @@ import (
 // securitydomain depends on profile for capability gating).
 var AIDSecurityDomain = []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00}
 
-// yubikeyCardIdentificationOID is the value YubiKey 5.7+ emits in
-// the Card Recognition Data tag 0x63 (Card Identification Scheme).
-// It's the bare GP RID + arc 3 with no further qualifier — Yubico
-// occupies the GP card-identification slot but doesn't advertise
-// a vendor-specific sub-OID, which makes the unqualified value
-// itself the discriminator.
+// gpStandardCardIdentificationOID is the GP Card Spec Card_IDS OID
+// (1.2.840.114283.3) — the bare GP RID + arc 3 with no further
+// qualifier. Every GP-conformant card emits this value in tag 0x63
+// (Card Identification Scheme) of its Card Recognition Data; it
+// does NOT identify a specific vendor.
 //
-// Captured 2026-05-04 from a retail YubiKey 5.7.4. Pinned in
-// cardrecognition/cardrecognition_test.go's
-// TestParse_RetailYubiKey5_BothSCPs fixture.
-var yubikeyCardIdentificationOID = asn1.ObjectIdentifier{1, 2, 840, 114283, 3}
+// The historical detection treated this OID as the YubiKey
+// signature, on the assumption that "Yubico occupies the GP
+// card-identification slot but doesn't advertise a vendor-specific
+// sub-OID." That assumption was wrong. A SafeNet eToken Fusion
+// (Thales-built, GP 2.2.1, JavaCard v3, OS release 2017-11-30)
+// emits the same OID, so do other GP-conformant non-YubiKey cards.
+// classifyByCRD now uses the OID's presence as a sanity check
+// (the card must at least claim GP card-identification) but adds
+// further narrowing via CardChipDetailsOID and the SCPs list.
+var gpStandardCardIdentificationOID = asn1.ObjectIdentifier{1, 2, 840, 114283, 3}
 
 // crdGetDataTagP2 is the GP-spec tag for fetching Card Recognition
 // Data via GET DATA. Most cards return CRD inline in the SELECT
@@ -92,23 +97,28 @@ var ErrNoSecurityDomain = errors.New("securitydomain/profile: no Security Domain
 //     response; standard GP cards may not.
 //  3. If SELECT didn't produce parseable CRD, issue GET DATA
 //     tag 0x66 to fetch CRD explicitly.
-//  4. If parsed CRD has Card Identification Scheme OID
-//     1.2.840.114283.3 (Yubico's signature — see fixture in
-//     cardrecognition's RetailYubiKey5 test), return YubiKey().
-//  5. Otherwise return Standard().
+//  4. Classify the CRD via classifyByCRD. yubikey-sd requires
+//     the GP-standard Card_IDS OID, absence of CardChipDetailsOID,
+//     and SCP11 in the advertised SCPs list. Anything else
+//     classifies as standard-sd. Detection signals and rationale
+//     are documented on classifyByCRD.
 //
 // Auto-detect never silently selects YubiKey for a card that did
-// not identify as one. A card that returns 9000 to SELECT but
-// emits no CRD, or emits CRD without a Card Identification Scheme
-// arc, drops through to Standard rather than guessing.
+// not match every signal. A card that returns 9000 to SELECT but
+// emits no CRD, emits CRD without the GP-standard Card_IDS OID,
+// emits CRD that explicitly tags a non-YubiKey chip platform, or
+// emits CRD without SCP11 advertised, drops through to Standard
+// rather than guessing.
 //
-// The previous probe implementation queried GET DATA tag 0x5FC109
+// The first probe implementation queried GET DATA tag 0x5FC109
 // against the SD applet expecting the YubiKey firmware version
 // object — but that data lives in the PIV applet, not the SD.
 // Probe always returned Standard regardless of card. Hardware
-// verification against a YubiKey 5.7.4 surfaced the bug; this
-// implementation uses the CRD which is reliably available off
-// the SD applet.
+// verification against a YubiKey 5.7.4 surfaced the bug; the
+// CRD-based detection replaced it. The CRD detection itself was
+// then tightened after a SafeNet eToken Fusion was observed
+// emitting the same Card_IDS OID as YubiKey, which the original
+// CRD detection treated as the YubiKey signature.
 //
 // Pass nil for sdAID to use the GP-default ISD AID. Pass a
 // vendor- or deployment-specific AID for cards with a non-default
@@ -177,18 +187,99 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 		}
 	}
 
-	// Step 4: classify on Card Identification Scheme OID. The
-	// signature is the bare GP RID + arc 3 (1.2.840.114283.3)
-	// with no further qualifier — that exact OID is what every
-	// captured YubiKey 5.7+ has emitted to date.
-	if out.CardInfo != nil &&
-		out.CardInfo.CardIdentificationOID.Equal(yubikeyCardIdentificationOID) {
-		out.Profile = YubiKey()
-		return out, nil
-	}
-
-	// Step 5: anything else — no CRD, CRD without Card ID OID,
-	// or CRD naming a different vendor — drops to Standard.
-	out.Profile = Standard()
+	// Step 4: classify on Card Recognition Data signals.
+	// classifyByCRD encapsulates the YubiKey detection logic so
+	// it can be shared with cmd/scpctl/cmd_probe (which already
+	// has CRD in hand from its own SELECT + GET DATA work and
+	// would otherwise duplicate the round trips of calling Probe
+	// here).
+	out.Profile = classifyByCRD(out.CardInfo)
 	return out, nil
+}
+
+// classifyByCRD returns the profile that best matches the given
+// Card Recognition Data. Used by Probe (which fetches CRD via
+// SELECT + GET DATA) and by cmd/scpctl/cmd_probe via the exported
+// ClassifyByCRD wrapper (which already has CRD in hand and avoids
+// the redundant round trip).
+//
+// Detection signals — all must hold for yubikey-sd:
+//
+//   - CardIdentificationOID is the GP-standard Card_IDS OID
+//     1.2.840.114283.3. Every GP-conformant card emits this; its
+//     absence indicates the card emitted no parseable CRD or
+//     malformed CRD, and the detection cannot proceed.
+//
+//   - CardChipDetailsOID is absent. Cards that explicitly tag
+//     their chip platform (SafeNet eToken Fusion emits the
+//     JavaCard v3 OID 1.3.6.1.4.1.42.2.110.1.3 here; other
+//     vendors emit other arcs) are not YubiKey. YubiKey 5.7
+//     CRD does not include a CardChipDetailsOID, and absent-vs-
+//     present is the cleanest signal for distinguishing
+//     YubiKey from explicit-chip-tagging cards observed to date.
+//
+//   - SCPs advertises SCP11. YubiKey 5.7+ advertises both SCP03
+//     (i=0x60) and SCP11 (i=0x0D86); SafeNet eToken Fusion
+//     advertises SCP03 (i=0x10) only, and other observed non-
+//     YubiKey cards advertise either SCP03 alone or SCP02. SCP11
+//     being advertised is necessary but not sufficient for
+//     yubikey-sd; combined with the absence of CardChipDetailsOID
+//     it's a strong narrow.
+//
+// All other CardInfo states classify as standard-sd. Auto-detect
+// never returns YubiKey for a card that did not match every
+// signal — false-positive on classification is worse than false-
+// negative because it gates vendor-extension instructions
+// (GENERATE EC KEY 0xF1 etc.) the standard surface lacks.
+//
+// History: the previous implementation matched only on
+// CardIdentificationOID == 1.2.840.114283.3 and misclassified any
+// GP-conformant card as YubiKey. The signal set was tightened
+// after a SafeNet eToken Fusion emitted the same identification
+// OID and surfaced the bug.
+func classifyByCRD(info *cardrecognition.CardInfo) Profile {
+	if info == nil {
+		return Standard()
+	}
+	if !info.CardIdentificationOID.Equal(gpStandardCardIdentificationOID) {
+		return Standard()
+	}
+	if len(info.CardChipDetailsOID) > 0 {
+		// Explicit chip-platform tag — observed on JavaCard v3
+		// cards (SafeNet eToken Fusion). YubiKey 5.7 doesn't
+		// emit this tag.
+		return Standard()
+	}
+	if !advertisesSCP11(info.SCPs) {
+		// YubiKey 5.7+ advertises both SCP03 and SCP11.
+		// SafeNet, SCP02-only cards, and SCP03-only non-
+		// YubiKey cards lack the SCP11 advertisement.
+		return Standard()
+	}
+	return YubiKey()
+}
+
+// advertisesSCP11 returns true when any SCPInfo in the slice
+// declares SCP11 (version byte 0x11). The check is on the version
+// arc, not a specific i parameter, because YubiKey firmware
+// versions and future verified profiles may differ in i and we
+// want the narrowing signal stable across YubiKey hardware
+// revisions without having to enumerate every shipping i.
+func advertisesSCP11(scps []cardrecognition.SCPInfo) bool {
+	for _, s := range scps {
+		if s.Version == 0x11 {
+			return true
+		}
+	}
+	return false
+}
+
+// ClassifyByCRD is the exported wrapper around classifyByCRD for
+// callers that already have parsed CRD (notably cmd/scpctl/cmd_probe)
+// and want to avoid Probe's redundant SELECT + GET DATA. The
+// classification rules are documented on classifyByCRD; this
+// wrapper exists only so the unexported helper can stay as the
+// single source of truth.
+func ClassifyByCRD(info *cardrecognition.CardInfo) Profile {
+	return classifyByCRD(info)
 }

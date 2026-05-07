@@ -886,22 +886,28 @@ func (c *Card) doGetData(cmd *apdu.Command, underSM bool) (*apdu.Response, error
 // the test fixture used elsewhere in the repo. See GP Card Spec
 // §H.2 for the structure.
 //
-// Includes the YubiKey-signature Card Identification Scheme OID
-// (tag 0x63 = 1.2.840.114283.3) so securitydomain/profile.Probe
-// classifies the mock as yubikey-sd. The probe checks this OID
-// in CRD; previously the probe used a separate GET DATA path
-// against the firmware version object and the OID wasn't needed.
+// Matches the byte-exact CRD captured from a retail YubiKey 5.7.4
+// (also pinned in cardrecognition's TestParse_RetailYubiKey5_BothSCPs):
+// GP version 2.3.1, Card Identification Scheme OID 1.2.840.114283.3,
+// SCP03 with i=0x60, and SCP11 with i=0x0D86. The SCP11 entry is
+// load-bearing: securitydomain/profile.classifyByCRD requires SCP11
+// in the SCPs list to classify as yubikey-sd (the Card_IDS OID alone
+// is the GP-standard identifier and is also emitted by non-YubiKey
+// GP cards like the SafeNet eToken Fusion). Without SCP11 the mock
+// would classify as standard-sd and YubiKey-only extensions
+// (GENERATE EC KEY 0xF1, allowlists) would fail the profile gate.
 //
 // Length math: inner children = GP RID (9) + GP version (14) +
-// card-id OID (11) + SCP03 (13) = 47 = 0x2F. Wrapped tag 0x73 ->
-// 49 bytes. Wrapped tag 0x66 -> 51 bytes total.
+// card-id OID (11) + SCP03 (13) + SCP11 (14) = 61 = 0x3D. Wrapped
+// tag 0x73 -> 63 bytes. Wrapped tag 0x66 -> 65 bytes total.
 var syntheticCRD = []byte{
-	0x66, 0x31,
-	0x73, 0x2F,
+	0x66, 0x3F,
+	0x73, 0x3D,
 	0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x01,
 	0x60, 0x0C, 0x06, 0x0A, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x02, 0x02, 0x03, 0x01,
 	0x63, 0x09, 0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x03,
-	0x64, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x03, 0x65,
+	0x64, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x03, 0x60,
+	0x64, 0x0C, 0x06, 0x0A, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x11, 0x9B, 0x06,
 }
 
 // syntheticKeyInfo is a minimal Key Information Template returned
