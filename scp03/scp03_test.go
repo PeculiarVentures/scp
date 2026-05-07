@@ -479,7 +479,126 @@ func TestSCP03_Transmit_LongPayloadIsWrapThenChain(t *testing.T) {
 		if len(c.Data) != wantSizes[i] {
 			t.Errorf("chunk %d: data size = %d, want %d", i, len(c.Data), wantSizes[i])
 		}
+		// Each chunk must use SHORT encoding (Lc = single byte).
+		// Extended-length encoding (Lc = 0x00 followed by 2-byte
+		// length) on a chunk would mean the host tried to use
+		// extended-length on top of chaining — that's the
+		// non-YubiKey-compatible path. YubiKey 5.7 rejects
+		// extended-length APDUs on the SD channel; the only
+		// path that works is short-Lc + ISO command chaining.
+		if c.ExtendedLength {
+			t.Errorf("chunk %d: ExtendedLength = true; chunked transport must use SHORT-Lc encoding "+
+				"(extended-length on a chained command is the regression that breaks YubiKey 5.7+)", i)
+		}
 	}
+}
+
+// TestSCP03_Transmit_LongPayload_RejectsExtendedLengthOnWire is a
+// finer-grained companion to LongPayloadIsWrapThenChain: scan the
+// raw wire bytes of every chunk and assert NONE uses extended-
+// length encoding (Lc = 0x00 followed by 2-byte length). Catches
+// a regression where some future refactor sets ExtendedLength on
+// the per-chunk Command and the SCP03 layer doesn't strip it.
+//
+// Per ISO 7816-4 §5.1 + the YubiKey-compat constraint the
+// reviewer flagged: the YubiKey-compatible large-APDU path is
+// short-Lc + CLA chaining. Extended-length APDUs are NOT
+// supported on the YubiKey SD channel; using them would silently
+// fail interop on retail hardware while passing on simulators
+// that accept both encodings.
+func TestSCP03_Transmit_LongPayload_RejectsExtendedLengthOnWire(t *testing.T) {
+	card := NewMockCard(DefaultKeys)
+	ctx := context.Background()
+
+	// Use a transport that captures the raw bytes the host
+	// sends, not the post-decoded *apdu.Command shape. The
+	// raw bytes are what would actually go on the wire to
+	// the card; a regression that builds an extended-length
+	// APDU and then short-Lc-wraps it would still set
+	// ExtendedLength=false in the Command struct, but the
+	// raw bytes would tell the truth.
+	rt := &rawRecordingTransport{inner: card.Transport()}
+
+	sess, err := Open(ctx, rt, &Config{
+		Keys:          DefaultKeys,
+		SecurityLevel: channel.LevelFull,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sess.Close()
+	rt.raw = nil // drop handshake bytes
+
+	payload := make([]byte, 600)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	resp, err := sess.Transmit(ctx, &apdu.Command{
+		CLA: 0x80, INS: 0xE2, P1: 0x90, P2: 0x00,
+		Data: payload, Le: -1,
+	})
+	if err != nil {
+		t.Fatalf("Transmit: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("expected SW=9000, got %04X", resp.StatusWord())
+	}
+
+	if len(rt.raw) == 0 {
+		t.Fatal("no APDUs recorded")
+	}
+
+	// Walk each captured raw APDU. Extended-length form is
+	// CLA INS P1 P2 0x00 LcHi LcLo Data... [Le0 LeHi LeLo].
+	// Short-Lc form is CLA INS P1 P2 Lc Data... [Le].
+	// The discriminator is the byte at offset 4: 0x00 with
+	// at least 7 total bytes means extended-length.
+	for i, raw := range rt.raw {
+		if len(raw) < 5 {
+			t.Errorf("APDU %d: too short to validate (%d bytes)", i, len(raw))
+			continue
+		}
+		// Extended-length signature: byte 4 == 0 and total
+		// length is large enough that it can't be a no-data
+		// APDU with Le=0 (which would be 5 bytes total).
+		if raw[4] == 0x00 && len(raw) > 5 {
+			t.Errorf("APDU %d: byte 4 == 0x00 with %d total bytes — this is extended-length encoding. "+
+				"YubiKey-compatible chunked APDUs MUST use short-Lc; extended-length is the "+
+				"regression that breaks interop on retail YubiKey 5.7+",
+				i, len(raw))
+		}
+	}
+}
+
+// rawRecordingTransport captures the raw wire bytes of every
+// command sent through it, plus the inner transport's response.
+// Used for tests that need to assert on encoding-level details
+// (extended-length vs short-Lc, exact byte layout) that the
+// *apdu.Command Go struct hides.
+type rawRecordingTransport struct {
+	inner transport.Transport
+	raw   [][]byte
+}
+
+func (r *rawRecordingTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	encoded, err := cmd.Encode()
+	if err != nil {
+		return nil, err
+	}
+	r.raw = append(r.raw, append([]byte(nil), encoded...))
+	return r.inner.Transmit(ctx, cmd)
+}
+
+func (r *rawRecordingTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
+	r.raw = append(r.raw, append([]byte(nil), raw...))
+	return r.inner.TransmitRaw(ctx, raw)
+}
+
+func (r *rawRecordingTransport) Close() error { return r.inner.Close() }
+
+func (r *rawRecordingTransport) TrustBoundary() transport.TrustBoundary {
+	return r.inner.TrustBoundary()
 }
 
 // TestOpen_DoesNotMutateCallerConfig confirms scp03.Open shallow-
