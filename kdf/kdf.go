@@ -4,26 +4,47 @@
 // # SCP11
 //
 // SCP11 derives all session-key material in a single X9.63 KDF pass
-// over the concatenated ECDH shared secret(s):
+// over the concatenated ECDH shared secret(s). Within this library
+// the derivation input is the same shape for all three SCP11
+// variants:
 //
-//   - SCP11a/c: Z = ShSee || ShSes (the ephemeral-ephemeral and
-//     ephemeral-static shared secrets, concatenated)
-//   - SCP11b: Z = ShSee
+//   - SCP11a/c: Z = ShSee || ShSes, where ShSee is the
+//     ephemeral-ephemeral ECDH between the OCE ephemeral key and the
+//     SD ephemeral public key, and ShSes is the ephemeral-static
+//     ECDH between the OCE static private key (CERT.OCE.ECKA) and
+//     the SD static public key (PK.SD.ECKA).
+//
+//   - SCP11b: Z = ShSee || ShSes, where ShSee is the
+//     ephemeral-ephemeral ECDH and ShSes is computed by reusing the
+//     OCE ephemeral private key against PK.SD.ECKA. SCP11b has no
+//     OCE static key, so the ephemeral key serves both ECDH terms.
+//
+// The SCP11b derivation above deviates from a strict reading of GP
+// Amendment F that can be read to specify Z = ShSee for SCP11b
+// (single ECDH). The implementation here is the byte-exact-validated
+// interop point against the SCP11b implementations this library
+// targets (Yubico yubikit and the YubiKey hardware profile). A
+// future verified profile against a card that implements the
+// strict-spec single-ECDH SCP11b reading would need a configurable
+// mode here; today's behavior is pinned by
+// TestSCP11bDerivationIncludesStaticECDH so a future "cleanup" that
+// strips the second term will fail loudly instead of silently
+// breaking interop.
 //
 // The KDF outputs 80 bytes that are sliced into five 16-byte AES-128
 // keys in fixed order: receipt key (used for SCP11a/c key
 // confirmation), S-ENC, S-MAC, S-RMAC, DEK. The MAC chaining value
 // is initialized to all zeros at session establishment.
 //
-// This single-stage layout matches the GP Amendment F YubiKey-
-// compatible full-security profile and is byte-exact against Samsung
-// OpenSCP-Java SCP11a/P-256/AES-128/S8 reference vectors.
+// This single-stage layout is byte-exact against Samsung
+// OpenSCP-Java SCP11a/P-256/AES-128/S8 reference vectors and
+// against the YubiKey hardware profile.
 //
 // GP Amendment F also describes a two-stage variant where X9.63
 // derives a master key and NIST SP 800-108 in counter mode (with
 // AES-CMAC) derives the individual session keys. This package does
-// NOT implement that two-stage variant — it is not used by the
-// YubiKey profile this library targets.
+// NOT implement that two-stage variant; it is not used by the
+// reference profiles this library validates against.
 //
 // SCP11 entry points: X963KDF, DeriveSessionKeysFromSharedSecrets,
 // ComputeReceipt, VerifyReceipt.
@@ -141,21 +162,37 @@ func X963KDF(sharedSecret []byte, sharedInfo []byte, keyLen int) ([]byte, error)
 	return derived[:keyLen], nil
 }
 
-// DeriveSessionKeysFromSharedSecrets performs the full SCP11 key derivation.
+// DeriveSessionKeysFromSharedSecrets performs the full SCP11 key
+// derivation.
 //
-// For SCP11b (single ECDH):
-//   - shSee: ECDH(ePK.OCE, eSK.SD) — ephemeral-ephemeral shared secret
-//   - shSes: ECDH(ePK.OCE, SK.SD)  — ephemeral-static shared secret
-//   - Both are derived using the OCE ephemeral private key
+// Inputs:
 //
-// The combined hash input is: ShSee || ShSes || counter(4B) || sharedInfo
-// The hash input is: Z || counter(4B) || sharedInfo
+//   - shSee: ECDH(eSK.OCE, ePK.SD), the ephemeral-ephemeral shared
+//     secret. Required (zero-length is rejected).
 //
-// GP SCP11 §3.1.2: SharedInfo = keyUsage || keyType || keyLength
-// Optionally followed by: len(hostID) || hostID || len(cardGroupID) || cardGroupID
+//   - shSes: ECDH(SK.OCE or eSK.OCE, PK.SD), the ephemeral-static
+//     shared secret. May be nil for callers using a derivation
+//     without a second ECDH term, but no SCP11 variant in this
+//     library calls that path: SCP11a/c supply ShSes via the OCE
+//     static key, SCP11b supplies ShSes by reusing the OCE
+//     ephemeral key against the SD static public key. See package
+//     comment for the rationale and TestSCP11bDerivationIncludesStaticECDH
+//     for the regression that pins the SCP11b case.
+//
+//   - hostID, cardGroupID: optional SharedInfo extension fields,
+//     each up to 255 bytes (1-byte length prefix per GP §3.1.2).
+//
+// The combined hash input is:
+//
+//	Z = ShSee || ShSes
+//	X9.63 input per iteration = Z || counter(4B) || sharedInfo
+//	sharedInfo = keyUsage || keyType || keyLength
+//	             [|| len(hostID) || hostID]
+//	             [|| len(cardGroupID) || cardGroupID]
 //
 // Returns 5 keys × 16 bytes = 80 bytes total:
-//   - Receipt key (16B), S-ENC (16B), S-MAC (16B), S-RMAC (16B), DEK (16B)
+//
+//	Receipt key (16B), S-ENC (16B), S-MAC (16B), S-RMAC (16B), DEK (16B)
 func DeriveSessionKeysFromSharedSecrets(shSee, shSes []byte, hostID, cardGroupID []byte) (*SessionKeys, error) {
 	if len(shSee) == 0 {
 		return nil, errors.New("ShSee cannot be empty")
