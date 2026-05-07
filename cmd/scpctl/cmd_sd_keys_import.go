@@ -48,6 +48,19 @@ type sdKeysImportData struct {
 	SPKIFingerprintSHA256 string `json:"spki_fingerprint_sha256,omitempty"`
 	CertCount             int    `json:"cert_count,omitempty"`
 
+	// SCP03-only Key Check Values. Populated by the SCP03 import
+	// path after PutSCP03Key returns successfully — the library
+	// raises ErrChecksum on response mismatch, so reaching the
+	// JSON emit means card and host agree on these values. They
+	// are computed host-side from the imported key bytes (KCV =
+	// AES-CBC(key, IV=0x00*16, data=0x01*16)[:3]) and rendered
+	// uppercase hex for cross-tool compatibility (yubikit-python
+	// and the C# SDK use the same encoding). Empty on non-SCP03
+	// imports and on dry-run.
+	KCVENC string `json:"kcv_enc,omitempty"`
+	KCVMAC string `json:"kcv_mac,omitempty"`
+	KCVDEK string `json:"kcv_dek,omitempty"`
+
 	// ca-trust-anchor-only fields (Phase 5c). SKIHex is the SKI
 	// being registered against the public key reference; SKIOrigin
 	// records how it was derived: "cert-extension" (cert had a

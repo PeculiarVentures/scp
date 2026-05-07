@@ -737,6 +737,21 @@ func parseAllowlist(data []byte) ([]*big.Int, error) {
 
 // --- Cryptographic helpers ---
 
+// ComputeAESKCV is the public form of the package-internal
+// computeAESKCV. Returns the 3-byte SCP03 Key Check Value for a
+// 16-byte AES-128 key, or nil if the input is not exactly 16
+// bytes. Operator surface: scpctl emits these in JSON during
+// `sd keys import` so deployment audit logs capture the on-card
+// commitment shape (which the library has already verified
+// matches by raising ErrChecksum on PUT KEY response mismatch).
+//
+// KCV definition: AES-CBC(key, IV=0x00*16, data=0x01*16)[:3].
+// This matches yubikit-python (_DEFAULT_KCV_IV) and the C# SDK
+// (kvcZeroIv + kcvInput.Fill(1)) byte-for-byte.
+func ComputeAESKCV(key []byte) []byte {
+	return computeAESKCV(key)
+}
+
 // computeAESKCV computes the Key Check Value for an AES key.
 // KCV = AES-CBC(key, IV=0x00*16, data=0x01*16)[:3]
 //

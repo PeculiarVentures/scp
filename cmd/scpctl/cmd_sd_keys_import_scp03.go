@@ -202,14 +202,26 @@ func cmdSDKeysImportSCP03(ctx context.Context, env *runEnv, args []string) error
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd keys import: %w", err)
 	}
-	// PUT KEY's response carries per-component KCVs. Library
+	// PUT KEY's response carries per-component KCVs. The library
 	// verifies them against the host-side computation and returns
-	// ErrChecksum on mismatch — so reaching this line means the
-	// card's commitment matches what we asked for. The KCVs aren't
-	// surfaced in JSON yet (the helper is package-internal); a
-	// follow-up commit can export it and add data.kcv_enc/mac/dek
-	// without breaking the existing schema.
-	report.Pass(checkName, "card commitment verified (KCVs match)")
+	// ErrChecksum on mismatch, so reaching this line means the
+	// card's commitment matches the host's expectation.
+	//
+	// We surface those KCVs in JSON so the operator's deployment
+	// audit log captures the on-card commitment shape. The values
+	// are computed host-side from the key bytes (the library has
+	// already proven the card sees the same bytes), keeping the
+	// JSON emit deterministic from the input flags.
+	kcvENC := securitydomain.ComputeAESKCV(enc)
+	kcvMAC := securitydomain.ComputeAESKCV(mac)
+	kcvDEK := securitydomain.ComputeAESKCV(dek)
+	data.KCVENC = fmt.Sprintf("%X", kcvENC)
+	data.KCVMAC = fmt.Sprintf("%X", kcvMAC)
+	data.KCVDEK = fmt.Sprintf("%X", kcvDEK)
+
+	report.Pass(checkName, fmt.Sprintf(
+		"card commitment verified (KCVs: ENC=%X MAC=%X DEK=%X)",
+		kcvENC, kcvMAC, kcvDEK))
 
 	if err := report.Emit(env.out, *jsonMode); err != nil {
 		return err
