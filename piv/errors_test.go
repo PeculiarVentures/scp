@@ -48,9 +48,9 @@ func TestStatusWord(t *testing.T) {
 
 func TestRetriesRemaining(t *testing.T) {
 	cases := []struct {
-		sw       uint16
-		want     int
-		wantOK   bool
+		sw     uint16
+		want   int
+		wantOK bool
 	}{
 		{0x63C0, 0, true},
 		{0x63C1, 1, true},

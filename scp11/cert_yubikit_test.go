@@ -79,8 +79,8 @@ func TestDerCertList_RejectsNonSequence(t *testing.T) {
 	cases := [][]byte{
 		nil,
 		{},
-		{0x04, 0x41, 0x00},     // looks like an EC point header
-		{0x7F, 0x21, 0x05},     // GP 7F21 cert wrapper, not a SEQUENCE
+		{0x04, 0x41, 0x00}, // looks like an EC point header
+		{0x7F, 0x21, 0x05}, // GP 7F21 cert wrapper, not a SEQUENCE
 		{0xBF, 0x21, 0x10, 0x30, 0x82, 0x00, 0x00}, // BF21-wrapped, not bare
 	}
 	for i, c := range cases {

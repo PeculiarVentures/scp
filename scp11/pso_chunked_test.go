@@ -59,13 +59,13 @@ func mkCertOfSize(t *testing.T, targetSize int) *x509.Certificate {
 		t.Fatalf("gen signer key: %v", err)
 	}
 	signerTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "scp11 chunk-test signer"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "scp11 chunk-test signer"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
 		BasicConstraintsValid: true,
-		KeyUsage:     x509.KeyUsageCertSign,
+		KeyUsage:              x509.KeyUsageCertSign,
 	}
 	signerDER, err := x509.CreateCertificate(rand.Reader, signerTmpl, signerTmpl, &signerKey.PublicKey, signerKey)
 	if err != nil {

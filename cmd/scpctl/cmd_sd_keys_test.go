@@ -801,13 +801,13 @@ func uint16Hex(v uint16) string {
 // would silently mislabel non-YubiKey cards. This test pins the
 // contract by:
 //
-//   1. Forcing --profile standard-sd (no probing).
-//   2. Advertising KIDs 0x11, 0x13, 0x15 plus an unknown KID 0x42.
-//   3. Asserting kind labels on the SCP11 slots are "scp11-sd"
-//      (no variant), kind on the unknown KID is "unknown".
-//   4. Asserting kid/kvn/kid_hex/kvn_hex/components are populated
-//      regardless of kind label, so a downstream consumer can
-//      always reconstruct what the card actually said.
+//  1. Forcing --profile standard-sd (no probing).
+//  2. Advertising KIDs 0x11, 0x13, 0x15 plus an unknown KID 0x42.
+//  3. Asserting kind labels on the SCP11 slots are "scp11-sd"
+//     (no variant), kind on the unknown KID is "unknown".
+//  4. Asserting kid/kvn/kid_hex/kvn_hex/components are populated
+//     regardless of kind label, so a downstream consumer can
+//     always reconstruct what the card actually said.
 func TestSDKeysList_StandardSD_RawAndKindBoth(t *testing.T) {
 	mc, err := mockcard.New()
 	if err != nil {

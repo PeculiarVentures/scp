@@ -226,8 +226,10 @@ func (c *chainTransport) TransmitRaw(_ context.Context, raw []byte) ([]byte, err
 	return resp, nil
 }
 
-func (c *chainTransport) Close() error                            { return nil }
-func (c *chainTransport) TrustBoundary() transport.TrustBoundary  { return transport.TrustBoundaryUnknown }
+func (c *chainTransport) Close() error { return nil }
+func (c *chainTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
 
 // runawayTransport always returns SW=6101 with one body byte. Used
 // to verify the chain has a finite ceiling.
@@ -245,8 +247,10 @@ func (r *runawayTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, err
 	return []byte{0xAA, 0x61, 0x01}, nil
 }
 
-func (r *runawayTransport) Close() error                           { return nil }
-func (r *runawayTransport) TrustBoundary() transport.TrustBoundary { return transport.TrustBoundaryUnknown }
+func (r *runawayTransport) Close() error { return nil }
+func (r *runawayTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
 
 // isGetResponse reports whether the encoded APDU is INS=0xC0 (GET
 // RESPONSE). CLA, P1, P2 are checked too; production GET RESPONSE
