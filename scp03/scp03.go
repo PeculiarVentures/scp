@@ -328,9 +328,17 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 		// thing being tested. See InitializeUpdateError doc for the
 		// distinction from CryptogramMismatchError.
 		diag, retry := classifyInitUpdateSW(resp.SW1, resp.SW2)
+		var aid []byte
+		if len(cfg.SelectAID) > 0 {
+			aid = append([]byte(nil), cfg.SelectAID...)
+		}
 		return nil, &InitializeUpdateError{
 			SW1:                resp.SW1,
 			SW2:                resp.SW2,
+			KeyVersion:         cfg.KeyVersion,
+			KeyIdentifier:      0x00, // SCP03 IU uses P2=0x00 in scp03.Open
+			AID:                aid,
+			SCP:                "SCP03",
 			Diagnostic:         diag,
 			RetryDifferentKeys: retry,
 		}

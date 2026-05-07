@@ -85,16 +85,30 @@ var (
 // types stops an operator from cycling more keys at a card that
 // isn't even getting far enough to test them.
 //
+// # Attempt context
+//
+// The KeyVersion, KeyIdentifier, AID, and SCP fields preserve the
+// context of the failed attempt so a caller iterating over key
+// versions or P2 values (as is common when probing a card whose
+// installed key references aren't fully known) can log what was
+// tried without tracking it externally. AID is populated only
+// when scp03.Open did the SELECT itself via Config.SelectAID;
+// when the caller did SELECT before calling Open, AID is empty.
+//
+// # Diagnostic interpretation
+//
 // The Diagnostic field carries a human-readable interpretation of
 // the SW based on common GP responses. SW=0x6982 ("Security status
 // not satisfied") and SW=0x6985 ("Conditions of use not satisfied")
-// both indicate the card blocked SCP03 establishment at the policy
-// level, often because the SD lifecycle is locked, the card
-// requires a vendor-specific precondition (e.g. a SAC-mediated
-// handshake before host SCP03 is allowed), or a previous failed
-// auth transitioned the SD to a blocking state. SW=0x6A88
-// ("Referenced data not found") indicates the requested key
-// version wasn't installed; that one might benefit from a
+// both indicate the card refused SCP03 establishment before any
+// cryptographic verification. The cause is consistent with the SD
+// being in a locked or vendor-managed state, with a missing vendor
+// precondition (e.g. a SAC-mediated handshake before host SCP03 is
+// allowed), or with policy-blocked INITIALIZE UPDATE; without a
+// lifecycle/status read confirming which, the diagnostic stops at
+// "consistent with" rather than naming a single cause as proven.
+// SW=0x6A88 ("Referenced data not found") indicates the requested
+// key version wasn't installed; that one might benefit from a
 // different KeyVersion value.
 //
 // The RetryDifferentKeys field flags whether trying different key
@@ -109,13 +123,39 @@ var (
 //
 //	var iue *scp03.InitializeUpdateError
 //	if errors.As(err, &iue) {
-//	    log.Printf("SW=%04X (%s) retry-keys=%v",
-//	        iue.SW(), iue.Diagnostic, iue.RetryDifferentKeys)
+//	    log.Printf("SW=%04X (%s) attempt KV=%02X P2=%02X retry-keys=%v",
+//	        iue.SW(), iue.Diagnostic,
+//	        iue.KeyVersion, iue.KeyIdentifier, iue.RetryDifferentKeys)
 //	}
 type InitializeUpdateError struct {
 	// SW1 and SW2 are the two status word bytes the card returned
 	// in response to INITIALIZE UPDATE.
 	SW1, SW2 byte
+
+	// KeyVersion is the value sent in P1 of the INITIALIZE UPDATE
+	// APDU (the SCP03 key version requested). Preserved so callers
+	// iterating across versions can log what was tried.
+	KeyVersion byte
+
+	// KeyIdentifier is the value sent in P2 of the INITIALIZE
+	// UPDATE APDU. For SCP03 the spec defines P2=0x00 normally; in
+	// practice some hosts vary P2 across 0x00, 0x01, 0x02 when
+	// probing what a card accepts. Preserved for the same reason
+	// as KeyVersion.
+	KeyIdentifier byte
+
+	// AID is the Application Identifier of the SD that was
+	// SELECTed before INITIALIZE UPDATE, when scp03.Open did the
+	// SELECT itself via Config.SelectAID. Empty when the caller
+	// did SELECT externally and Open just did INITIALIZE UPDATE
+	// against the already-selected applet.
+	AID []byte
+
+	// SCP names the secure channel protocol that was being
+	// established. Always "SCP03" for errors from this package;
+	// included for symmetry with caller-side logging that may
+	// also handle SCP11 errors.
+	SCP string
 
 	// Diagnostic is a human-readable interpretation of the SW. For
 	// known SWs (6982, 6985, 6A88, 63Cx) this names the GP-spec
@@ -137,23 +177,49 @@ func (e *InitializeUpdateError) SW() uint16 {
 	return uint16(e.SW1)<<8 | uint16(e.SW2)
 }
 
-// Error renders the SW and the diagnostic interpretation, plus an
-// explicit "not a key problem" line for SWs where retrying keys
-// won't help. The shape is designed to be log-readable alongside
-// the cryptogram diagnostic shipped by CryptogramMismatchError.
+// Error renders the SW, the attempt context (KeyVersion and P2 if
+// non-zero, AID if known), and the diagnostic interpretation. The
+// shape is designed to be log-readable alongside the cryptogram
+// diagnostic shipped by CryptogramMismatchError. SWs where
+// retrying with different keys won't help carry an explicit "not a
+// key problem" line so the operator's next step is investigating
+// state rather than cycling keys.
 func (e *InitializeUpdateError) Error() string {
+	context := e.formatAttemptContext()
 	if e.RetryDifferentKeys {
 		return fmt.Sprintf(
-			"scp03: INITIALIZE UPDATE rejected (SW=%04X, %s)",
-			e.SW(), e.Diagnostic,
+			"scp03: INITIALIZE UPDATE rejected (SW=%04X%s, %s)",
+			e.SW(), context, e.Diagnostic,
 		)
 	}
 	return fmt.Sprintf(
 		"scp03: INITIALIZE UPDATE rejected before key material was tested "+
-			"(SW=%04X, %s); retrying with different keys will not help. "+
+			"(SW=%04X%s, %s); retrying with different keys will not help. "+
 			"Investigate SD lifecycle, card state, or vendor preconditions",
-		e.SW(), e.Diagnostic,
+		e.SW(), context, e.Diagnostic,
 	)
+}
+
+// formatAttemptContext renders the attempt context fields (KV, P2,
+// AID) as a comma-separated suffix when any of them is populated.
+// Returns empty string when no context is available, so cards that
+// pre-select the AID externally and use the default P1/P2 values
+// don't get a noisy "KV=00 P2=00 AID=" suffix on every error.
+func (e *InitializeUpdateError) formatAttemptContext() string {
+	parts := []string{}
+	// KeyVersion is informative even when zero (some cards accept
+	// KV=0x00 as "any version"); the cleaner heuristic is to
+	// always include it when the error was constructed via
+	// scp03.Open (which always sets it from cfg.KeyVersion).
+	parts = append(parts, fmt.Sprintf("KV=%02X", e.KeyVersion))
+	parts = append(parts, fmt.Sprintf("P2=%02X", e.KeyIdentifier))
+	if len(e.AID) > 0 {
+		parts = append(parts, fmt.Sprintf("AID=%X", e.AID))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(parts, " ")
 }
 
 // Is reports whether target is ErrAuthFailed, so callers using
@@ -175,15 +241,18 @@ func classifyInitUpdateSW(sw1, sw2 byte) (diagnostic string, retry bool) {
 	sw := uint16(sw1)<<8 | uint16(sw2)
 	switch sw {
 	case 0x6982:
-		return "Security status not satisfied. SD lifecycle blocks " +
-			"SCP03 establishment, or a previous failed auth " +
-			"transitioned the SD to a locked/blocking state, or the " +
-			"card requires a vendor-specific precondition (SAC handshake, " +
-			"middleware-mediated session, etc.) before host-initiated SCP03", false
+		return "Security status not satisfied. SCP03 establishment was " +
+			"refused before cryptographic verification, so key material " +
+			"was not tested. Consistent with locked/vendor-managed SD, " +
+			"missing vendor precondition (SAC handshake, middleware-mediated " +
+			"session, etc.), lifecycle restriction, or policy-blocked " +
+			"INITIALIZE UPDATE; lifecycle/status read needed to confirm " +
+			"which", false
 	case 0x6985:
-		return "Conditions of use not satisfied. Similar to 6982, " +
-			"the card refused SCP03 establishment based on its own " +
-			"state or policy rather than on the key material", false
+		return "Conditions of use not satisfied. SCP03 establishment was " +
+			"refused before cryptographic verification, so key material " +
+			"was not tested. Similar to 6982; the card based the rejection " +
+			"on its own state or policy rather than on the key material", false
 	case 0x6A82:
 		return "File not found. The SELECTed AID isn't an SCP03 " +
 			"endpoint; check that the right SD AID was selected " +

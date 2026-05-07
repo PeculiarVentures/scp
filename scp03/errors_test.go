@@ -468,3 +468,92 @@ func TestOpen_InitializeUpdate6A88_RetryWithDifferentKVN(t *testing.T) {
 		t.Errorf("Error() should NOT discourage retry for 6A88; got:\n%s", msg)
 	}
 }
+
+// TestInitializeUpdateError_ContextFields confirms the attempt
+// context fields (KeyVersion, KeyIdentifier, AID, SCP) round-trip
+// through scp03.Open and surface in the rendered error message.
+// Operators iterating over key versions or P2 values can recover
+// what was tried via errors.As without tracking it externally,
+// and the rendered message includes the context inline so a
+// single log line carries the full attempt picture.
+func TestInitializeUpdateError_ContextFields(t *testing.T) {
+	card := scp03.NewMockCard(scp03.DefaultKeys)
+	card.ForceInitUpdateSW = 0x6982
+
+	wantAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x18, 0x43, 0x4D, 0x00}
+
+	_, err := scp03.Open(context.Background(), card.Transport(), &scp03.Config{
+		Keys:       scp03.DefaultKeys,
+		KeyVersion: 0xFF,
+		SelectAID:  wantAID,
+	})
+	if err == nil {
+		t.Fatal("expected error; got nil")
+	}
+
+	var iue *scp03.InitializeUpdateError
+	if !errors.As(err, &iue) {
+		t.Fatalf("errors.As should recover *InitializeUpdateError; err = %v", err)
+	}
+
+	if iue.KeyVersion != 0xFF {
+		t.Errorf("KeyVersion = 0x%02X, want 0xFF", iue.KeyVersion)
+	}
+	if iue.KeyIdentifier != 0x00 {
+		t.Errorf("KeyIdentifier = 0x%02X, want 0x00 (SCP03 default for IU)", iue.KeyIdentifier)
+	}
+	if string(iue.AID) != string(wantAID) {
+		t.Errorf("AID = %X, want %X", iue.AID, wantAID)
+	}
+	if iue.SCP != "SCP03" {
+		t.Errorf("SCP = %q, want %q", iue.SCP, "SCP03")
+	}
+
+	// Rendered message should carry KV, P2, and AID inline so log
+	// readers see the attempt context next to the SW.
+	msg := iue.Error()
+	for _, want := range []string{"SW=6982", "KV=FF", "P2=00", "AID=A000000018434D00"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() should contain %q; got:\n%s", want, msg)
+		}
+	}
+}
+
+// TestInitializeUpdateError_ContextFields_NoSelectAID confirms the
+// AID field stays empty (rather than getting populated with garbage)
+// when the caller did SELECT externally and didn't supply a
+// Config.SelectAID. The rendered error then omits the AID= portion
+// of the context suffix rather than rendering "AID=" with empty hex.
+func TestInitializeUpdateError_ContextFields_NoSelectAID(t *testing.T) {
+	card := scp03.NewMockCard(scp03.DefaultKeys)
+	card.ForceInitUpdateSW = 0x6982
+
+	_, err := scp03.Open(context.Background(), card.Transport(), &scp03.Config{
+		Keys:       scp03.DefaultKeys,
+		KeyVersion: 0x01,
+		// No SelectAID; caller did SELECT externally.
+	})
+	if err == nil {
+		t.Fatal("expected error; got nil")
+	}
+
+	var iue *scp03.InitializeUpdateError
+	if !errors.As(err, &iue) {
+		t.Fatalf("errors.As should recover *InitializeUpdateError; err = %v", err)
+	}
+
+	if len(iue.AID) != 0 {
+		t.Errorf("AID should be empty when SelectAID is not configured; got %X", iue.AID)
+	}
+
+	msg := iue.Error()
+	if strings.Contains(msg, "AID=") {
+		t.Errorf("Error() should NOT contain 'AID=' when AID is empty; got:\n%s", msg)
+	}
+	// KV and P2 should still appear since they're always known.
+	for _, want := range []string{"KV=01", "P2=00"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() should still contain %q; got:\n%s", want, msg)
+		}
+	}
+}
