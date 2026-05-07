@@ -98,6 +98,14 @@ func TestSCP11_Transmit_LongPayloadIsWrapThenChain(t *testing.T) {
 		if c.P2 != wantP2 {
 			t.Errorf("chunk %d: P2 = %02X, want %02X (constant across chunks; no app-level block numbering)", i, c.P2, wantP2)
 		}
+		// YubiKey-compatible large-APDU path is short-Lc + ISO
+		// command chaining. Extended-length on a chunk would
+		// silently fail interop on retail hardware while
+		// passing on simulators that accept both encodings.
+		if c.ExtendedLength {
+			t.Errorf("chunk %d: ExtendedLength = true; chunked transport must use SHORT-Lc encoding "+
+				"(extended-length on a chained command is the regression that breaks YubiKey 5.7+)", i)
+		}
 	}
 
 	// Total emitted bytes equal the original wrapped data; chaining
