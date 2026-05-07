@@ -113,8 +113,8 @@ func TestStrictGPConfigs_HaveCorrectShape(t *testing.T) {
 		// data is NOT padded-and-encrypted under the strict-GP reading.
 		// If this assertion fails, the helper has silently lost its
 		// reason to exist.
-		if c.cfg.EmptyDataEncryption != channel.EmptyDataGPLiteral {
-			t.Errorf("%s: EmptyDataEncryption = %v, want EmptyDataGPLiteral",
+		if c.cfg.EmptyDataEncryption != channel.EmptyDataNoOp {
+			t.Errorf("%s: EmptyDataEncryption = %v, want EmptyDataNoOp",
 				c.name, c.cfg.EmptyDataEncryption)
 		}
 	}

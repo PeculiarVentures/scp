@@ -71,35 +71,42 @@ type SecureChannel struct {
 	macSize int
 
 	// EmptyDataEncryption controls whether C-DECRYPTION encrypts an
-	// empty command data field. Two interpretations exist in the wild:
+	// empty command data field. Two interpretations exist in the wild
+	// and real cards ship both:
 	//
-	//   - GP literal (Amendment D §6.2.4): "If data is empty, no
-	//     encryption is performed and Lc remains as in the original
-	//     APDU." Skip encryption, increment counter.
+	//   - EmptyDataPadAndEncrypt: pad empty data per ISO 9797-1
+	//     method 2 (0x80 || 0x00*15) and encrypt as one block. Matches
+	//     YubiKey 5.x and Yubico's yubikit ScpState.encrypt.
 	//
-	//   - Yubico (yubikit's ScpState.encrypt): pad empty data with
-	//     0x80 || 0x00*15 and encrypt as one block.
+	//   - EmptyDataNoOp: skip encryption entirely when data is empty,
+	//     matching a literal reading of GP Amendment D §6.2.4. The
+	//     encryption counter still advances.
 	//
-	// YubiKey expects the Yubico behavior. Other GP cards may expect
-	// the literal behavior. Default is EmptyDataYubico because YubiKey
-	// is this library's primary target; switch to EmptyDataGPLiteral
-	// for other cards or for spec-conformance testing.
+	// The zero value is EmptyDataPadAndEncrypt so callers that don't
+	// set the field get the behavior verified end-to-end against
+	// YubiKey, which is the currently verified card profile. Set
+	// explicitly to EmptyDataNoOp for cards that follow the spec
+	// literally or for spec-conformance testing.
 	EmptyDataEncryption EmptyDataPolicy
 }
 
 // EmptyDataPolicy selects how an empty C-DECRYPTED command data field
-// is handled on the wire.
+// is handled on the wire. The two values describe the two behaviors
+// real GP cards ship; pick the one the target card expects.
 type EmptyDataPolicy int
 
 const (
-	// EmptyDataYubico pads empty data with 0x80 || 0x00*15 and
-	// encrypts. Matches yubikit's ScpState.encrypt.
-	EmptyDataYubico EmptyDataPolicy = iota
+	// EmptyDataPadAndEncrypt pads empty data with 0x80 || 0x00*15
+	// (ISO 9797-1 method 2) and encrypts as one block. Verified
+	// against YubiKey 5.x and matches Yubico's yubikit
+	// ScpState.encrypt. The encryption counter advances by one.
+	EmptyDataPadAndEncrypt EmptyDataPolicy = iota
 
-	// EmptyDataGPLiteral skips encryption when data is empty,
-	// matching a literal reading of GP Amendment D §6.2.4. The
-	// encryption counter still advances.
-	EmptyDataGPLiteral
+	// EmptyDataNoOp skips encryption entirely when data is empty,
+	// matching a literal reading of GP Amendment D §6.2.4: "if data
+	// is empty, no encryption is performed and Lc remains as in the
+	// original APDU." The encryption counter still advances by one.
+	EmptyDataNoOp
 )
 
 // SecurityLevel defines which secure messaging operations to apply.
@@ -176,11 +183,12 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 
 	// Step 1: Encrypt the payload if C-DEC is active.
 	//
-	// Empty-data handling diverges between GP-literal and Yubico — see
-	// the EmptyDataEncryption field doc on SecureChannel. Default
-	// (EmptyDataYubico) pads-and-encrypts so an "empty" command still
-	// has one encrypted block on the wire; that matches yubikit and
-	// the YubiKey-side expectation.
+	// Empty-data handling diverges between EmptyDataPadAndEncrypt and
+	// EmptyDataNoOp; see the EmptyDataEncryption field doc on
+	// SecureChannel. The zero value is EmptyDataPadAndEncrypt so an
+	// "empty" command still has one encrypted block on the wire,
+	// which is what the verified YubiKey profile expects. Cards that
+	// follow GP Amendment D §6.2.4 literally need EmptyDataNoOp.
 	if sc.SecurityLevel&LevelCDEC != 0 {
 		if len(payload) > 0 {
 			encrypted, err := sc.encryptPayload(payload)
@@ -188,13 +196,13 @@ func (sc *SecureChannel) Wrap(cmd *apdu.Command) (*apdu.Command, error) {
 				return nil, fmt.Errorf("encrypt payload: %w", err)
 			}
 			payload = encrypted
-		} else if sc.EmptyDataEncryption == EmptyDataYubico {
-			// Yubico path: pad empty data per ISO 9797-1 method 2
-			// (0x80 || 0x00*15) and encrypt as one block. The
+		} else if sc.EmptyDataEncryption == EmptyDataPadAndEncrypt {
+			// Pad empty data per ISO 9797-1 method 2 (0x80 ||
+			// 0x00*15) and encrypt as one block. The
 			// encryptPayload helper already does exactly that.
 			encrypted, err := sc.encryptPayload(nil)
 			if err != nil {
-				return nil, fmt.Errorf("encrypt empty payload (Yubico mode): %w", err)
+				return nil, fmt.Errorf("encrypt empty payload (pad-and-encrypt mode): %w", err)
 			}
 			payload = encrypted
 		} else {
