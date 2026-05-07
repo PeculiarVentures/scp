@@ -10,17 +10,19 @@ Five `sd keys` verbs plus two `sd allowlist` verbs. Each verb is a single APDU s
 |---|---|---|---|
 | `sd keys list` | read | GET DATA tag E0 (KIT), tag FF33/FF34 (KLOC/KLCC), tag BF21 (cert store) per ref | unauthenticated by default; opt-in SCP03 |
 | `sd keys export` | read | GET DATA tag BF21 | unauthenticated by default; opt-in SCP03 |
-| `sd keys delete` | write | DELETE KEY (INS=E4) | SCP03 required |
-| `sd keys generate` | write | GENERATE EC KEY (INS=F1, Yubico extension) | SCP03 required |
-| `sd keys import` | write | PUT KEY (INS=D8) + optionally STORE DATA (INS=E2) | SCP03 required |
-| `sd allowlist set` | write | STORE DATA tag 70 | SCP03 required |
-| `sd allowlist clear` | write | STORE DATA tag 70 (empty serial list) | SCP03 required |
+| `sd keys delete` | write | DELETE KEY (INS=E4) | SCP03 or SCP11a/c management auth |
+| `sd keys generate` | write | GENERATE EC KEY (INS=F1, Yubico extension) | SCP03 or SCP11a/c management auth |
+| `sd keys import` | write | PUT KEY (INS=D8) + optionally STORE DATA (INS=E2) | SCP03 or SCP11a/c management auth |
+| `sd allowlist set` | write | STORE DATA tag 70 | SCP03 or SCP11a/c; **profile-gated to `yubikey-sd`** |
+| `sd allowlist clear` | write | STORE DATA tag 70 (empty serial list) | SCP03 or SCP11a/c; **profile-gated to `yubikey-sd`** |
 
 The split between read and write is also a safety boundary: read verbs default to unauthenticated and have no `--confirm-*` gate; write verbs are dry-run by default and require explicit confirmation. See [Safety](#safety) below.
 
 ## Authentication
 
-Three modes, controlled by the same `--scp03-*` flag set on every verb:
+Read verbs (`sd keys list`, `sd keys export`) accept three SCP03 modes via `--scp03-*` flags. Write verbs accept the same SCP03 modes plus SCP11a/c management auth via `--scp11-*` flags; the two flag groups are mutually exclusive within one invocation.
+
+### SCP03 modes (read + write)
 
 **Unauthenticated.** No `--scp03-*` flags. Read verbs only — write verbs require auth and will reject this combination at flag-parse time. Whether unauthenticated reads succeed depends on the card; YubiKeys allow CRD (tag 0066) but typically gate KIT (tag 00E0) and the cert store (tag BF21) behind authentication. If a read returns SW=6982 unauthenticated, switch to one of the authenticated modes.
 
@@ -28,7 +30,11 @@ Three modes, controlled by the same `--scp03-*` flag set on every verb:
 
 **Custom triple.** `--scp03-kvn KVN --scp03-enc ENC --scp03-mac MAC --scp03-dek DEK`. All four required. KVN is a hex byte (e.g. `01`, `FE`); ENC, MAC, DEK are hex strings of equal length matching the AES variant (16 bytes for AES-128, 24 for AES-192, 32 for AES-256). Use this after the factory keys have been rotated, or on any non-YubiKey card.
 
-Pick one mode. The flags reject the combination of `--scp03-keys-default` and `--scp03-kvn`.
+Pick one SCP03 mode. The flags reject the combination of `--scp03-keys-default` and `--scp03-kvn`.
+
+### SCP11a/c management auth (write only)
+
+Write verbs additionally accept `--scp11-*` flags to authenticate over SCP11a or SCP11c with an OCE certificate chain. SCP11b is rejected (it has no client authentication). Refer to `scpctl sd allowlist set --help` (or any write verb) for the full `--scp11-*` flag set; the relevant flags are `--scp11-mode {a|c}`, `--scp11-cert`, `--scp11-key`, plus trust input via `--scp11-trust-roots` or `--scp11-lab-skip-trust`. Setting both `--scp03-*` and `--scp11-*` flags in the same invocation is a usage error — they're mutually exclusive auth materials.
 
 ### `--profile auto|standard-sd|yubikey-sd`
 
@@ -36,10 +42,11 @@ Every SCP03-aware verb accepts `--profile`. The flag selects which `securitydoma
 
 Default is `auto`. At session open, scpctl runs `profile.Probe` against the raw transport (SELECT ISD AID + GET DATA tag 5FC109 — the YubiKey firmware version object). Cards that answer SW=9000 with three or more bytes are YubiKey, everything else is standard GP. The detection is non-destructive and adds one extra APDU per session open.
 
-Three behavioral effects when the active profile is `standard-sd`:
+Four behavioral effects when the active profile is `standard-sd`:
 
 - `--scp03-keys-default` is rejected at parse time. Operator must supply explicit `--scp03-{kvn,enc,mac,dek}`. Required-auth verbs without any SCP03 flags are also rejected (no implicit factory-key fallback).
 - `sd keys generate` is rejected because GENERATE EC KEY (INS=0xF1) is a Yubico extension. The library-level `Session.GenerateECKey` enforces this with `ErrUnsupportedByProfile` even if the CLI gate is bypassed; the CLI fast-fails for clearer diagnostics. To install an EC key on a standard GP card, generate the keypair off-card and use `sd keys import` instead.
+- `sd allowlist set` and `sd allowlist clear` are rejected because the wire shape this library emits for the allowlist (BER-TLV with the integer-encoded serial list) is the yubikit/Yubico encoding and was never measured against a non-YubiKey card. The library-level `Session.StoreAllowlist`/`ClearAllowlist` enforces this with `ErrUnsupportedByProfile`; emitting INS=0xE2 with Yubico-shaped bytes against an unmeasured card could leave it in an undefined state. Lift the gate by switching to a profile that claims `Allowlist=true` (today only `yubikey-sd` does); to add a new profile that claims it, measure the card's response to the same wire shape first.
 - `sd keys list` relabels KIDs 0x11/0x13/0x15 as `scp11-sd` (without the variant letter). The raw KID is still in the JSON's `kid_hex` field as the authoritative value.
 
 The active profile is reported in JSON output as `data.profile` for every SCP03-aware verb, so audit logs across YubiKey and non-YubiKey deployments are unambiguous about which gating was applied.
@@ -160,9 +167,11 @@ scpctl sd allowlist set --kid 11 --kvn 01 \
 
 Serials are decimal or `0x`-prefixed hex; repeat `--serial` for multiple. At least one is required.
 
+**Profile gate.** `sd allowlist set` and `sd allowlist clear` require a profile that claims `Allowlist=true`. Today only `yubikey-sd` does. Running under `--profile standard-sd` is refused host-side with no APDU emitted to the card — the wire shape this library emits (BER-TLV with the integer-encoded serial list) is the yubikit/Yubico encoding and was never measured against a non-YubiKey card; emitting it against an unmeasured card could leave it in an undefined state. The error names the operation invoked, the rationale, and the path forward (use a profile that claims `Allowlist=true`).
+
 ### `sd allowlist clear`
 
-Removes the allowlist for one key reference. Implemented as `set` with an empty serial list; the wire shape is the same STORE DATA tag 70 emission.
+Removes the allowlist for one key reference. Implemented as `set` with an empty serial list; the wire shape is the same STORE DATA tag 70 emission. Same profile gate applies.
 
 ```
 scpctl sd allowlist clear --kid 11 --kvn 01 --confirm-write --scp03-keys-default
@@ -278,6 +287,9 @@ The `certificates` array carries metadata about every cert that was written to `
   "kid_hex": "0x11",
   "kvn_hex": "0x01",
   "replace_kvn": 0,
+  "kcv_enc": "AB12CD",
+  "kcv_mac": "EF3456",
+  "kcv_dek": "789ABC",
   "spki_fingerprint_sha256": "AB12...",
   "cert_count": 3,
   "ski_hex": "01234567...",
@@ -288,9 +300,9 @@ The `certificates` array carries metadata about every cert that was written to `
 Fields are conditional on the import path:
 
 - All categories: `channel`, `category`, `kid_hex`, `kvn_hex`, `replace_kvn`
+- `scp03` adds: `kcv_enc`, `kcv_mac`, `kcv_dek` — the per-component Key Check Values, computed host-side from the imported key bytes (`KCV = AES-CBC(key, IV=0x00*16, data=0x01*16)[:3]`, matching yubikit-python and the C# SDK byte-for-byte). The library has already verified the card returned matching KCVs on PUT KEY (raises `ErrChecksum` on mismatch), so reaching JSON emit means card and host agree on these values. Operator audit logs can capture them for cross-tool verification.
 - `scp11-sd` adds: `spki_fingerprint_sha256` (computed from the imported private key's public counterpart), `cert_count` (0 if `--certs` was omitted)
 - `ca-trust-anchor` adds: `ski_hex`, `ski_origin` (audits how the SKI was derived — extension, computed, or operator override)
-- `scp03` has neither extension; the rotation event is fully described by the base fields
 
 ### `sd keys delete` data schema
 
@@ -320,6 +332,8 @@ Fields are conditional on the import path:
 ```
 
 `serials` is a list of decimal strings (big integers don't fit in JSON numbers reliably; the operator-input hex/decimal form is normalized to decimal here for unambiguous round-tripping).
+
+Under `--profile standard-sd`, the verb still emits this JSON shape but the report will carry a FAIL line for `STORE DATA allowlist …` with the library's profile-gate error — see the **Profile gate** note in the verb description. Operators consuming JSON should check the `result` field on the report (or the presence of any `FAIL` check) before treating an emitted schema as confirmation that bytes reached the card.
 
 ## Common workflows
 
