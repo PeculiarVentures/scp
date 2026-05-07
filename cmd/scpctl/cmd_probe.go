@@ -133,6 +133,7 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	var fullMode *bool
 	var scp03Flags *scp03KeyFlags
+	var sdAIDFlag *sdAIDFlag
 	if opts.allowFullStatus {
 		fullMode = fs.Bool("full", false,
 			"Walk the GP registry via GET STATUS (GP §11.4.2): "+
@@ -153,6 +154,10 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		// The unauthenticated default is correct for a probe, but
 		// the SKIP shouldn't be the only way to see the registry.'
 		scp03Flags = registerSCP03KeyFlags(fs, scp03Optional)
+		// --sd-aid targets a non-default Security Domain AID. Empty
+		// (the default) targets the GP-standard ISD; non-empty
+		// SELECTs the named AID instead. Per Finding 2.
+		sdAIDFlag = registerSDAIDFlag(fs)
 	}
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -173,6 +178,11 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		}
 	}
 
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
+	}
+
 	t, err := env.connect(ctx, *reader)
 	if err != nil {
 		return err
@@ -181,7 +191,7 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 
 	report := &Report{Subcommand: opts.reportLabel, Reader: *reader}
 
-	sd, authMode, err := openProbeSession(ctx, t, scp03Flags, fullMode, report)
+	sd, authMode, err := openProbeSession(ctx, t, scp03Flags, fullMode, sdAID, report)
 	if err != nil {
 		_ = report.Emit(env.out, *jsonMode)
 		return err
@@ -344,12 +354,17 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 // already populated with a Fail line so callers just need to Emit
 // and return.
 //
-// Per the external review on feat/sd-keys-cli, Finding 9.
+// sdAID targets a non-default Security Domain AID. nil/empty
+// defaults to AIDSecurityDomain via the *WithAID variants — the
+// historical behavior on every unauth code path.
+//
+// Per the external review on feat/sd-keys-cli, Findings 9 + 2.
 func openProbeSession(
 	ctx context.Context,
 	t transport.Transport,
 	scp03Flags *scp03KeyFlags,
 	fullMode *bool,
+	sdAID []byte,
 	report *Report,
 ) (*securitydomain.Session, string, error) {
 	// Decide auth mode. The --full + any-scp03-flag combination is
@@ -360,7 +375,7 @@ func openProbeSession(
 		fullMode != nil && *fullMode
 
 	if !wantSCP03 {
-		sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+		sd, err := securitydomain.OpenUnauthenticatedWithAID(ctx, t, sdAID)
 		if err != nil {
 			report.Fail("select ISD", err.Error())
 			return nil, "none", fmt.Errorf("select ISD: %w", err)
@@ -393,9 +408,9 @@ func openProbeSession(
 	// emit any vendor-specific APDUs in the probe path) but we run
 	// it to surface profile-selection diagnostics and to keep the
 	// session.SetProfile contract consistent across read paths.
-	prof, _ := resolveProfile(ctx, t, scp03Flags, report)
+	prof, _ := resolveProfile(ctx, t, scp03Flags, sdAID, report)
 
-	sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, cfg, sdAID)
 	if err != nil {
 		report.Fail("open SCP03 SD", err.Error())
 		return nil, "scp03", fmt.Errorf("open SCP03 SD: %w", err)

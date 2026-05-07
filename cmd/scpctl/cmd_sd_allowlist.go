@@ -186,8 +186,14 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 		"Certificate serial number to permit. Decimal or 0x-prefixed hex. "+
 			"Repeat for multiple serials. At least one is required.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 
 	if *kidStr == "" || *kvnStr == "" {
@@ -253,7 +259,7 @@ func cmdSDAllowlistSet(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -302,8 +308,14 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 		"Confirm destructive write. Without this flag, sd allowlist clear "+
 			"runs in dry-run mode.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 
 	if *kidStr == "" || *kvnStr == "" {
@@ -356,7 +368,7 @@ func cmdSDAllowlistClear(ctx context.Context, env *runEnv, args []string) error 
 	defer t.Close()
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

@@ -121,8 +121,14 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 			"can be unambiguously identified the export errors instead of "+
 			"silently choosing.")
 	scp03Flags := registerSCP03KeyFlags(fs, scp03Optional)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 
 	if *kidStr == "" || *kvnStr == "" {
@@ -157,7 +163,7 @@ func cmdSDKeysExport(ctx context.Context, env *runEnv, args []string) error {
 
 	report := &Report{Subcommand: "sd keys export", Reader: *reader}
 
-	sd, channel, profName, err := openSDForRead(ctx, t, scp03Flags, report)
+	sd, channel, profName, err := openSDForRead(ctx, t, scp03Flags, sdAID, report)
 	if err != nil {
 		_ = report.Emit(env.out, *jsonMode)
 		return err

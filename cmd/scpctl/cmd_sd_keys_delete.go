@@ -85,8 +85,14 @@ func cmdSDKeysDelete(ctx context.Context, env *runEnv, args []string) error {
 			"manage the card. Pass this flag deliberately when rotating to "+
 			"a non-SCP03 auth model or when intentionally retiring the SD.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 
 	// Flag validation. Each branch maps to one library call shape;
@@ -166,7 +172,7 @@ func cmdSDKeysDelete(ctx context.Context, env *runEnv, args []string) error {
 
 	// Destructive path.
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

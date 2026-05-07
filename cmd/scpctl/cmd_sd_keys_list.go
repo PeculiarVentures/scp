@@ -139,8 +139,14 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Flags := registerSCP03KeyFlags(fs, scp03Optional)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -151,7 +157,7 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 
 	report := &Report{Subcommand: "sd keys list", Reader: *reader}
 
-	sd, channel, profName, err := openSDForRead(ctx, t, scp03Flags, report)
+	sd, channel, profName, err := openSDForRead(ctx, t, scp03Flags, sdAID, report)
 	if err != nil {
 		_ = report.Emit(env.out, *jsonMode)
 		return err

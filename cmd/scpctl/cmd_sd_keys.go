@@ -113,6 +113,7 @@ func openSDForRead(
 	ctx context.Context,
 	t transport.Transport,
 	scp03Flags *scp03KeyFlags,
+	sdAID []byte,
 	report *Report,
 ) (*securitydomain.Session, string, string, error) {
 	cfg, err := scp03Flags.applyToConfigOptional()
@@ -121,11 +122,11 @@ func openSDForRead(
 		return nil, "", "", err
 	}
 
-	prof, profName := resolveProfile(ctx, t, scp03Flags, report)
+	prof, profName := resolveProfile(ctx, t, scp03Flags, sdAID, report)
 
 	if cfg != nil {
 		report.Pass("SCP03 keys", scp03Flags.describeKeys(cfg))
-		sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
+		sd, err := securitydomain.OpenSCP03WithAID(ctx, t, cfg, sdAID)
 		if err != nil {
 			report.Fail("open SCP03 session", err.Error())
 			return nil, "", profName, fmt.Errorf("open SCP03: %w", err)
@@ -135,7 +136,7 @@ func openSDForRead(
 		return sd, "scp03", profName, nil
 	}
 
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+	sd, err := securitydomain.OpenUnauthenticatedWithAID(ctx, t, sdAID)
 	if err != nil {
 		report.Fail("select ISD", err.Error())
 		return nil, "", profName, fmt.Errorf("select ISD: %w", err)

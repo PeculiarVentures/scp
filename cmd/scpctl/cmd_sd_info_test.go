@@ -355,3 +355,131 @@ func TestProbe_TopLevel_NoSCP03FlagsRegistered(t *testing.T) {
 		t.Errorf("expected unknown-flag error; got %q", err.Error())
 	}
 }
+
+// TestSDInfo_SDAIDFlag_TargetsCustomAID exercises --sd-aid plumbed
+// end-to-end through 'sd info'. Confirms three things:
+//
+//  1. The mockcard's MockSDAID override gates SELECT correctly:
+//     without --sd-aid, the default ISD lookup fails (SW=6A82); the
+//     command surfaces that as a Fail line.
+//  2. With --sd-aid set to the same value as MockSDAID, SELECT
+//     succeeds and the rest of 'sd info' runs cleanly.
+//  3. Hex parsing accepts the colon-separated form from the help
+//     text, since that's the form an operator copy-pasting from a
+//     vendor data sheet is most likely to use.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2.
+func TestSDInfo_SDAIDFlag_TargetsCustomAID(t *testing.T) {
+	customAID := []byte{0xA0, 0x00, 0x00, 0x06, 0x47, 0x2F, 0x00, 0x01}
+
+	t.Run("without --sd-aid, default ISD select fails", func(t *testing.T) {
+		mc, err := mockcard.New()
+		if err != nil {
+			t.Fatalf("mockcard.New: %v", err)
+		}
+		mc.MockSDAID = customAID
+		var buf bytes.Buffer
+		env := &runEnv{
+			out: &buf, errOut: &buf,
+			connect: func(_ context.Context, _ string) (transport.Transport, error) {
+				return mc.Transport(), nil
+			},
+		}
+		err = cmdSDInfo(context.Background(), env, []string{"--reader", "fake"})
+		if err == nil {
+			t.Fatalf("expected Fail when --sd-aid omitted against custom-AID card; got nil\n%s", buf.String())
+		}
+		// The error should come from the SELECT step (6A82 file
+		// not found). Don't pin the exact wording — it comes
+		// from the apdu package — but the signal should be there.
+		if !strings.Contains(buf.String(), "select") {
+			t.Errorf("expected output to mention 'select'; got:\n%s", buf.String())
+		}
+	})
+
+	t.Run("with --sd-aid colon-form, SELECT resolves", func(t *testing.T) {
+		mc, err := mockcard.New()
+		if err != nil {
+			t.Fatalf("mockcard.New: %v", err)
+		}
+		mc.MockSDAID = customAID
+		var buf bytes.Buffer
+		env := &runEnv{
+			out: &buf, errOut: &buf,
+			connect: func(_ context.Context, _ string) (transport.Transport, error) {
+				return mc.Transport(), nil
+			},
+		}
+		err = cmdSDInfo(context.Background(), env, []string{
+			"--reader", "fake",
+			"--sd-aid", "A0:00:00:06:47:2F:00:01",
+		})
+		if err != nil {
+			t.Fatalf("cmdSDInfo: %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		// Should record the SD select PASS line.
+		if !strings.Contains(out, "select ISD") {
+			t.Errorf("expected 'select ISD' check in output; got:\n%s", out)
+		}
+		// And it should NOT contain a Fail.
+		if strings.Contains(out, "FAIL") {
+			t.Errorf("unexpected FAIL line:\n%s", out)
+		}
+	})
+
+	t.Run("with --sd-aid bare-hex form, SELECT resolves", func(t *testing.T) {
+		mc, err := mockcard.New()
+		if err != nil {
+			t.Fatalf("mockcard.New: %v", err)
+		}
+		mc.MockSDAID = customAID
+		var buf bytes.Buffer
+		env := &runEnv{
+			out: &buf, errOut: &buf,
+			connect: func(_ context.Context, _ string) (transport.Transport, error) {
+				return mc.Transport(), nil
+			},
+		}
+		err = cmdSDInfo(context.Background(), env, []string{
+			"--reader", "fake",
+			"--sd-aid", "A0000006472F0001",
+		})
+		if err != nil {
+			t.Fatalf("cmdSDInfo: %v\n%s", err, buf.String())
+		}
+	})
+}
+
+// TestSDInfo_SDAIDFlag_RejectsInvalid covers the integration: an
+// invalid --sd-aid value surfaces as a usage error before any
+// transport activity.
+func TestSDInfo_SDAIDFlag_RejectsInvalid(t *testing.T) {
+	mc, err := mockcard.New()
+	if err != nil {
+		t.Fatalf("mockcard.New: %v", err)
+	}
+	connectCalled := false
+	var buf bytes.Buffer
+	env := &runEnv{
+		out: &buf, errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			connectCalled = true
+			return mc.Transport(), nil
+		},
+	}
+	err = cmdSDInfo(context.Background(), env, []string{
+		"--reader", "fake",
+		"--sd-aid", "AB", // 1 byte, below the 5-byte minimum
+	})
+	if err == nil {
+		t.Fatalf("expected usage error from short --sd-aid; got nil")
+	}
+	if connectCalled {
+		t.Errorf("connect should not be called when --sd-aid is invalid")
+	}
+	var ue *usageError
+	if !errors.As(err, &ue) {
+		t.Errorf("err type = %T, want *usageError", err)
+	}
+}

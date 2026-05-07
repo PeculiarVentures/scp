@@ -50,6 +50,7 @@ func resolveProfile(
 	ctx context.Context,
 	t transport.Transport,
 	scp03Flags *scp03KeyFlags,
+	sdAID []byte,
 	report *Report,
 ) (profile.Profile, string) {
 	// Pinned choices: no probe, just return.
@@ -58,8 +59,10 @@ func resolveProfile(
 		return pinned, pinned.Name()
 	}
 
-	// Auto: probe.
-	result, err := profile.Probe(ctx, t, nil)
+	// Auto: probe. The sdAID parameter targets a non-default ISD AID
+	// when set; nil means probe.Probe defaults to AIDSecurityDomain
+	// (the GP-standard ISD), which is the historical behavior.
+	result, err := profile.Probe(ctx, t, sdAID)
 	if err != nil {
 		// Probe SELECT itself failed (transport error or no SD
 		// reachable). Fall back to Standard rather than YubiKey
@@ -98,10 +101,11 @@ func openSCP03WithProfile(
 	t transport.Transport,
 	scp03Cfg *scp03.Config,
 	scp03Keys *scp03KeyFlags,
+	sdAID []byte,
 	report *Report,
 ) (*securitydomain.Session, string, error) {
-	prof, profName := resolveProfile(ctx, t, scp03Keys, report)
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	prof, profName := resolveProfile(ctx, t, scp03Keys, sdAID, report)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, scp03Cfg, sdAID)
 	if err != nil {
 		return nil, profName, err
 	}

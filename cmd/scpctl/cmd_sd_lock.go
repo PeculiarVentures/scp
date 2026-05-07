@@ -78,8 +78,14 @@ func cmdSDLock(ctx context.Context, env *runEnv, args []string) error {
 			"dry-run mode (validates inputs and reports the planned "+
 			"transition without transmitting SET STATUS).")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 	scp03Cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
@@ -135,7 +141,7 @@ func cmdSDLock(ctx context.Context, env *runEnv, args []string) error {
 	// Destructive path. Open SCP03 against the SD, send SET STATUS,
 	// close before the post-check.
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, scp03Cfg, sdAID)
 	if err != nil {
 		report.Fail("open SCP03", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

@@ -135,8 +135,14 @@ func cmdSDKeysImportSCP11SD(ctx context.Context, env *runEnv, args []string) err
 			"the planned action, exits 0 without opening SCP03 or "+
 			"transmitting any APDU).")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 
 	if *kidStr == "" || *kvnStr == "" {
@@ -245,7 +251,7 @@ func cmdSDKeysImportSCP11SD(ctx context.Context, env *runEnv, args []string) err
 
 	// Active path.
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, report)
+	sd, profName, err := openSCP03WithProfile(ctx, t, scp03Cfg, scp03Keys, sdAID, report)
 	if err != nil {
 		report.Fail("open SCP03 session", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
