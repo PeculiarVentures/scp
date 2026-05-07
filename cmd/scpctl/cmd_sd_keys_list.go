@@ -249,15 +249,15 @@ func cmdSDKeysList(ctx context.Context, env *runEnv, args []string) error {
 
 		// Selective cert fetch. SCP03 references never have a
 		// stored certificate chain (they're symmetric key sets),
-		// so issuing a 0xBF21 GET DATA against KID=0x01 is wasted
-		// APDU traffic that always returns SW=6A88. Match ykman's
-		// convention: only fetch certs for cert-capable kinds
-		// (SCP11 SD refs, OCE/CA public-key refs, and unknown
-		// non-canonical KIDs where the operator is explicitly
-		// inspecting an unfamiliar card).
+		// so issuing a 0xBF21 GET DATA against KID=0x01/0x02/0x03
+		// is wasted APDU traffic that always returns SW=6A88.
+		// Match ykman's convention: only fetch certs for cert-
+		// capable kinds (SCP11 SD refs, OCE/CA public-key refs,
+		// and unknown non-canonical KIDs where the operator is
+		// explicitly inspecting an unfamiliar card).
 		checkName := fmt.Sprintf("certificates kid=0x%02X kvn=0x%02X",
 			ki.Reference.ID, ki.Reference.Version)
-		if entry.Kind == "scp03" {
+		if entry.Kind == "scp03-enc" || entry.Kind == "scp03-mac" || entry.Kind == "scp03-dek" {
 			report.Skip(checkName, "scp03 ref (no chain expected)")
 			data.Keys = append(data.Keys, entry)
 			continue

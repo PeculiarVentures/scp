@@ -644,8 +644,19 @@ func walkRegistryFetched(label string, report *Report, fetch func() ([]securityd
 	if err != nil {
 		// SW=6982 (security status not satisfied) is the common
 		// authentication-required signal. Other SWs are reported
-		// verbatim so the operator can debug.
-		report.Skip(checkName, err.Error())
+		// verbatim so the operator can debug. Augment with a
+		// friendly hint when the SW matches a known card-behavior
+		// pattern that's not actionable as-such — particularly
+		// YubiKey, which returns 6A86/6D00/6982 across the GET
+		// STATUS scopes by design (the SD doesn't expose the
+		// registry over GP semantics; ykman uses out-of-band APIs
+		// for the same data). The hint keeps operators from
+		// chasing "did I authenticate wrong?" rabbit holes.
+		detail := err.Error()
+		if hint := getStatusSkipHint(err); hint != "" {
+			detail = detail + " — " + hint
+		}
+		report.Skip(checkName, detail)
 		return nil
 	}
 	if len(entries) == 0 {
@@ -677,6 +688,31 @@ func walkRegistryFetched(label string, report *Report, fetch func() ([]securityd
 		views = append(views, projectRegistryEntry(e))
 	}
 	return views
+}
+
+// getStatusSkipHint returns a short, operator-friendly explanation
+// for known SWs that surface as GET STATUS skips. Empty string
+// means "no special hint, just show the raw error." The hints are
+// observational — they describe what the card-side behavior
+// commonly means in the field — not authoritative claims about
+// card behavior.
+func getStatusSkipHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "6A86"):
+		return "card refuses this P1/P2 form (typical of cards that gate registry walks behind a non-GP API; e.g. YubiKey 5.7+)"
+	case strings.Contains(msg, "6D00"):
+		return "card refuses GET STATUS INS entirely on this scope (typical of cards that don't expose the GP registry; e.g. YubiKey 5.7+)"
+	case strings.Contains(msg, "6982"):
+		return "card requires a higher authentication level than the current session provides"
+	case strings.Contains(msg, "6985"):
+		return "card refuses GET STATUS in the current applet lifecycle (e.g. INITIALIZED → SECURED transition pending)"
+	default:
+		return ""
+	}
 }
 
 // projectRegistryEntry converts a securitydomain.RegistryEntry to its

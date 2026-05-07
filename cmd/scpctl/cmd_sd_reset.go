@@ -122,7 +122,11 @@ func cmdSDReset(ctx context.Context, env *runEnv, args []string) error {
 	}
 	data.Reset = true
 	report.Pass("SD reset",
-		"factory SCP03 keys restored at KVN=0xFF; SCP11b key regenerated at KID=0x13/KVN=0x01")
+		"factory SCP03 keys restored at KVN=0xFF; SCP11b key regenerated at KID=0x13/KVN=0x01. "+
+			"IMPORTANT: power-cycle the card (unplug + replug) before issuing further APDUs. "+
+			"The SD lifecycle transition does not fully apply until the next reader power-up; "+
+			"hammering the card with SELECT immediately after this command will return SW=6A82 "+
+			"on every applet until the cycle completes.")
 
 	// Post-reset inventory. The card should now show only the
 	// factory key set: SCP03 (KID 0x01-0x03 at KVN=0xFF) and the
