@@ -123,6 +123,51 @@ func (e RegistryEntry) LifecycleString() string {
 	return fmt.Sprintf("unknown(0x%02X)", e.Lifecycle)
 }
 
+// Kind classifies a registry entry as one of "ISD", "SSD", "APP",
+// "LOAD_FILE", or "MODULE". Distinct from Scope: Scope is the GET
+// STATUS P1 byte that produced the entry (which lumps SSDs in with
+// Applications because GP §11.4.2 doesn't give SSDs a separate
+// scope), while Kind disambiguates by inspecting the entry's
+// privileges. APP entries that carry the SecurityDomain privilege
+// are GP-defined Supplementary Security Domains and should be
+// labelled SSD in human-readable output.
+//
+// This is the same promotion GlobalPlatformPro performs in its
+// GPRegistry.add() implementation: any entry returned in the
+// Applications scope gets reclassified to SSD if the
+// SecurityDomain privilege bit is set. Without this promotion, an
+// operator looking at the registry can't tell at a glance which
+// "applications" are actually SDs they could open authenticated
+// sessions against.
+//
+// Per the third external review on feat/sd-keys-cli, Section 8
+// (lifecycle rendering and registry entry classification).
+func (e RegistryEntry) Kind() string {
+	switch e.Scope {
+	case StatusScopeISD:
+		return "ISD"
+	case StatusScopeApplications:
+		// SSD promotion: an Applications-scope entry with the
+		// SecurityDomain privilege bit is structurally a
+		// Supplementary Security Domain. Match GlobalPlatformPro.
+		if e.Privileges.SecurityDomain {
+			return "SSD"
+		}
+		return "APP"
+	case StatusScopeLoadFiles, StatusScopeLoadFilesAndModules:
+		// Load File entries don't carry privileges (the
+		// Privileges field is the zero value), so the SSD
+		// promotion doesn't apply. Modules sit under their
+		// parent Load File and aren't returned as top-level
+		// entries by GET STATUS — when we expose them, they
+		// come from RegistryEntry.Modules rather than as their
+		// own entries — so MODULE is reserved for a future
+		// expansion if/when we project modules as flat rows.
+		return "LOAD_FILE"
+	}
+	return fmt.Sprintf("unknown(scope=0x%02X)", byte(e.Scope))
+}
+
 // Privileges represents the GP Table 6-1 privilege bits assigned to
 // an Application or Security Domain.
 type Privileges struct {

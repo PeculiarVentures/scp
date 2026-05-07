@@ -85,7 +85,19 @@ type registryDump struct {
 // Bytes are rendered as uppercase hex; Lifecycle has both the parsed
 // human form and the raw byte so callers can re-interpret if needed.
 type registryEntryView struct {
-	AID             string   `json:"aid"`
+	AID string `json:"aid"`
+
+	// Kind classifies the entry as ISD, SSD, APP, or LOAD_FILE.
+	// Distinct from Lifecycle (which describes the entry's
+	// state) and from the surrounding registry slice (which
+	// reflects the GET STATUS scope that produced the entry).
+	// Promotion of APP-with-SecurityDomain-privilege to SSD
+	// happens here, matching GlobalPlatformPro's classification
+	// (per the third external review on feat/sd-keys-cli,
+	// Section 8). An operator scanning JSON can tell at a glance
+	// which Applications-scope rows are actually SDs they could
+	// open management sessions against.
+	Kind            string   `json:"kind"`
 	Lifecycle       string   `json:"lifecycle"`
 	LifecycleByte   string   `json:"lifecycle_byte"`
 	Privileges      []string `json:"privileges,omitempty"`
@@ -541,6 +553,7 @@ func walkRegistry(ctx context.Context, sd *securitydomain.Session, scope securit
 func projectRegistryEntry(e securitydomain.RegistryEntry) registryEntryView {
 	v := registryEntryView{
 		AID:           hexEncode(e.AID),
+		Kind:          e.Kind(),
 		Lifecycle:     e.LifecycleString(),
 		LifecycleByte: fmt.Sprintf("0x%02X", e.Lifecycle),
 	}

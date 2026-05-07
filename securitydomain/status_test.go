@@ -284,3 +284,94 @@ func TestGetStatus_MultipleApplications(t *testing.T) {
 			entries[1].AssociatedSDAID, mc.RegistryApps[1].AssociatedSDAID)
 	}
 }
+
+// TestRegistryEntry_Kind_PromotesAppWithSecurityDomainToSSD pins
+// the GlobalPlatformPro-style classification: an Applications-scope
+// entry with the SecurityDomain privilege bit is rendered as SSD,
+// not APP. This is the structural distinction between an "app"
+// (executes; hosts no SCP key set) and an "SSD" (an Application
+// that ALSO acts as a Security Domain — has SCP keys, can open
+// authenticated management sessions).
+//
+// Per the third external review on feat/sd-keys-cli, Section 8
+// (lifecycle rendering and registry entry classification).
+func TestRegistryEntry_Kind_PromotesAppWithSecurityDomainToSSD(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry RegistryEntry
+		want  string
+	}{
+		{
+			"ISD scope -> ISD",
+			RegistryEntry{Scope: StatusScopeISD},
+			"ISD",
+		},
+		{
+			"ISD scope ignores SD privilege bit (ISD always returns SD priv)",
+			RegistryEntry{
+				Scope:      StatusScopeISD,
+				Privileges: Privileges{SecurityDomain: true},
+			},
+			"ISD",
+		},
+		{
+			"Applications scope, no SD priv -> APP",
+			RegistryEntry{Scope: StatusScopeApplications},
+			"APP",
+		},
+		{
+			"Applications scope + SD priv -> SSD (the promotion)",
+			RegistryEntry{
+				Scope:      StatusScopeApplications,
+				Privileges: Privileges{SecurityDomain: true},
+			},
+			"SSD",
+		},
+		{
+			"Applications scope + SD priv + others -> SSD (other privs don't change kind)",
+			RegistryEntry{
+				Scope: StatusScopeApplications,
+				Privileges: Privileges{
+					SecurityDomain:       true,
+					AuthorizedManagement: true,
+					DelegatedManagement:  true,
+				},
+			},
+			"SSD",
+		},
+		{
+			"Applications scope + non-SD privs -> APP (no false promotion)",
+			RegistryEntry{
+				Scope: StatusScopeApplications,
+				Privileges: Privileges{
+					CardLock:      true,
+					CVMManagement: true,
+				},
+			},
+			"APP",
+		},
+		{
+			"LoadFiles scope -> LOAD_FILE (privileges don't apply)",
+			RegistryEntry{Scope: StatusScopeLoadFiles},
+			"LOAD_FILE",
+		},
+		{
+			"LoadFilesAndModules scope -> LOAD_FILE",
+			RegistryEntry{Scope: StatusScopeLoadFilesAndModules},
+			"LOAD_FILE",
+		},
+		{
+			"unknown scope -> diagnostic string",
+			RegistryEntry{Scope: StatusScope(0xFF)},
+			"unknown(scope=0xFF)",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.entry.Kind()
+			if got != c.want {
+				t.Errorf("Kind() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
