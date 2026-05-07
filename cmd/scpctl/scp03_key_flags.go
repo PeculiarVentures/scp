@@ -263,6 +263,43 @@ func (kf *scp03KeyFlags) explicitlyConfigured() bool {
 	return kf.anyFlagSet()
 }
 
+// forwardArgs renders the current flag selection back into argv
+// form so an aggregating command (e.g. `test all`) can hand them
+// to a sub-invocation that takes the same flag set. The rendered
+// args are flat — `[--scp03-keys-default]` or `[--scp03-kvn, 01,
+// --scp03-enc, AABB..., ...]`. Empty flag values are omitted
+// (treated as not-set), and --profile is only emitted when the
+// operator picked a non-default value, since the sub-invocation
+// has its own "auto" default.
+func (kf *scp03KeyFlags) forwardArgs() []string {
+	if kf == nil {
+		return nil
+	}
+	var out []string
+	if kf.useDefault != nil && *kf.useDefault {
+		out = append(out, "--scp03-keys-default")
+	}
+	if kf.kvn != nil && *kf.kvn != "" {
+		out = append(out, "--scp03-kvn", *kf.kvn)
+	}
+	if kf.enc != nil && *kf.enc != "" {
+		out = append(out, "--scp03-enc", *kf.enc)
+	}
+	if kf.mac != nil && *kf.mac != "" {
+		out = append(out, "--scp03-mac", *kf.mac)
+	}
+	if kf.dek != nil && *kf.dek != "" {
+		out = append(out, "--scp03-dek", *kf.dek)
+	}
+	if kf.key != nil && *kf.key != "" {
+		out = append(out, "--scp03-key", *kf.key)
+	}
+	if kf.vendor != nil && *kf.vendor != "" && *kf.vendor != "auto" {
+		out = append(out, "--profile", *kf.vendor)
+	}
+	return out
+}
+
 // applyToConfig builds a *scp03.Config matching the flag selection.
 // Returns a *usageError on conflict, partial-custom, or hex parse
 // failures.

@@ -196,6 +196,13 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 // both the canonical 0x10 and the 0x20–0x2F extension Yubico uses for
 // additional CA references.
 //
+// SCP03 component KIDs: GP Card Spec v2.3.1 §11.5.2.4.5 splits the
+// SCP03 key set into three components, addressed at KIDs 0x01 (ENC),
+// 0x02 (MAC), and 0x03 (DEK), all sharing one KVN. YubiKey reports
+// each component as a separate KeyInfo entry; we label them
+// component-specifically so operators reading the inventory don't
+// see "unknown" against perfectly valid factory entries.
+//
 // profileName selects the labeling convention:
 //
 //   - "yubikey-sd" or "auto": KIDs 0x11/0x13/0x15 are labeled
@@ -211,13 +218,17 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 //     convention. The raw KID is preserved in the JSON's kid_hex
 //     field as the authoritative value.
 //
-// SCP03 (KID=0x01) and the OCE/CA-public range are GP-spec
+// SCP03 (KIDs 0x01-0x03) and the OCE/CA-public range are GP-spec
 // conventions, not Yubico-specific, so their labels don't depend
 // on the profile.
 func classifyKID(kid byte, profileName string) string {
 	switch {
 	case kid == securitydomain.KeyIDSCP03:
-		return "scp03"
+		return "scp03-enc"
+	case kid == 0x02:
+		return "scp03-mac"
+	case kid == 0x03:
+		return "scp03-dek"
 	case kid == securitydomain.KeyIDOCE, kid >= 0x20 && kid <= 0x2F:
 		return "ca-public"
 	case kid == securitydomain.KeyIDSCP11a, kid == securitydomain.KeyIDSCP11b, kid == securitydomain.KeyIDSCP11c:

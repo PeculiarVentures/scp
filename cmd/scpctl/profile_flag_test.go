@@ -192,16 +192,18 @@ func TestClassifyKID_StandardSD_DropsVariantLetters(t *testing.T) {
 	}
 }
 
-// TestClassifyKID_StableForVendorAgnosticKIDs: SCP03 (KID=0x01)
-// and OCE/CA-public (KID=0x10, 0x20-0x2F) are GP-spec
-// conventions that don't depend on profile. Their labels stay
-// the same regardless of profile name.
+// TestClassifyKID_StableForVendorAgnosticKIDs: SCP03 (KIDs 0x01-0x03)
+// and OCE/CA-public (KID=0x10, 0x20-0x2F) are GP-spec conventions
+// that don't depend on profile. Their labels stay the same
+// regardless of profile name.
 func TestClassifyKID_StableForVendorAgnosticKIDs(t *testing.T) {
 	cases := []struct {
 		kid  byte
 		want string
 	}{
-		{0x01, "scp03"},
+		{0x01, "scp03-enc"},
+		{0x02, "scp03-mac"},
+		{0x03, "scp03-dek"},
 		{0x10, "ca-public"},
 		{0x20, "ca-public"},
 		{0x2F, "ca-public"},

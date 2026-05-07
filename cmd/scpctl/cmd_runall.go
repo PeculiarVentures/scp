@@ -25,6 +25,7 @@ import (
 func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 	fs := newSubcommandFlagSet("test all", env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Optional)
 	trustRoots := fs.String("trust-roots", "",
 		"Path to PEM bundle of trusted SCP11 card-cert root CAs. Forwarded to "+
 			"scp11b-sd-read, scp11a-sd-read, scp11b-piv-verify. Mutually exclusive "+
@@ -74,7 +75,18 @@ func cmdTest(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	run("probe", cmdProbe, commonArgs)
-	run("scp03-sd-read", cmdSCP03SDRead, commonArgs)
+
+	// Forward SCP03 key flags to scp03-sd-read so this aggregate
+	// command works against cards that don't have factory keys at
+	// the implicit defaults. Without forwarding, scp03-sd-read here
+	// would hard-code "default keys" and fail on any card with
+	// rotated keys, on standard GP cards (no Yubico factory keys),
+	// or on cards that have been bootstrapped (factory SCP03 may
+	// be invalidated as a documented side effect of the first PUT
+	// KEY under factory SCP03 — see 'sd bootstrap-scp11a' help).
+	scp03Args := append([]string(nil), commonArgs...)
+	scp03Args = append(scp03Args, scp03Keys.forwardArgs()...)
+	run("scp03-sd-read", cmdSCP03SDRead, scp03Args)
 
 	scp11bArgs := append([]string(nil), commonArgs...)
 	if *labSkipTrust {

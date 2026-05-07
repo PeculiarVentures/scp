@@ -439,3 +439,72 @@ func TestSCP03KeyFlags_RejectsBadHex(t *testing.T) {
 		})
 	}
 }
+
+// TestForwardArgs_RoundTrip pins the forwardArgs ↔ Parse round
+// trip used by `test all` to hand SCP03 selection to its
+// scp03-sd-read sub-invocation. Each input in the table picks a
+// realistic flag combination (factory default, custom triple,
+// shorthand single-key, profile pin); forwardArgs is run against
+// the parsed flags, then those args are parsed by a fresh flag
+// set and the resulting selection has to match. If forwardArgs
+// drops a flag, omits a value, or emits one that Parse doesn't
+// recognize, the round-trip fails the equivalence check.
+func TestForwardArgs_RoundTrip(t *testing.T) {
+	cases := [][]string{
+		{},
+		{"--scp03-keys-default"},
+		{"--scp03-kvn", "01", "--scp03-enc", "404142434445464748494a4b4c4d4e4f",
+			"--scp03-mac", "404142434445464748494a4b4c4d4e4f",
+			"--scp03-dek", "404142434445464748494a4b4c4d4e4f"},
+		{"--scp03-kvn", "07", "--scp03-key", "404142434445464748494a4b4c4d4e4f"},
+		{"--scp03-keys-default", "--profile", "yubikey-sd"},
+		{"--profile", "standard-sd", "--scp03-kvn", "FF",
+			"--scp03-enc", "404142434445464748494a4b4c4d4e4f",
+			"--scp03-mac", "404142434445464748494a4b4c4d4e4f",
+			"--scp03-dek", "404142434445464748494a4b4c4d4e4f"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			fs1 := flag.NewFlagSet("a", flag.ContinueOnError)
+			kf1 := registerSCP03KeyFlags(fs1, scp03Optional)
+			if err := fs1.Parse(args); err != nil {
+				t.Fatalf("first parse: %v", err)
+			}
+
+			forwarded := kf1.forwardArgs()
+
+			fs2 := flag.NewFlagSet("b", flag.ContinueOnError)
+			kf2 := registerSCP03KeyFlags(fs2, scp03Optional)
+			if err := fs2.Parse(forwarded); err != nil {
+				t.Fatalf("forward+parse round trip failed: forwarded=%v err=%v",
+					forwarded, err)
+			}
+
+			// Compare the round-tripped selection. Compare by
+			// derefing each flag pointer to a value-or-empty
+			// representation; both flag sets must pick identical
+			// values from input or its forwarded form.
+			deref := func(p *string) string {
+				if p == nil {
+					return ""
+				}
+				return *p
+			}
+			derefBool := func(p *bool) bool {
+				if p == nil {
+					return false
+				}
+				return *p
+			}
+			if derefBool(kf1.useDefault) != derefBool(kf2.useDefault) ||
+				deref(kf1.kvn) != deref(kf2.kvn) ||
+				deref(kf1.enc) != deref(kf2.enc) ||
+				deref(kf1.mac) != deref(kf2.mac) ||
+				deref(kf1.dek) != deref(kf2.dek) ||
+				deref(kf1.key) != deref(kf2.key) ||
+				deref(kf1.vendor) != deref(kf2.vendor) {
+				t.Errorf("round trip drift:\n  in:  %v\n  out: %v", args, forwarded)
+			}
+		})
+	}
+}

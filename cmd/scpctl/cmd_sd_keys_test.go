@@ -143,8 +143,8 @@ func TestSDKeysList_JSONShape(t *testing.T) {
 	}
 
 	scp03 := report.Data.Keys[0]
-	if scp03.Kind != "scp03" || scp03.KID != 0x01 {
-		t.Errorf("keys[0] = (kid=%d kind=%q), want (1 scp03)", scp03.KID, scp03.Kind)
+	if scp03.Kind != "scp03-enc" || scp03.KID != 0x01 {
+		t.Errorf("keys[0] = (kid=%d kind=%q), want (1 scp03-enc)", scp03.KID, scp03.Kind)
 	}
 	if len(scp03.Certificates) != 0 {
 		t.Errorf("scp03 ref must not carry certificates in the projection; got %d", len(scp03.Certificates))
@@ -642,13 +642,15 @@ func TestSDKeysExport_AtomicWrite_NoTempLeftover(t *testing.T) {
 // --- internal helpers ---
 
 // TestClassifyKID pins the host-side KID-to-kind mapping. Per
-// GP §7.1.1 and Yubico's KeyReference convention.
+// GP §7.1.1, GP §11.5.2.4.5, and Yubico's KeyReference convention.
 func TestClassifyKID(t *testing.T) {
 	cases := []struct {
 		kid  byte
 		kind string
 	}{
-		{0x01, "scp03"},
+		{0x01, "scp03-enc"},
+		{0x02, "scp03-mac"},
+		{0x03, "scp03-dek"},
 		{0x10, "ca-public"},
 		{0x11, "scp11a-sd"},
 		{0x13, "scp11b-sd"},
