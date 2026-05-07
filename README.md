@@ -45,7 +45,7 @@ A *verified profile* combines hardware execution with byte-exact validation agai
 
 - **SCP03 AES-128**: end-to-end handshake (INITIALIZE UPDATE + EXTERNAL AUTHENTICATE), session-key derivation, secure messaging (C-MAC, C-ENC, R-MAC, R-ENC), and `LevelFull` security. Verified byte-exact against Yubico's .NET SDK channel and KDF vectors and against martinpaljak/GlobalPlatformPro JCOP4 dumps.
 - **SCP11 P-256, AES-128, S8, full security level**: SCP11a, SCP11b, and SCP11c handshakes, OCE certificate upload (PERFORM SECURITY OPERATION), receipt verification (mandatory by default per Amendment F v1.4), and post-handshake secure messaging. Verified byte-exact against Samsung OpenSCP-Java SCP11a transcripts and against the Yubico OCE certificate fixtures.
-- **YubiKey-compatible empty-data behavior**: the channel package's `EmptyDataYubico` policy (pad-and-encrypt one block) is the default, matching what YubiKey expects.
+- **Pad-and-encrypt empty-data behavior at the channel layer**: the `channel` package's `EmptyDataPadAndEncrypt` policy (pad and encrypt a single block) is the default. Matches what YubiKey expects and what the Yubico yubikit reference implementation produces; the spec-strict alternative is `EmptyDataNoOp`.
 - **YubiKey Security Domain management profile**: PUT KEY for AES-128 SCP03 keys and SCP11 ECKA P-256 keys; STORE CERTIFICATES, STORE DATA, GET DATA, GET KEY INFORMATION, GENERATE EC KEY, DELETE KEY, RESET. Tracks the operations exercised by `yubikit.securitydomain` and the .NET `SecurityDomainSession`.
 
 ### Implemented GlobalPlatform capabilities
@@ -58,7 +58,7 @@ A capability in this category is implemented against the GP/ISO specs and exerci
 | SCP03 S8 + S16 | All six combinations (3 AES sizes × 2 MAC modes) verified at the protocol layer against Samsung OpenSCP-Java. S8 verified end-to-end against YubiKey hardware. S16 is an [expansion target](#expansion-targets) for hardware verification. |
 | SCP11 X.509 card-trust validation | The `trust` package validates SCP11 card certificate chains: leaf-last and leaf-first chain ordering, intermediate fall-through, EKU enforcement, optional SKI / serial-allowlist constraints, P-256 invariant enforced after every validator return. |
 | Custom validation for GP-proprietary SCP11 certificate stores | `trust.Policy.CustomValidator` is the supported extension point for cards that present GP-proprietary SCP11 certificates instead of standard X.509. The hook owns the trust decision; the protocol layer still enforces P-256 and ECDH-convertibility on whatever public key the validator returns. See [Custom validation](#custom-validation-for-gp-proprietary-scp11-certificate-stores) below. |
-| Configurable empty-data behavior | `channel.EmptyDataPolicy` selects between `EmptyDataYubico` (pad-and-encrypt one block; default) and `EmptyDataGPLiteral` (skip encryption when data is empty) so the channel layer can match either of the two interpretations real GP cards have shipped. |
+| Configurable empty-data behavior | `channel.EmptyDataPolicy` selects between `EmptyDataPadAndEncrypt` (pad and encrypt a single block; default, matches the YubiKey-verified profile and Yubico yubikit) and `EmptyDataNoOp` (skip encryption when data is empty; matches a strict reading of GP Amendment D §6.2.4). |
 | Short and extended APDUs | The `apdu` package and the `transport.Transmit*` helpers handle both ISO 7816-4 short-form (4-byte header, ≤256-byte data) and extended-length (7-byte header, up to 65535-byte data) APDUs throughout the stack. SCP11 OCE certificate upload uses extended APDUs by default; transports that lack extended-APDU support are flagged as an [expansion target](#expansion-targets). |
 | GET RESPONSE chaining | `transport.TransmitWithChaining` and `TransmitCollectAll` issue follow-up `00 C0 00 00 Le` commands when the card returns `61xx` continuation indications, with `MaxGetResponseIterations` and `MaxCollectedResponseBytes` caps to prevent hostile-card resource exhaustion. |
 | BER-TLV parsing and construction | The `tlv` package handles GP-relevant BER-TLV constructs used in INITIALIZE UPDATE responses, EXTERNAL AUTHENTICATE payloads, OCE certificate stores (BF21), and Security Domain command/response data. |
@@ -263,7 +263,7 @@ if !roots.AppendCertsFromPEM(rootPEM) {
     return errors.New("trust: failed to parse Yubico SD root PEM")
 }
 
-cfg := scp11.YubiKeyDefaultSCP11bConfig()
+cfg := yubikey.SCP11bConfig()
 cfg.CardTrustPolicy = &trust.Policy{
     Roots: roots,
     // Yubico SD certificates are P-256 ECDSA; the SCP11 layer
@@ -311,7 +311,7 @@ sess, err := scp03.Open(ctx, transport, &scp03.Config{
 `scp03.Config` accepts:
 
 - **Keys** (required): `StaticKeys{ENC, MAC, DEK}`. All three must be the same length (16 / 24 / 32 bytes for AES-128/192/256). Mixed sizes are rejected. There is no silent default to `scp03.DefaultKeys` (the GP test keys); callers must explicitly opt in.
-- **KeyVersion**: KVN to send in INITIALIZE UPDATE. Defaults to `0` (any version). `scp03.YubiKeyFactoryKeyVersion` (`0xFF`) is the YubiKey factory-reset KVN.
+- **KeyVersion**: KVN to send in INITIALIZE UPDATE. Defaults to `0` (any version). `yubikey.FactoryKeyVersion` (`0xFF`) is the YubiKey factory-reset KVN.
 - **SecurityLevel**: `LevelFull` (`C-MAC | C-DEC | R-MAC | R-ENC`) is the default and the recommended profile. Partial security levels are rejected unless `InsecureAllowPartialSecurityLevel` is set; this gate exists for spec-conformance testing only.
 - **HostChallenge**: optional 8 (S8) or 16 (S16) byte challenge. Random by default.
 - **SelectAID** / **ApplicationAID**: control the SELECT / post-handshake SELECT.
@@ -320,7 +320,7 @@ sess, err := scp03.Open(ctx, transport, &scp03.Config{
 
 ```go
 // YubiKey factory reset
-sess, err := scp03.Open(ctx, transport, scp03.FactoryYubiKeyConfig())
+sess, err := scp03.Open(ctx, transport, yubikey.FactorySCP03Config())
 
 // GP spec test keys (DO NOT use in production)
 sess, err := scp03.Open(ctx, transport, &scp03.Config{
@@ -330,7 +330,7 @@ sess, err := scp03.Open(ctx, transport, &scp03.Config{
 
 | Profile | Helper | KVN | Notes |
 |---|---|---|---|
-| YubiKey factory reset | `FactoryYubiKeyConfig()` | `0xFF` | Default keys after `securitydomain.Reset` on YubiKey |
+| YubiKey factory reset | `yubikey.FactorySCP03Config()` | `0xFF` | Default keys after `securitydomain.Reset` on YubiKey |
 | GP spec test | `DefaultKeys` constant | any | All-`0x40 41 42 ...` test keys; never use in production |
 | Custom keys | `Config{Keys: ...}` | caller | The realistic path |
 

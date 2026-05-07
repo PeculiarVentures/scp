@@ -132,7 +132,7 @@ func (r *relayTransport) Close() error { return r.stream.Close() }
 func adminAgainstRemoteCard(ctx context.Context, stream apduStream, oceTrustRoots *x509.CertPool) error {
     t := &relayTransport{stream: stream}
 
-    cfg := scp11.YubiKeyDefaultSCP11bConfig()
+    cfg := yubikey.SCP11bConfig()
     cfg.SelectAID = securitydomain.AIDSecurityDomain
     cfg.CardTrustPolicy = &trust.Policy{Roots: oceTrustRoots}
 
@@ -263,9 +263,9 @@ where the caller is co-located with the card.
 * `transport.Transport` — the integration boundary.
 * `transport/pcsc` — a local PC/SC implementation, useful as a
   reference for what an endpoint-side wrapper looks like.
-* `scp11.YubiKeyDefaultSCP11bConfig`, `YubiKeyDefaultSCP11aConfig`,
-  `YubiKeyDefaultSCP11cConfig` — starting points for `scp11.Config` with
-  the right security level and validation defaults.
+* `yubikey.SCP11bConfig`, `yubikey.SCP11aConfig`, `yubikey.SCP11cConfig` —
+  starting points for `scp11.Config` with the right security level and
+  validation defaults.
 * `securitydomain.OpenSCP11` — Security Domain wrapper that captures
   the SCP11-derived DEK for PUT KEY without exposing it to callers.
 * `trust.Policy` — `Roots`, `AllowedSerials`, `ExpectedSKI`,
