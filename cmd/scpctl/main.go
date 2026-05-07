@@ -3,17 +3,18 @@
 // functionality:
 //
 //   - test    hardware regression checks (read-only smoke against
-//             real cards: scp03/scp11a/scp11b reads + PIN-verify)
+//     real cards: scp03/scp11a/scp11b reads + PIN-verify)
 //   - piv     user-facing PIV operations (info, PIN, PUK, mgmt,
-//             key, cert, object, reset, provision) over the
-//             piv/session library
+//     key, cert, object, reset, provision) over the
+//     piv/session library
 //   - sd      Security Domain operations (info, reset, lock,
-//             unlock, terminate, OCE/SCP11a bootstraps)
+//     unlock, terminate, keys, allowlist, OCE/SCP11a
+//     bootstraps)
 //   - oce     off-card OCE certificate diagnostics (host-only;
-//             does not touch a card)
+//     does not touch a card)
 //   - gp      generic GlobalPlatform card-content management
-//             (probe, registry walk over arbitrary GP cards,
-//             host-side CAP file inspection)
+//     (probe, registry walk over arbitrary GP cards,
+//     host-side CAP file inspection)
 //
 // plus a small set of top-level utilities (readers, probe, version,
 // help) that do not belong to any group.
@@ -96,6 +97,8 @@ var sdCommands = map[string]func(ctx context.Context, env *runEnv, args []string
 	"lock":                cmdSDLock,
 	"unlock":              cmdSDUnlock,
 	"terminate":           cmdSDTerminate,
+	"keys":                cmdSDKeys,
+	"allowlist":           cmdSDAllowlist,
 	"bootstrap-oce":       cmdBootstrapOCE,
 	"bootstrap-scp11a":    cmdBootstrapSCP11a,
 	"bootstrap-scp11a-sd": cmdBootstrapSCP11aSD,
@@ -262,8 +265,9 @@ Groups:
               reset, provision.
 
   sd          Security Domain operations.
-              Wired: info, reset, lock, unlock, terminate,
-              bootstrap-oce, bootstrap-scp11a, bootstrap-scp11a-sd.
+              Wired: info, reset, lock, unlock, terminate, keys,
+              allowlist, bootstrap-oce, bootstrap-scp11a,
+              bootstrap-scp11a-sd.
 
   oce         Off-card OCE certificate diagnostics. Host-only;
               does not touch a card. Wired: verify, gen.
@@ -475,6 +479,49 @@ Subcommands:
                        card flag (NOT --confirm-write) so a single
                        careless invocation can't brick a card.
                        Requires SCP03.
+  keys list            Inventory installed key references with
+                       optional certificate summaries. Composes
+                       GET DATA tag 0x00E0 (KIT), tags 0xFF33/0xFF34
+                       (KLOC/KLCC), and tag 0xBF21 per reference.
+                       Read-only, unauthenticated.
+  keys export          Write the certificate chain stored against
+                       one key reference to a file. PEM by default,
+                       --der for raw concatenated DER. Read-only,
+                       unauthenticated.
+  keys delete          Delete one key reference (--kid + --kvn) or
+                       all keys at a KVN (--kvn + --all). Strict
+                       flag validation refuses ambiguous invocations.
+                       Authenticated SCP03; gated on
+                       --confirm-delete-key (NOT --confirm-write).
+                       Dry-run by default.
+  keys generate        Generate a P-256 EC key on-card at one SCP11
+                       SD slot (--kid 11/13/15). Private key stays
+                       on the card; SPKI written to --out as PEM.
+                       Authenticated SCP03; gated on --confirm-write.
+                       Dry-run by default. Uses Yubico extension
+                       INS=0xF1.
+  keys import          Install a key set, private key, or trust
+                       anchor at one key reference, dispatched by
+                       KID. Supports SCP03 AES-128 (--kid 01), SCP11
+                       SD private key with optional cert chain
+                       (--kid 11/13/15), and CA/OCE trust anchor
+                       with SKI registration (--kid 10/20-2F).
+                       Authenticated SCP03; gated on --confirm-write.
+                       Dry-run by default.
+  allowlist set        Install a certificate-serial-number allowlist
+                       for one SCP11 key reference. Replaces any
+                       existing allowlist wholesale (full-replace,
+                       not merge). Requires authenticated SCP03 and
+                       --confirm-write. Dry-run by default.
+  allowlist clear      Remove the allowlist for one key reference;
+                       the card then accepts any certificate signed
+                       by the associated CA. Requires authenticated
+                       SCP03 and --confirm-write. Dry-run by default.
+                       (No 'allowlist get' verb: on-card allowlist
+                       is write-only on YubiKey; the Yubico SDK does
+                       not implement read either. Operators keep the
+                       authoritative allowlist in their own systems
+                       and use 'set' to push it.)
   bootstrap-oce        Install an OCE public key (and optionally cert
                        chain + CA SKI) onto a card via SCP03. Day-1
                        provisioning step that enables SCP11a sessions.

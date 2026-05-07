@@ -963,7 +963,9 @@ func (s *Session) validateCardCertChain(data []byte) error {
 //
 //   - Each certificate in the chain is a SEPARATE PSO operation, sent
 //     in leaf-LAST order.
+//
 //   - P1 = OCEKeyReference.KVN.
+//
 //   - P2 = OCEKeyReference.KID, with bit 0x80 set for non-final certs
 //     (i.e. all but the LEAF cert) and cleared for the final cert.
 //     This is the "P2 chain bit" from GP §7.5 §7.10 — it tells the

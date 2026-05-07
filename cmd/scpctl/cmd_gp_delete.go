@@ -52,7 +52,7 @@ func cmdGPDelete(ctx context.Context, env *runEnv, args []string) error {
 	sdAIDHex := fs.String("sd-aid", "",
 		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	expectedCardID := fs.String("expected-card-id", "",
 		"If set, abort before sending DELETE when the card's CIN (GET DATA 0x0045) does not match this hex value.")
 	confirm := fs.Bool("confirm-write", false,
@@ -115,7 +115,7 @@ func cmdGPDelete(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, cfg, sdAID)
 	if err != nil {
 		report.Fail("open SCP03 SD", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

@@ -81,7 +81,15 @@ type Card struct {
 	LegacySCP11bNoReceipt bool
 
 	staticKey *ecdsa.PrivateKey
-	certDER   []byte
+
+	// CertDER backs the GET DATA tag 0xBF21 (cert store) handler.
+	// New() seeds it with a freshly-generated self-signed cert so
+	// tests that read the cert store get a parseable response by
+	// default. Tests that want to exercise the "no chain stored"
+	// path (SD references with no STORE DATA cert blob) set it to
+	// nil or empty: a zero-length slice makes the handler return
+	// SW=6A88, mirroring the empty-RegistryISD convention.
+	CertDER []byte
 
 	// OCE static public key, received via PERFORM SECURITY OPERATION.
 	// Used for ShSes in SCP11a/c. Nil for SCP11b.
@@ -171,6 +179,79 @@ type Card struct {
 	// The SCP11b/SCP03 unwrap is unaffected — GET STATUS reaches the
 	// dispatch only when a session is open, so tests must establish
 	// authentication first.
+	// RegistryISD, RegistryApps, RegistryLoadFiles come from the
+	// embedded *GPState below — see the GPState declaration further
+	// down. Tests can still write c.RegistryISD = ... thanks to
+	// Go's promotion rules.
+
+	// KeyInformationTemplate, when non-nil, replaces the synthetic
+	// KIT bytes returned by GET DATA tag 0x00E0. Lets tests exercise
+	// per-KID branches of host-side code (e.g. selective cert fetch
+	// that skips SCP03 references) by advertising whichever key
+	// references they need. Default (nil) preserves the historical
+	// single-SCP03-entry behavior used by existing tests.
+	KeyInformationTemplate []byte
+
+	// RequireAuthForReads, when true, makes the mock return
+	// SW=6982 (Security status not satisfied) for unauthenticated
+	// GET DATA calls on the inventory and certificate-store tags
+	// (0x00E0 KIT, 0xBF21 cert store, 0xFF33 KLOC, 0xFF34 KLCC).
+	// Models a card whose registry policy requires authentication
+	// for those reads — operationally the SCP03-rotated case.
+	//
+	// The flag fires only on the unauthenticated SD path; reads
+	// performed inside an SCP03 session reach this handler with
+	// the SM unwrap already done and are not gated.
+	//
+	// Default (false): unauthenticated reads succeed, matching
+	// YubiKey behavior on a fresh card.
+	RequireAuthForReads bool
+
+	// FailStoreDataSW, when non-zero, makes the mock return the
+	// configured SW for any STORE DATA (INS=0xE2). Used to drive
+	// partial-success-recovery tests where PUT KEY succeeds and
+	// STORE DATA must then fail. Default zero preserves the
+	// always-acknowledge behavior.
+	FailStoreDataSW uint16
+
+	// MockSDAID, when non-nil and non-empty, overrides the default
+	// GP-standard ISD AID (A0000001510000) for SELECT matching. Used
+	// to exercise the host-side --sd-aid plumb-through (Finding 2)
+	// without requiring a vendor-specific real card. SELECT against
+	// the override AID returns 9000; SELECT against the GP-standard
+	// AID returns 6A82 (file not found) when an override is in
+	// effect, mirroring how a vendor-specific card behaves when
+	// addressed by the wrong AID.
+	//
+	// Nil/empty preserves the historical behavior (only the GP-
+	// standard AID is recognized).
+	MockSDAID []byte
+
+	// MockSelectSW, when non-zero, is the status word returned for
+	// a SELECT that matches a recognized AID. Default 0 means
+	// "return 9000 on match" (the historical behavior). Set to
+	// 0x6283 to model a card whose ISD/applet is in CARD_LOCKED
+	// lifecycle: GP §11.1.2 says SELECT against a card-locked
+	// applet still returns FCI but with the warning SW=6283
+	// (state-of-non-volatile-memory-changed). GlobalPlatformPro
+	// tolerates this and continues with read-only operations
+	// rather than treating it as a hard failure; the
+	// securitydomain package follows the same model after the
+	// Section 9 fix from the third external review.
+	//
+	// Used by tests that exercise the locked-card SELECT
+	// tolerance without requiring a real CARD_LOCKED card.
+	MockSelectSW uint16
+
+	// PIVAttestCertDER, when non-nil, is returned as the response
+	// body for INS=0xF9 (YubiKey ATTEST) instead of the default
+	// synthetic stub. Used by tests that drive
+	// pivsession.Session.Attest end-to-end, which now parses the
+	// response as an x509.Certificate; the synthetic stub fails
+	// that parse. Tests that don't care about parseability can
+	// leave this nil.
+	PIVAttestCertDER []byte
+
 	// GPState is the embedded GP card-content state (registries
 	// + in-flight INSTALL [for load] context). Embedding promotes
 	// RegistryISD/RegistryApps/RegistryLoadFiles for direct field
@@ -239,7 +320,7 @@ func New() (*Card, error) {
 
 	return &Card{
 		staticKey:     key,
-		certDER:       der,
+		CertDER:       der,
 		pivPIN:        []byte("123456"),
 		pivPUK:        []byte("12345678"),
 		pivPINCounter: 3,
@@ -344,13 +425,14 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		return c.doSelect(cmd, underSM)
 
 	case 0xCA: // GET DATA
-		// GPState answers identity tags (0x42 IIN, 0x45 CIN)
-		// when configured; everything else falls through to the
-		// SCP11 mock's own GET DATA handler.
+		// GPState answers identity tags (0x42 IIN, 0x45 CIN) when
+		// configured; everything else falls through to the SCP11
+		// mock's own GET DATA handler. Pass underSM through so the
+		// inner handler can gate auth-required reads correctly.
 		if resp, ok := c.GPState.HandleGPCommand(cmd); ok {
 			return resp, nil
 		}
-		return c.doGetData(cmd)
+		return c.doGetData(cmd, underSM)
 
 	case 0xF2, 0xF0, 0xE6, 0xE8, 0xE4:
 		// GP card-content management (GET STATUS, SET STATUS,
@@ -366,6 +448,15 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		// scp03/mock.go does. Used by the SCP11 chaining regression
 		// test to exercise a long-payload command end-to-end through
 		// the wrap-then-chain layering.
+		//
+		// FailStoreDataSW lets a test force a specific SW from
+		// STORE DATA to exercise the partial-success remediation
+		// path in `sd keys import` (key installed but cert chain
+		// failed). Default zero preserves the historical
+		// always-acknowledge behavior.
+		if c.FailStoreDataSW != 0 {
+			return mkSW(c.FailStoreDataSW), nil
+		}
 		return mkSW(0x9000), nil
 
 	case 0x88: // INTERNAL AUTHENTICATE (SCP11b handshake)
@@ -612,9 +703,17 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		if !c.pivSelected {
 			return mkSW(0x6985), nil
 		}
-		// Return a small synthetic blob that looks like cert data so
-		// the host can decode "got a non-empty response." Not a real
-		// attestation; the mock can't sign a meaningful one.
+		// If the test injected a parseable cert, return it so
+		// pivsession.Session.Attest can decode it cleanly.
+		if len(c.PIVAttestCertDER) > 0 {
+			return &apdu.Response{Data: c.PIVAttestCertDER, SW1: 0x90, SW2: 0x00}, nil
+		}
+		// Otherwise return a small synthetic blob that looks like
+		// cert data so the host can decode "got a non-empty
+		// response." Not a real attestation; the mock can't sign
+		// a meaningful one. The synthetic shape will fail x509
+		// parsing — tests using pivsession.Session.Attest must
+		// set PIVAttestCertDER.
 		return &apdu.Response{Data: []byte{0x30, 0x82, 0x01, 0x00}, SW1: 0x90, SW2: 0x00}, nil
 
 	case 0x87: // PIV GENERAL AUTHENTICATE (mgmt-key mutual auth at P2=0x9B)
@@ -691,21 +790,52 @@ func (c *Card) doSelect(cmd *apdu.Command, underSM bool) (*apdu.Response, error)
 	if !underSM {
 		c.session = nil
 	}
-	if bytesEq(cmd.Data, aidSD) {
+	// MockSDAID overrides the default GP-standard ISD AID. When set,
+	// the override AID is the only one that resolves to the SD;
+	// the GP-standard AID returns 6A82 (file not found), mirroring
+	// vendor-specific cards that use a non-default ISD AID.
+	if len(c.MockSDAID) > 0 && bytesEq(cmd.Data, c.MockSDAID) {
+		c.selectedAID = c.MockSDAID
+		c.pivSelected = false
+		return mkSW(c.selectMatchSW()), nil
+	}
+	if len(c.MockSDAID) == 0 && bytesEq(cmd.Data, aidSD) {
 		c.selectedAID = aidSD
 		c.pivSelected = false
-		return mkSW(0x9000), nil
+		return mkSW(c.selectMatchSW()), nil
 	}
 	if bytesEq(cmd.Data, aidPIV) {
 		c.selectedAID = aidPIV
 		c.pivSelected = true
-		return mkSW(0x9000), nil
+		return mkSW(c.selectMatchSW()), nil
 	}
 	return mkSW(0x6A82), nil
 }
 
-func (c *Card) doGetData(cmd *apdu.Command) (*apdu.Response, error) {
+// selectMatchSW resolves the status word for a successful SELECT
+// match. Returns MockSelectSW when set, 0x9000 otherwise. Centralizing
+// the lookup keeps the four SELECT-success paths in doSelect identical.
+func (c *Card) selectMatchSW() uint16 {
+	if c.MockSelectSW != 0 {
+		return c.MockSelectSW
+	}
+	return 0x9000
+}
+
+func (c *Card) doGetData(cmd *apdu.Command, underSM bool) (*apdu.Response, error) {
 	tag := uint16(cmd.P1)<<8 | uint16(cmd.P2)
+
+	// RequireAuthForReads gates the inventory and certificate-store
+	// tags on the unauthenticated channel. Anything reached after
+	// SCP03 unwrap (underSM=true) bypasses the gate — that's the
+	// authenticated read path.
+	if c.RequireAuthForReads && !underSM {
+		switch tag {
+		case 0x00E0, 0xBF21, 0xFF33, 0xFF34:
+			return mkSW(0x6982), nil
+		}
+	}
+
 	switch tag {
 	case 0x0066:
 		// Card Recognition Data — same synthetic blob the SCP03 mock
@@ -716,14 +846,36 @@ func (c *Card) doGetData(cmd *apdu.Command) (*apdu.Response, error) {
 		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
 	case 0x00E0:
 		// Key Information Template. The mock advertises one entry
-		// (KID=0x01, KVN=0xFF, AES-128) so host-side
-		// GetKeyInformation produces a non-empty result.
-		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
+		// (KID=0x01, KVN=0xFF, AES-128) by default so host-side
+		// GetKeyInformation produces a non-empty result. Tests that
+		// need a different layout (e.g. an SCP11 SD ref to exercise
+		// per-KID branches) set KeyInformationTemplate.
+		kit := syntheticKeyInfo
+		if c.KeyInformationTemplate != nil {
+			kit = c.KeyInformationTemplate
+		}
+		return &apdu.Response{Data: append([]byte(nil), kit...), SW1: 0x90, SW2: 0x00}, nil
 	case 0xBF21:
-		// Certificate store — the original behavior of this method.
-		certNode := tlv.Build(tlv.TagCertificate, c.certDER)
+		// Certificate store. Empty CertDER → SW=6A88 (no chain
+		// stored), mirroring the empty-RegistryISD convention so
+		// tests can drive the "no chain" code path on the host.
+		if len(c.CertDER) == 0 {
+			return mkSW(0x6A88), nil
+		}
+		certNode := tlv.Build(tlv.TagCertificate, c.CertDER)
 		storeNode := tlv.BuildConstructed(tlv.TagCertStore, certNode)
 		return &apdu.Response{Data: storeNode.Encode(), SW1: 0x90, SW2: 0x00}, nil
+	case 0x5FC1:
+		// YubiKey firmware-version object (5FC109). The mock claims
+		// to be a YubiKey-shaped GP card so the SD profile probe
+		// (securitydomain/profile.Probe) classifies it as
+		// yubikey-sd. Returning the version object honestly mirrors
+		// what real YubiKey hardware does. The 3-byte payload is
+		// major.minor.patch (5.7.2 here, matching the
+		// hardware-validated firmware in README's verified-profiles
+		// section). Tests that need standard-sd behavior pin
+		// --profile standard-sd explicitly to skip the probe.
+		return &apdu.Response{Data: []byte{0x05, 0x07, 0x02}, SW1: 0x90, SW2: 0x00}, nil
 	default:
 		return mkSW(0x6A88), nil // reference data not found
 	}

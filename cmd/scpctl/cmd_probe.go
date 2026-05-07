@@ -10,6 +10,7 @@ import (
 	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/securitydomain"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // candidateAIDStr formats a gp.ISDCandidate's AID for human-
@@ -26,14 +27,48 @@ func candidateAIDStr(c gp.ISDCandidate) string {
 // for OIDs (decimal-dotted) so JSON output is human-readable without
 // custom encoders.
 type probeData struct {
-	GPVersion             string `json:"gp_version,omitempty"`
-	SCPVersion            string `json:"scp_version,omitempty"`
-	SCPParameter          string `json:"scp_parameter,omitempty"`
+	GPVersion             string   `json:"gp_version,omitempty"`
+	SCPVersion            string   `json:"scp_version,omitempty"`
+	SCPParameter          string   `json:"scp_parameter,omitempty"`
 	SCPs                  []string `json:"scps,omitempty"`
 	CardIdentificationOID string   `json:"card_identification_oid,omitempty"`
 	CardConfigDetailsOID  string   `json:"card_config_details_oid,omitempty"`
 	CardChipDetailsOID    string   `json:"card_chip_details_oid,omitempty"`
 	RawHex                string   `json:"raw_hex,omitempty"`
+
+	// AuthMode reports which session auth mode was used for the
+	// registry walk. Currently one of:
+	//   - "none": OpenUnauthenticated (cmdProbe; cmdSDInfo without
+	//     --scp03-* flags). Auth-required GET STATUS scopes appear
+	//     as SKIP under --full.
+	//   - "scp03": OpenSCP03 with the supplied keys. Auth-required
+	//     scopes populate.
+	//
+	// Per the external review on feat/sd-keys-cli, Finding 9: makes
+	// the auth posture of a probe report explicit, so an automated
+	// consumer reading the JSON can tell at a glance whether the
+	// SKIPped scopes are SKIPped because they're auth-gated and the
+	// session was unauthenticated, or because the card refused even
+	// the authenticated read. Future SCP11a/c paths will set this
+	// to "scp11a" / "scp11c" once Finding 4 lands.
+	AuthMode string `json:"auth_mode,omitempty"`
+
+	// CardLocked reports whether the SELECT that opened the probe
+	// session returned SW=6283 (CARD_LOCKED warning per GP §11.1.2).
+	// True means the card's applet is in CARD_LOCKED lifecycle:
+	// the SELECT structurally returned FCI but management
+	// operations and authenticated reads may be rejected by the
+	// card. The probe still proceeds with the read paths — failing
+	// closed on a CARD_LOCKED card would refuse to describe it at
+	// all, which is exactly the case where an operator most needs
+	// information.
+	//
+	// Omitted from JSON when false (the typical case). Surfaces in
+	// text output as a CARD_LOCKED warning line so an operator
+	// sees it prominently.
+	//
+	// Per the third external review, Section 9 (locked-card SELECT).
+	CardLocked bool `json:"card_locked,omitempty"`
 
 	// KeyInfo is populated by 'sd info' (and other callers that set
 	// probeOptions.fetchKeyInfo). Each entry is a human-readable
@@ -73,7 +108,19 @@ type registryDump struct {
 // Bytes are rendered as uppercase hex; Lifecycle has both the parsed
 // human form and the raw byte so callers can re-interpret if needed.
 type registryEntryView struct {
-	AID             string   `json:"aid"`
+	AID string `json:"aid"`
+
+	// Kind classifies the entry as ISD, SSD, APP, or LOAD_FILE.
+	// Distinct from Lifecycle (which describes the entry's
+	// state) and from the surrounding registry slice (which
+	// reflects the GET STATUS scope that produced the entry).
+	// Promotion of APP-with-SecurityDomain-privilege to SSD
+	// happens here, matching GlobalPlatformPro's classification
+	// (per the third external review on feat/sd-keys-cli,
+	// Section 8). An operator scanning JSON can tell at a glance
+	// which Applications-scope rows are actually SDs they could
+	// open management sessions against.
+	Kind            string   `json:"kind"`
 	Lifecycle       string   `json:"lifecycle"`
 	LifecycleByte   string   `json:"lifecycle_byte"`
 	Privileges      []string `json:"privileges,omitempty"`
@@ -97,8 +144,8 @@ type registryEntryView struct {
 //   - Yubico Python yubikit.securitydomain (CRD retrieval pattern)
 func cmdProbe(ctx context.Context, env *runEnv, args []string) error {
 	return runProbe(ctx, env, args, probeOptions{
-		flagSetName: "probe",
-		reportLabel: "probe",
+		flagSetName:  "probe",
+		reportLabel:  "probe",
 		fetchKeyInfo: false,
 	})
 }
@@ -135,27 +182,55 @@ type probeOptions struct {
 func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions) error {
 	fs := newSubcommandFlagSet(opts.flagSetName, env)
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
-	sdAIDHex := fs.String("sd-aid", "",
-		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
+	sdAIDFlag := registerSDAIDFlag(fs)
 	discoverSD := fs.Bool("discover-sd", false,
 		"Walk a curated list of candidate Security Domain AIDs (gp.ISDDiscoveryAIDs) and use the first one that responds 9000. Mutually exclusive with --sd-aid. Probes return SW=6A82 on absent AIDs; any other non-9000 SW aborts discovery. The chosen AID appears in the report so subsequent runs can pin it via --sd-aid.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	var fullMode *bool
+	var scp03Flags *scp03KeyFlags
 	if opts.allowFullStatus {
 		fullMode = fs.Bool("full", false,
 			"Walk the GP registry via GET STATUS (GP §11.4.2): "+
 				"ISD, Applications + SSDs, Load Files + Modules. "+
 				"Each scope reports separately; auth-required scopes "+
 				"appear as SKIP on cards that refuse them over an "+
-				"unauthenticated session.")
+				"unauthenticated session. Pass --scp03-* to authenticate "+
+				"the registry walk and replace SKIPs with populated entries.")
+		// scp03Optional: --scp03-* flags are accepted but not required.
+		// Without any of them, the session opens unauthenticated as
+		// before. With any of them, the session authenticates over
+		// SCP03 and the auth-required scopes (Applications + SSDs,
+		// Load Files + Modules) populate instead of SKIP-ing.
+		//
+		// Per the external review on feat/sd-keys-cli, Finding 9:
+		// 'sd info --full should let operators authenticate so the
+		// auth-gated scopes populate rather than always SKIPping.
+		// The unauthenticated default is correct for a probe, but
+		// the SKIP shouldn't be the only way to see the registry.'
+		scp03Flags = registerSCP03KeyFlags(fs, scp03Optional)
 	}
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
 
-	sdAID, err := decodeSDAIDFlag(*sdAIDHex)
+	// SCP03 flags only make sense with --full. The CRD + KIT fetches
+	// are unauthenticated-mode-only (the card serves them over a
+	// plain SELECT regardless of auth state), so authenticating just
+	// for those reads would be wasted effort and would confuse the
+	// SCP03-as-authenticated-registry-walk semantic. Reject the
+	// combination loudly so 'sd info --scp03-keys-default' (without
+	// --full) doesn't silently authenticate-and-do-nothing.
+	if scp03Flags != nil && scp03Flags.anyFlagSet() && (fullMode == nil || !*fullMode) {
+		return &usageError{
+			msg: "--scp03-* flags require --full; SCP03 authentication " +
+				"is meaningful only for the registry walk, not for " +
+				"the unauthenticated CRD/KIT reads",
+		}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
 	if err != nil {
-		return &usageError{msg: err.Error()}
+		return err
 	}
 	if *discoverSD && sdAID != nil {
 		return &usageError{msg: "--discover-sd and --sd-aid are mutually exclusive (pick one)"}
@@ -170,15 +245,13 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	report := &Report{Subcommand: opts.reportLabel, Reader: *reader}
 
 	var sd *securitydomain.Session
+	var authMode string
 	if *discoverSD {
+		// Walk the curated AID list. Trace each SELECT attempt
+		// into the report so an operator hitting a discovery
+		// failure can see which AIDs were tried and what SW
+		// each returned, rather than one aggregate error.
 		var match gp.ISDCandidate
-		// Trace each SELECT attempt into the report. The reviewer
-		// flagged that an operator who hits a discovery failure
-		// today sees one aggregate error and can't tell which AIDs
-		// were tried or what SW each returned. Emitting a SKIP per
-		// non-matching attempt and a PASS for the chosen one
-		// surfaces the discovery sequence to operators reading
-		// either the text report or the JSON output.
 		trace := func(a securitydomain.DiscoveryAttempt) {
 			label := candidateAIDStr(a.Candidate)
 			detail := fmt.Sprintf("%s — %s", label, a.Candidate.Source)
@@ -201,16 +274,31 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		}
 		report.Pass("discover ISD",
 			fmt.Sprintf("matched %s — %s", candidateAIDStr(match), match.Source))
+		authMode = "none"
 	} else {
-		sd, err = securitydomain.OpenUnauthenticated(ctx, t, sdAID)
-	}
-	if err != nil {
-		report.Fail("select ISD", err.Error())
-		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("select ISD: %w", err)
+		sd, authMode, err = openProbeSession(ctx, t, scp03Flags, fullMode, sdAID, report)
+		if err != nil {
+			_ = report.Emit(env.out, *jsonMode)
+			return err
+		}
 	}
 	defer sd.Close()
-	report.Pass("select ISD", "")
+
+	// CARD_LOCKED warning surfaces immediately so it appears
+	// before the per-step Pass/Fail lines and an operator sees
+	// it prominently. The probe continues either way — failing
+	// closed on CARD_LOCKED would refuse to describe the card,
+	// which is exactly the case where the operator most needs
+	// information about it.
+	//
+	// Per the third external review, Section 9.
+	cardLocked := sd.CardLocked()
+	if cardLocked {
+		report.Skip("SELECT SD",
+			"card returned SW=6283 (CARD_LOCKED, GP §11.1.2). FCI returned, "+
+				"reads will be attempted, but management operations and "+
+				"authenticated reads may be rejected by the card.")
+	}
 
 	raw, err := sd.GetCardRecognitionData(ctx)
 	if err != nil {
@@ -233,7 +321,7 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	}
 	report.Pass("parse CRD", "")
 
-	data := &probeData{RawHex: hexEncode(raw)}
+	data := &probeData{RawHex: hexEncode(raw), AuthMode: authMode, CardLocked: cardLocked}
 	if len(info.GPVersion) > 0 {
 		data.GPVersion = joinInts(info.GPVersion, ".")
 	}
@@ -355,6 +443,88 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		return fmt.Errorf("%s reported failures", opts.reportLabel)
 	}
 	return nil
+}
+
+// openProbeSession is the auth-mode-aware Session opener for the
+// probe / sd info family. Three branches:
+//
+//   - scp03Flags is nil (cmdProbe path, where allowFullStatus=false
+//     and no SCP03 flag was registered): always unauthenticated.
+//   - scp03Flags non-nil but no flag was set: unauthenticated, same
+//     as the historical behavior. Auth-required GET STATUS scopes
+//     under --full will SKIP as before.
+//   - scp03Flags non-nil with at least one flag set AND --full: open
+//     SCP03-authenticated. Auth-required scopes populate.
+//
+// Returns the session, the auth mode label ("none" or "scp03") for
+// inclusion in JSON output, and any error. On error, the report is
+// already populated with a Fail line so callers just need to Emit
+// and return.
+//
+// sdAID targets a non-default Security Domain AID. nil/empty
+// defaults to AIDSecurityDomain via the *WithAID variants — the
+// historical behavior on every unauth code path.
+//
+// Per the external review on feat/sd-keys-cli, Findings 9 + 2.
+func openProbeSession(
+	ctx context.Context,
+	t transport.Transport,
+	scp03Flags *scp03KeyFlags,
+	fullMode *bool,
+	sdAID []byte,
+	report *Report,
+) (*securitydomain.Session, string, error) {
+	// Decide auth mode. The --full + any-scp03-flag combination is
+	// the only path that authenticates; cmdProbe (no scp03Flags) and
+	// cmdSDInfo without the explicit auth flags both stay
+	// unauthenticated.
+	wantSCP03 := scp03Flags != nil && scp03Flags.anyFlagSet() &&
+		fullMode != nil && *fullMode
+
+	if !wantSCP03 {
+		sd, err := securitydomain.OpenUnauthenticatedWithAID(ctx, t, sdAID)
+		if err != nil {
+			report.Fail("select ISD", err.Error())
+			return nil, "none", fmt.Errorf("select ISD: %w", err)
+		}
+		report.Pass("select ISD", "")
+		return sd, "none", nil
+	}
+
+	// Authenticated path. Build the SCP03 config from the flag
+	// handle's optional-mode parser; this is the same applyToConfig
+	// path the bootstrap commands use, so the same custom-key
+	// validation (partial-triple rejection, hex parse errors,
+	// vendor-profile coherence) applies here.
+	cfg, err := scp03Flags.applyToConfigOptional()
+	if err != nil {
+		report.Fail("parse SCP03 flags", err.Error())
+		return nil, "scp03", err
+	}
+	if cfg == nil {
+		// applyToConfigOptional returns nil cfg when no flag was
+		// set, which we already filtered out above. If we get here
+		// it's a logic error in this function, not a card-side or
+		// operator-side problem.
+		report.Fail("open SCP03 SD", "internal: SCP03 flags requested but produced nil config")
+		return nil, "scp03", fmt.Errorf("internal: SCP03 flags requested but produced nil config")
+	}
+	report.Pass("SCP03 keys", scp03Flags.describeKeys(cfg))
+
+	// resolveProfile is a no-op for sd info's purposes (we don't
+	// emit any vendor-specific APDUs in the probe path) but we run
+	// it to surface profile-selection diagnostics and to keep the
+	// session.SetProfile contract consistent across read paths.
+	prof, _ := resolveProfile(ctx, t, scp03Flags, sdAID, report)
+
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, cfg, sdAID)
+	if err != nil {
+		report.Fail("open SCP03 SD", err.Error())
+		return nil, "scp03", fmt.Errorf("open SCP03 SD: %w", err)
+	}
+	sd.SetProfile(prof)
+	report.Pass("open SCP03 SD", "")
+	return sd, "scp03", nil
 }
 
 // hexEncode formats a byte slice as uppercase hex without spaces.
@@ -515,6 +685,7 @@ func walkRegistryFetched(label string, report *Report, fetch func() ([]securityd
 func projectRegistryEntry(e securitydomain.RegistryEntry) registryEntryView {
 	v := registryEntryView{
 		AID:           hexEncode(e.AID),
+		Kind:          e.Kind(),
 		Lifecycle:     e.LifecycleString(),
 		LifecycleByte: fmt.Sprintf("0x%02X", e.Lifecycle),
 	}

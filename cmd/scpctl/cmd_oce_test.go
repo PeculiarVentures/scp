@@ -540,10 +540,10 @@ func TestOCEVerify_LeafMissingCertificatePolicies_FailsLoudly(t *testing.T) {
 	// Pin the diagnostic content so the operator-facing message
 	// can't quietly drift away from the actionable fix.
 	for _, want := range []string{
-		"6A80",                  // names the on-card symptom
-		"YubiKey 5.7+",          // names the affected firmware class
+		"6A80",                          // names the on-card symptom
+		"YubiKey 5.7+",                  // names the affected firmware class
 		"1.2.840.114283.100.0.10.2.1.0", // names the required OID
-		"Regenerate the chain",  // names the fix
+		"Regenerate the chain",          // names the fix
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("certificatePolicies diagnostic missing %q\n--- output ---\n%s", want, out)

@@ -65,6 +65,57 @@ func (l LifecycleState) String() string {
 // GP §11.1.10 SET STATUS.
 const insSetStatus byte = 0xF0
 
+// LifecycleError carries the structured failure detail when a
+// SET STATUS APDU returns a non-9000 status word. Callers that
+// need the raw SW byte for telemetry or operator-facing error
+// reporting (e.g. lifecycle JSON output that has to distinguish
+// 'card policy rejected the transition' — 6985, 6982, 6A88 —
+// from 'host encoded wrong APDU') extract it via errors.As:
+//
+//	var lerr *LifecycleError
+//	if errors.As(err, &lerr) {
+//	    fmt.Printf("card rejected transition with SW=%04X\n", lerr.SW)
+//	}
+//
+// errors.Is(err, ErrCardStatus) still works — LifecycleError
+// wraps ErrCardStatus via Unwrap so existing callers that
+// branch on the sentinel keep working unchanged.
+//
+// Per the external review on feat/sd-keys-cli, Finding 10:
+// 'lifecycle behavior varies across cards, and the library
+// deliberately does not enforce a transition table, leaving
+// invalid transitions to card responses [...] the CLI should
+// preserve raw lifecycle byte and raw SW in JSON for every
+// failed transition.' This typed error is the structured
+// extraction point that makes the JSON preservation possible.
+type LifecycleError struct {
+	// Target is the lifecycle state the caller asked for
+	// (CARD_LOCKED, SECURED, TERMINATED).
+	Target LifecycleState
+
+	// SW is the raw status word the card returned. The
+	// common rejections per GP §11.1.10 + ISO 7816-4 Table 11:
+	//   - 0x6985: conditions of use not satisfied (card
+	//             policy rejected this transition for the
+	//             current lifecycle state)
+	//   - 0x6982: security status not satisfied (the
+	//             authenticated session lacks the privilege
+	//             needed for this transition)
+	//   - 0x6A88: referenced data not found (the targeted
+	//             SD AID isn't recognized; recovery is
+	//             out-of-scope)
+	// Cards can return other SWs; LifecycleError preserves
+	// whatever the card actually said without interpretation.
+	SW uint16
+}
+
+func (e *LifecycleError) Error() string {
+	return fmt.Sprintf("%s: SET STATUS to %s: SW=%04X",
+		ErrCardStatus.Error(), e.Target, e.SW)
+}
+
+func (e *LifecycleError) Unwrap() error { return ErrCardStatus }
+
 // SetISDLifecycle issues GP §11.1.10 SET STATUS to transition the
 // Issuer Security Domain to the requested lifecycle state.
 //
@@ -84,6 +135,13 @@ const insSetStatus byte = 0xF0
 // SW=6982 (security status not satisfied). Callers that want a
 // pre-check should read the current state via Session.GetStatus
 // with StatusScopeISD before calling.
+//
+// Error returns. Card-side failures (non-9000 SW) come back as
+// *LifecycleError carrying the raw SW; transport-level failures
+// come back as a wrapped fmt.Errorf. Callers needing structured
+// SW handling should use errors.As(&LifecycleError{}); callers
+// that just want to know it failed can still errors.Is against
+// ErrCardStatus.
 //
 // Authentication required.
 //
@@ -119,10 +177,7 @@ func (s *Session) SetISDLifecycle(ctx context.Context, target LifecycleState) er
 		return fmt.Errorf("securitydomain: SET STATUS to %s: %w", target, err)
 	}
 	if !resp.IsSuccess() {
-		return &APDUError{
-			Operation: fmt.Sprintf("SET STATUS to %s", target),
-			SW:        resp.StatusWord(),
-		}
+		return &LifecycleError{Target: target, SW: resp.StatusWord()}
 	}
 	return nil
 }

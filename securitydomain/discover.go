@@ -120,8 +120,27 @@ func DiscoverISD(ctx context.Context, t transport.Transport, candidates []gp.ISD
 	var lastErr error
 
 	for _, c := range candidates {
-		sd, err := OpenUnauthenticated(ctx, t, c.AID)
+		sd, err := OpenUnauthenticatedWithAID(ctx, t, c.AID)
 		if err == nil {
+			// OpenUnauthenticatedWithAID tolerates SW=6283
+			// (CARD_LOCKED) as success-with-warning per
+			// Section 9 of the third external review. For
+			// DiscoverISD specifically, the operator wants
+			// to distinguish "found a working SD here" from
+			// "found a locked SD here" so they know whether
+			// to proceed with reads or recover the card
+			// out-of-band. Surface CardLocked() as
+			// ErrLockedISD so the existing dispatch (and
+			// errors.Is callers) keeps working unchanged.
+			if sd.CardLocked() {
+				sd.Close()
+				if trace != nil {
+					trace(DiscoveryAttempt{Candidate: c, SW: 0x6283})
+				}
+				return nil, gp.ISDCandidate{},
+					fmt.Errorf("%w at candidate %q",
+						ErrLockedISD, candidateLabel(c))
+			}
 			if trace != nil {
 				trace(DiscoveryAttempt{Candidate: c, SW: 0x9000, Selected: true})
 			}

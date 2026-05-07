@@ -272,6 +272,8 @@ Four command groups, non-overlapping purposes:
 
 `scpctl sd` is the **operator surface for Security Domain operations**. `info` reads CRD and key-info template over an unauthenticated session. `reset` factory-resets SD key material. `lock` and `unlock` toggle the ISD between SECURED and CARD_LOCKED via GP SET STATUS; both are reversible and gated by `--confirm-write`. `terminate` transitions the ISD to TERMINATED — IRREVERSIBLE — gated by a distinct `--confirm-terminate-card` flag so a careless invocation of `--confirm-write` on the wrong command can never brick a card. `bootstrap-oce`, `bootstrap-scp11a`, and `bootstrap-scp11a-sd` are the day-1 provisioning flows that install OCE material and the SCP11a SD ECDH key on fresh cards; all are state-changing and gated by `--confirm-write`.
 
+Every generic SD command (`info`, `reset`, `lock`/`unlock`/`terminate`, `keys list|export|delete|generate|import`, `allowlist set|clear`) accepts `--sd-aid` to target a non-default Security Domain AID. Empty (the default) targets the GP-standard ISD `A0000001510000`; non-empty SELECTs the named AID instead — useful for vendor cards whose ISD lives at a different AID, or for Supplementary Security Domains addressed by AID. Hex input is permissive: bare hex, colon-separated, space-separated, or dash-separated (`A0:00:00:01:51:00:00:00`, `A0 00 00 01 51 00 00 00`, `a0000001510000` all parse identically). Length must be 5-16 bytes per ISO 7816-5; out-of-range input surfaces as a usage error before any transport activity. The bootstrap commands (`bootstrap-oce`, `bootstrap-scp11a`, `bootstrap-scp11a-sd`) deliberately do not accept `--sd-aid` — they target the standard ISD by definition.
+
 `scpctl oce` is **off-card OCE certificate diagnostics**. `verify` validates a chain off-card; `gen` produces a fresh known-good chain. Host-only — does not touch a card.
 
 `scpctl gp` is the **operator surface for generic GlobalPlatform card-content management**, distinct from the YubiKey-flavored `sd` group.
@@ -330,11 +332,15 @@ Output names the active profile (`yubikey-5.7.2`, `standard-piv`, or `probed:<in
 
 Opens an unauthenticated Security Domain session and reports the card's identity: parsed Card Recognition Data (issuer identification number, card image number, application provider, application version) plus the Key Information Template if available. No authentication, no state change.
 
-`--full` extends the report with a GP §11.4.2 GET STATUS walk across three scopes: ISD, Applications + SSDs, and Load Files + Modules. Each entry reports its AID, lifecycle (parsed for the scope's state machine), privilege bits set, and — for Load Files — version and module AIDs. Cards typically permit GET STATUS on the ISD without authentication but require auth for the other scopes; auth-required scopes appear as SKIP rather than FAIL, so an operator can see exactly which scopes need an authenticated session for a complete view. JSON output structures the registry under `data.registry.{isd, applications, load_files}` for programmatic consumers.
+`--full` extends the report with a GP §11.4.2 GET STATUS walk across three scopes: ISD, Applications + SSDs, and Load Files + Modules. Each entry reports its AID, lifecycle (parsed for the scope's state machine), privilege bits set, and — for Load Files — version and module AIDs. Cards typically permit GET STATUS on the ISD without authentication but require auth for the other scopes; auth-required scopes appear as SKIP rather than FAIL, so an operator can see exactly which scopes need an authenticated session for a complete view. Pass `--scp03-keys-default` (or the explicit `--scp03-{kvn,enc,mac,dek}` triple for a card with rotated keys) alongside `--full` to authenticate the registry walk and replace the SKIPs with populated entries. JSON output structures the registry under `data.registry.{isd, applications, load_files}` and reports the auth posture in `data.auth_mode` (`"none"` or `"scp03"`) for programmatic consumers.
+
+`--sd-aid` targets a non-default Security Domain AID (see the `scpctl sd` group description above for the input shapes accepted). Required when the card uses a vendor-specific ISD AID; without it, SELECT against the GP-standard AID returns `6A82` (file not found) and the command fails on the first APDU.
 
 ```bash
 scpctl sd info --reader "YubiKey" --full
 scpctl sd info --reader "YubiKey" --full --json
+scpctl sd info --reader "YubiKey" --full --scp03-keys-default --json
+scpctl sd info --reader "VendorCard" --sd-aid A0:00:00:06:47:2F:00:01 --full
 ```
 
 ## Design notes worth knowing
@@ -414,8 +420,62 @@ scpctl sd bootstrap-oce \
 
 The CLI never logs key bytes — the report shows `SCP03 keys PASS — custom (KVN 0x01, AES-128)` (or `factory (KVN 0xFF, AES-128 well-known)`), nothing more.
 
+## SCP11a/c management auth for `sd keys *` and `sd allowlist *`
+
+Every management verb in the `sd` group (`allowlist set`/`clear`, `keys delete`/`generate`/`import`) accepts SCP11a or SCP11c as an alternative to SCP03 for cards that have been moved off shared-secret SCP03 management onto certificate-based authentication. SCP11b is deliberately **not** offered: it's one-way auth (the card authenticates to the host but the host does not authenticate to the card), and every OCE-gated command on these verbs would be rejected by the card with `SW=6982`. The flag parser refuses `--scp11-mode=b` at parse time so the failure is fast and the diagnostic is clear.
+
+The flag set parallels the smoke-test surface but uses an `--scp11-` prefix to keep the auth flag group visually separate from the OCE-installation flags on `bootstrap-oce`:
+
+| Flag | Purpose |
+|---|---|
+| `--scp11-mode a`\|`c` | SCP11 variant. `a` = mutual auth via certificate chain (GP slot KID `0x11`). `c` = mutual auth with receipt for scriptable replay (KID `0x15`). Empty default keeps the command on SCP03. |
+| `--scp11-oce-key <pem>` | OCE private key (PKCS#8 or SEC1, P-256). Required when `--scp11-mode` is set. |
+| `--scp11-oce-cert <pem>` | OCE certificate chain, leaf-last. Required when `--scp11-mode` is set. The card validates this chain against its installed OCE root before accepting the authentication. |
+| `--scp11-oce-kid <hex>` | OCE Key ID on the card (defaults to `0x10` per Yubico factory). |
+| `--scp11-oce-kvn <hex>` | OCE Key Version Number (defaults to `0x03`). |
+| `--scp11-sd-kid <hex>` | Card-side SD key reference KID. Defaults to `0x11` for SCP11a or `0x15` for SCP11c per GP Amendment F §7.1.1. Override only for non-standard slots. |
+| `--scp11-sd-kvn <hex>` | Card-side SD KVN. Defaults to `0x00` (GP literal "any version"). |
+| `--scp11-trust-roots <pem>` | **Production.** PEM bundle of card root certificates. Loaded into `cfg.CardTrustAnchors` so the card's certificate is validated during the SCP11 handshake. |
+| `--scp11-lab-skip-trust` | **Lab only.** Skip card cert validation. Reduces SCP11 to opportunistic encryption against an unauthenticated card key. Mutually exclusive with `--scp11-trust-roots`. |
+
+`--scp03-*` and `--scp11-*` are mutually exclusive — pick one auth mode per command. The trust-config flags (`--scp11-trust-roots` vs `--scp11-lab-skip-trust`) are also mutually exclusive within the SCP11 group; opening SCP11 against an unauthenticated card key without explicit lab opt-in is opportunistic encryption rather than authenticated key agreement, and the helper refuses to do that silently.
+
+```bash
+# SCP03 (default) — historical management-auth path
+scpctl sd keys delete \
+  --reader "YubiKey" --kid 11 --kvn 7F \
+  --confirm-delete-key
+
+# SCP11a — cert-based mutual auth, production trust roots
+scpctl sd allowlist set \
+  --reader "VendorCard" \
+  --kid 11 --kvn 01 \
+  --serial 0x12ab --serial 0x34cd \
+  --scp11-mode a \
+  --scp11-oce-key /etc/oce/oce.key.pem \
+  --scp11-oce-cert /etc/oce/oce.chain.pem \
+  --scp11-trust-roots /etc/oce/card-roots.pem \
+  --confirm-write
+
+# SCP11c — same shape with the receipt-validating variant
+scpctl sd keys generate \
+  --reader "VendorCard" --kid 11 --kvn 02 \
+  --scp11-mode c \
+  --scp11-oce-key /etc/oce/oce.key.pem \
+  --scp11-oce-cert /etc/oce/oce.chain.pem \
+  --scp11-trust-roots /etc/oce/card-roots.pem \
+  --confirm-write
+```
+
+The session report names which mode opened: `open SCP11 session PASS` (with the protocol string in JSON's `data.channel` reading `scp11a` or `scp11c`) or `open SCP03 session PASS` for the historical path.
+
 ## Status
 
-- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv provision` (mgmt-key auth + cert-binding), `piv reset`, `test`. SCP11 commands accept `--trust-roots <pem>` for production trust validation. SCP03 commands accept `--scp03-{kvn,enc,mac,dek}` for rotated-key cards.
+- Current: `readers`, `probe`, `scp03-sd-read`, `scp11b-sd-read`, `scp11a-sd-read`, `scp11b-piv-verify`, `bootstrap-oce`, `piv-provision` (mgmt-key auth + cert-binding), `piv-reset`, `test`. SCP11 smoke commands accept `--trust-roots <pem>` for production trust validation. SCP03 commands accept `--scp03-{kvn,enc,mac,dek}` for rotated-key cards. The `sd` management verbs (`sd allowlist set`/`clear`, `sd keys delete`/`generate`/`import`) accept SCP11a/c as an alternative to SCP03 via the `--scp11-*` flag group documented above; SCP11b is rejected for OCE-gated operations. `sd info` tolerates SW=6283 from SELECT (CARD_LOCKED) and reports `data.card_locked=true` rather than failing closed, so an operator can describe a locked card; the `--sd-aid` flag targets a non-default Security Domain AID across every generic SD verb. `piv reset` is gated to YubiKey-profile cards only (Standard PIV refuses host-side, before INS=0xFB crosses the wire) and requires the dedicated `--confirm-reset-piv` flag.
 - Next: `GET METADATA` (Yubico extension) for auto-detecting management-key algorithm against a card whose state isn't known up front.
-- Deferred: SCP11c support — the `scp11.Config` HostID/CardGroupID fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. Adding a `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
+- Deferred: SCP11c with `HostID` / `CardGroupID` — the `scp11.Config` fields are wired into the KDF but the AUTHENTICATE parameter bit and tag-`0x84` TLV on the wire side aren't, and `scp11.Open` fails closed if either is set. SCP11c WITHOUT those parameters works today as the receipt-validating variant of SCP11a (with `KID=0x15` per GP) and is what `--scp11-mode c` exposes; the deferred work is exclusively the host-identifier path. A dedicated `scp11c-sd-read` CLI command without the wire side would be a downgrade attack against operators who think they got SCP11c-with-host-binding. Holding until the protocol layer ships the wire side, which itself depends on transcript vectors from a card or reference implementation that exercises HostID/CardGroupID.
+- Deferred: PIVMAN protected management key (YubiKey extension; not implemented). YubiKey ships a "protected management key" feature where the card stores the management key inside a YubiKey-specific data object (`PIVMAN_DATA` at `0x5FFF00`, `PIVMAN_PROTECTED_DATA` at `0x5FFF01`) protected by the PIN, so a PIN-only operator can authenticate management operations without holding the management-key bytes. ykman implements this; `scpctl` does NOT. The capability bit `ProtectedManagementKey` exists on YubiKey profiles for forward compatibility and is asserted false on Standard PIV, but no read or write path against `0x5FFF00` / `0x5FFF01` is wired. An operator with a YubiKey configured for protected management key cannot use `scpctl piv` to manage it; ykman is the right tool for that flow today. Adding this would require: (a) typed read/write paths for the PIVMAN data objects, (b) PIN-derived KDF for unprotecting the management-key bytes, (c) an opt-in CLI flag distinct from `--mgmt-key` so the operator clearly chooses between the two auth modes. Not on the near-term roadmap; the use case is YubiKey-specific and the threat model differs from the keys-as-flags pattern this CLI is built around. Per the third external review, Section 4: this feature is YubiKey-only PIVMAN behavior, NOT Standard PIV.
+
+## Reset-blocked detection (deferred)
+
+YubiKey BIO and some YubiKey configurations ship with PIV reset disabled by configuration. That state lives in a YubiKey-specific data object that `scpctl` does not currently read at probe time. As a result, `scpctl piv reset --confirm-reset-piv` against a card with reset disabled will reach the destructive path and the card will refuse with `SW=6985` ("conditions of use not satisfied"); an operator-side host-time refusal would be cleaner. Tracked as a deferred item (Section 2 item 5 of the third external review). Adding it requires (1) probe-time read of the relevant YubiKey config object, (2) a `Capabilities.ResetBlocked` flag wired through the profile layer, (3) a CLI refusal with a clear message before transmit. Not a regression on Standard PIV (where Reset is refused unconditionally regardless of the blocked state).

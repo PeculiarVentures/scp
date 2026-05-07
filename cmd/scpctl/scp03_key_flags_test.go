@@ -16,7 +16,7 @@ import (
 // equivalence so a refactor doesn't accidentally change it.
 func TestSCP03KeyFlags_DefaultIsFactory(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestSCP03KeyFlags_DefaultIsFactory(t *testing.T) {
 // produces the same factory config as the implicit default.
 func TestSCP03KeyFlags_ExplicitDefault(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{"--scp03-keys-default"}); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestSCP03KeyFlags_CustomKeys_AES128(t *testing.T) {
 	macK := strings.Repeat("22", 16)
 	dek := strings.Repeat("33", 16)
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{
 		"--scp03-kvn", "01",
 		"--scp03-enc", enc,
@@ -108,7 +108,7 @@ func TestSCP03KeyFlags_CustomKeys_AES192_AES256(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			k := strings.Repeat("AB", tc.size)
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
-			kf := registerSCP03KeyFlags(fs)
+			kf := registerSCP03KeyFlags(fs, scp03Required)
 			if err := fs.Parse([]string{
 				"--scp03-kvn", "FF",
 				"--scp03-enc", k, "--scp03-mac", k, "--scp03-dek", k,
@@ -142,7 +142,7 @@ func TestSCP03KeyFlags_TolerantHexFormatting(t *testing.T) {
 	for i, s := range cases {
 		t.Run(fmt.Sprintf("variant_%d", i), func(t *testing.T) {
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
-			kf := registerSCP03KeyFlags(fs)
+			kf := registerSCP03KeyFlags(fs, scp03Required)
 			if err := fs.Parse([]string{
 				"--scp03-kvn", "FF",
 				"--scp03-enc", s, "--scp03-mac", s, "--scp03-dek", s,
@@ -187,7 +187,7 @@ func TestSCP03KeyFlags_RejectsPartialCustom(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
-			kf := registerSCP03KeyFlags(fs)
+			kf := registerSCP03KeyFlags(fs, scp03Required)
 			if err := fs.Parse(tc.args); err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +211,7 @@ func TestSCP03KeyFlags_RejectsPartialCustom(t *testing.T) {
 // Operator must be deliberate.
 func TestSCP03KeyFlags_RejectsMixedDefaultAndCustom(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{
 		"--scp03-keys-default",
 		"--scp03-kvn", "01",
@@ -234,7 +234,7 @@ func TestSCP03KeyFlags_RejectsMixedDefaultAndCustom(t *testing.T) {
 // rather than an opaque card SW.
 func TestSCP03KeyFlags_RejectsInconsistentKeyLengths(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{
 		"--scp03-kvn", "01",
 		"--scp03-enc", strings.Repeat("11", 16),
@@ -260,7 +260,7 @@ func TestSCP03KeyFlags_Shorthand_Success(t *testing.T) {
 	k := strings.Repeat("AB", 16)
 	wantBytes, _ := hex.DecodeString(k)
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{
 		"--scp03-kvn", "01",
 		"--scp03-key", k,
@@ -292,7 +292,7 @@ func TestSCP03KeyFlags_Shorthand_Success(t *testing.T) {
 // before a downstream caller can rely on it.
 func TestSCP03KeyFlags_Shorthand_BytesAreIndependent(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{
 		"--scp03-kvn", "01",
 		"--scp03-key", strings.Repeat("AB", 16),
@@ -317,7 +317,7 @@ func TestSCP03KeyFlags_Shorthand_BytesAreIndependent(t *testing.T) {
 // key bytes — the card needs both to authenticate.
 func TestSCP03KeyFlags_Shorthand_RequiresKVN(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{
 		"--scp03-key", strings.Repeat("AB", 16),
 	}); err != nil {
@@ -359,7 +359,7 @@ func TestSCP03KeyFlags_Shorthand_RejectsMixedWithSplit(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
-			kf := registerSCP03KeyFlags(fs)
+			kf := registerSCP03KeyFlags(fs, scp03Required)
 			if err := fs.Parse(tc.args); err != nil {
 				t.Fatal(err)
 			}
@@ -378,7 +378,7 @@ func TestSCP03KeyFlags_Shorthand_RejectsMixedWithSplit(t *testing.T) {
 // --scp03-key combined with --scp03-keys-default is a usage error.
 func TestSCP03KeyFlags_Shorthand_RejectsMixedWithDefault(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	kf := registerSCP03KeyFlags(fs)
+	kf := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse([]string{
 		"--scp03-keys-default",
 		"--scp03-key", strings.Repeat("AB", 16),
@@ -428,7 +428,7 @@ func TestSCP03KeyFlags_RejectsBadHex(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
-			kf := registerSCP03KeyFlags(fs)
+			kf := registerSCP03KeyFlags(fs, scp03Required)
 			if err := fs.Parse(tc.args); err != nil {
 				t.Fatal(err)
 			}

@@ -44,10 +44,10 @@ func TestOpenSCP11bPIV_BF21_NeverAgainstPIV(t *testing.T) {
 
 	tr := &orderedTransport{
 		responses: [][]byte{
-			{0x90, 0x00},                    // SELECT SD: 9000
-			appendSW(cert, 0x90, 0x00),      // GET DATA BF21 → cert (yubikit shape)
-			{0x90, 0x00},                    // SELECT PIV: 9000
-			{0x00, 0x00, 0x6A, 0x80},        // INTERNAL AUTHENTICATE: malformed → fail-stop
+			{0x90, 0x00},               // SELECT SD: 9000
+			appendSW(cert, 0x90, 0x00), // GET DATA BF21 → cert (yubikit shape)
+			{0x90, 0x00},               // SELECT PIV: 9000
+			{0x00, 0x00, 0x6A, 0x80},   // INTERNAL AUTHENTICATE: malformed → fail-stop
 		},
 	}
 

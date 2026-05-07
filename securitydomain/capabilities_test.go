@@ -114,7 +114,7 @@ func TestOpenSCP11_NilTransport(t *testing.T) {
 }
 
 func TestOpenUnauthenticated_NilTransport(t *testing.T) {
-	_, err := OpenUnauthenticated(context.Background(), nil, nil)
+	_, err := OpenUnauthenticated(context.Background(), nil)
 	if err == nil {
 		t.Fatal("OpenUnauthenticated(nil transport) should return an error")
 	}

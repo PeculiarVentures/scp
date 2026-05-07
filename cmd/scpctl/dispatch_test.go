@@ -248,6 +248,146 @@ func TestDispatch_PIVSubcommandHelp(t *testing.T) {
 	}
 }
 
+// TestDispatch_SDSubcommandHelp verifies that 'scpctl sd <sub> -h'
+// reaches each SD subcommand handler. Includes 'keys' which is a
+// nested-verb dispatcher; the bare '-h' on it prints the verb list.
+//
+// Same structural shape as TestDispatch_PIVSubcommandHelp: we don't
+// assert on the help text content, only that the dispatcher reached
+// the handler (no "unknown subcommand" message).
+func TestDispatch_SDSubcommandHelp(t *testing.T) {
+	subcommands := []string{
+		"info",
+		"reset",
+		"lock",
+		"unlock",
+		"terminate",
+		"keys",
+		"allowlist",
+		"bootstrap-oce",
+		"bootstrap-scp11a",
+		"bootstrap-scp11a-sd",
+	}
+	for _, sub := range subcommands {
+		t.Run(sub, func(t *testing.T) {
+			_, stderr, code := runScpctl(t, "sd", sub, "-h")
+			if code != 0 && code != 1 && code != 2 {
+				t.Errorf("'sd %s -h' exit = %d, want 0/1/2; stderr=%s",
+					sub, code, stderr)
+			}
+			if strings.Contains(stderr, "unknown subcommand") {
+				t.Errorf("dispatcher reported unknown subcommand for 'sd %s'; stderr:\n%s",
+					sub, stderr)
+			}
+		})
+	}
+}
+
+// TestDispatch_SDKeysVerbs verifies that 'scpctl sd keys <verb> -h'
+// reaches the per-verb handler. This is the nested-dispatcher case:
+// 'sd' → 'keys' → 'list'/'export'/'delete'/'generate'/'import'. Each
+// verb has its own flag set, so '-h' produces flag usage output
+// rather than the bare-verb-list help that 'sd keys -h' produces.
+func TestDispatch_SDKeysVerbs(t *testing.T) {
+	verbs := []string{"list", "export", "delete", "generate", "import"}
+	for _, v := range verbs {
+		t.Run(v, func(t *testing.T) {
+			_, stderr, code := runScpctl(t, "sd", "keys", v, "-h")
+			if code != 0 && code != 1 && code != 2 {
+				t.Errorf("'sd keys %s -h' exit = %d, want 0/1/2; stderr=%s",
+					v, code, stderr)
+			}
+			if strings.Contains(stderr, "unknown subcommand") {
+				t.Errorf("dispatcher reported unknown subcommand for 'sd keys %s'; stderr:\n%s",
+					v, stderr)
+			}
+			if strings.Contains(stderr, "unknown keys subcommand") {
+				t.Errorf("'sd keys %s' reached the keys dispatcher but the verb was rejected; stderr:\n%s",
+					v, stderr)
+			}
+		})
+	}
+}
+
+// TestDispatch_SDKeysHelpContent is a tighter version of the loose
+// TestDispatch_SDKeysVerbs check: 'scpctl sd keys help' must exit 0
+// AND the stdout must describe both verbs. Catches regressions where
+// a future change drops the verb list, prints the wrong subcommand,
+// or routes 'help' to the parent group instead of the keys handler.
+func TestDispatch_SDKeysHelpContent(t *testing.T) {
+	stdout, stderr, code := runScpctl(t, "sd", "keys", "help")
+	if code != 0 {
+		t.Errorf("'sd keys help' exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"scpctl sd keys",
+		"list",
+		"export",
+		"delete",
+		"generate",
+		"import",
+		"PEM",
+		"--der",
+		"--confirm-delete-key",
+		"INS=0xF1",         // Yubico-extension transparency
+		"trust anchor",     // Phase 5c category visible in help
+		"SKI registration", // anchor flow described
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("'sd keys help' stdout missing %q; got:\n%s", want, stdout)
+		}
+	}
+	// Help must go to stdout (not stderr) so 'cmd | less' works.
+	if strings.Contains(stderr, "list") || strings.Contains(stderr, "export") {
+		t.Errorf("help content leaked to stderr; stderr:\n%s", stderr)
+	}
+}
+
+// TestDispatch_SDAllowlistVerbs verifies that 'scpctl sd allowlist
+// <verb> -h' reaches the per-verb handler. Same shape as
+// TestDispatch_SDKeysVerbs.
+func TestDispatch_SDAllowlistVerbs(t *testing.T) {
+	verbs := []string{"set", "clear"}
+	for _, v := range verbs {
+		t.Run(v, func(t *testing.T) {
+			_, stderr, code := runScpctl(t, "sd", "allowlist", v, "-h")
+			if code != 0 && code != 1 && code != 2 {
+				t.Errorf("'sd allowlist %s -h' exit = %d, want 0/1/2; stderr=%s",
+					v, code, stderr)
+			}
+			if strings.Contains(stderr, "unknown subcommand") {
+				t.Errorf("dispatcher reported unknown subcommand for 'sd allowlist %s'; stderr:\n%s",
+					v, stderr)
+			}
+			if strings.Contains(stderr, "unknown allowlist subcommand") {
+				t.Errorf("'sd allowlist %s' reached the allowlist dispatcher but the verb was rejected; stderr:\n%s",
+					v, stderr)
+			}
+		})
+	}
+}
+
+// TestDispatch_SDAllowlistHelpContent pins that 'sd allowlist help'
+// exits 0 and stdout describes both verbs plus the no-get rationale.
+// The no-get note is operator-facing context that should not silently
+// regress out of the help text.
+func TestDispatch_SDAllowlistHelpContent(t *testing.T) {
+	stdout, stderr, code := runScpctl(t, "sd", "allowlist", "help")
+	if code != 0 {
+		t.Errorf("'sd allowlist help' exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"scpctl sd allowlist",
+		"set",
+		"clear",
+		"write-only", // the design note that there is no get verb
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("'sd allowlist help' stdout missing %q; got:\n%s", want, stdout)
+		}
+	}
+}
+
 // TestDispatch_TopLevelUtilities verifies the readers/probe
 // dispatch paths reach their handlers. Both touch hardware so
 // they will fail at the PC/SC connect step; we test that the

@@ -42,7 +42,7 @@
 //   - Roots()             *x509.CertPool of the actual self-signed roots
 //   - Intermediates()     *x509.CertPool of the published intermediates
 //   - Pool()              merged pool: roots + intermediates as one trust set.
-//                         This is what callers want for SCP11 chain validation.
+//     This is what callers want for SCP11 chain validation.
 //   - RootCerts()         parsed roots
 //   - IntermediateCerts() parsed intermediates
 //   - PEM()               raw roots PEM (verbatim Yubico file, defensive copy)

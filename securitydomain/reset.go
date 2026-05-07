@@ -34,7 +34,7 @@ func ResetSecurityDomain(ctx context.Context, t transport.Transport) error {
 		return fmt.Errorf("securitydomain: ResetSecurityDomain requires a non-nil transport")
 	}
 
-	sd, err := OpenUnauthenticated(ctx, t, nil)
+	sd, err := OpenUnauthenticated(ctx, t)
 	if err != nil {
 		return fmt.Errorf("securitydomain: open SD for reset: %w", err)
 	}

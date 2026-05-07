@@ -140,7 +140,7 @@ func TestSession_Reset_UnauthenticatedAllowed(t *testing.T) {
 		respondSW: swAuthMethodBlocked,
 	}
 
-	sd, err := OpenUnauthenticated(context.Background(), rec, nil)
+	sd, err := OpenUnauthenticated(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("OpenUnauthenticated: %v", err)
 	}

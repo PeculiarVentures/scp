@@ -256,7 +256,6 @@ func TestParse_RejectsSCPOIDWrongShape(t *testing.T) {
 	}
 }
 
-
 // that's already unwrapped from the outer tag 0x66. Real callers
 // using Probe will get unwrapped value bytes from apdu.Response.Data.
 func TestParse_AcceptsValueWithoutOuterTag(t *testing.T) {

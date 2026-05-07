@@ -383,7 +383,7 @@ func TestSession_Install_RejectsInvalidOptions(t *testing.T) {
 func TestSession_Install_RequiresAuthentication(t *testing.T) {
 	// Use the unauthenticated session opener so requireAuth fails.
 	mc := mockcard.NewSCP03Card(scp03.DefaultKeys)
-	sess, err := securitydomain.OpenUnauthenticated(context.Background(), mc.Transport(), nil)
+	sess, err := securitydomain.OpenUnauthenticated(context.Background(), mc.Transport())
 	if err != nil {
 		t.Fatalf("OpenUnauthenticated: %v", err)
 	}

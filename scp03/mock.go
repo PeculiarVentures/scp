@@ -2,14 +2,12 @@ package scp03
 
 import (
 	"context"
-	"crypto/ecdh"
 	"crypto/rand"
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/cmac"
 	"github.com/PeculiarVentures/scp/kdf"
-	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
 )
 
@@ -77,6 +75,90 @@ type MockCard struct {
 	// at the assembled-command boundary, exactly like retail
 	// hardware does.
 	chainBuffer []byte
+
+	// certStore holds cert chains written via STORE DATA tag
+	// 0xBF21 + key reference. Read back via GET DATA tag 0xBF21
+	// + the same key reference. The key is the wire-encoded
+	// (KID<<8 | KVN) for a small fixed-size hash key.
+	//
+	// The mock previously had no cert-store persistence — STORE
+	// DATA was a record-and-9000 no-op and GET DATA tag 0xBF21
+	// returned 6A88. That's fine for tests that only assert the
+	// write APDU shape, but it blocks any test that wants to
+	// round-trip a chain (write then read on the same mock
+	// instance) — including the SCP11 cert-store flow used by
+	// bootstrap-scp11a-sd's chain validation step. Fixing the
+	// gap here makes the mock a faithful simulator of the
+	// cert-store life cycle, not just an APDU recorder.
+	//
+	// Stored bytes are the raw concatenated DER from the
+	// BF21{...} payload — we don't re-wrap on read because the
+	// library's parseCertificates accepts both the BF21-wrapped
+	// and bare 0x30-prefixed concatenated DER shapes. We return
+	// BF21{stored} to match what storeCertificatesData put on
+	// the wire originally; that round-trips cleanly through
+	// parseCertificates on the way back.
+	certStore map[uint16][]byte
+
+	// inventory tracks installed keys and shows up in the GET
+	// DATA tag 0x00E0 response (Key Information Template).
+	// Default state is one entry: the factory SCP03 key set at
+	// 0x01/0xFF, AES-128 — matching what the static
+	// syntheticKeyInfo blob used to advertise unconditionally.
+	//
+	// PUT KEY registers at (KID, new_KVN); DELETE KEY removes
+	// the targeted entries; GENERATE EC KEY registers the
+	// generated keypair. GET DATA tag 0x00E0 builds the response
+	// from this map, replacing the previously-static blob.
+	//
+	// Why this matters: tests that want to verify post-install
+	// state via sd keys list need the mock's KIT response to
+	// reflect what was just written. Without this, the mock
+	// returned the same fixed blob regardless of what had been
+	// installed — fine for APDU-emission-only tests, broken for
+	// round-trip workflow tests.
+	//
+	// Map key is (KID<<8 | KVN), same compact form as certStore.
+	// Entries are intentionally simple — a (KID, KVN) tuple plus
+	// a Components byte slice that gets emitted into the C0
+	// template body verbatim. We don't model lifecycle,
+	// privileges, or other registry fields here; tests that need
+	// those would use the GP §11.4.2 GET STATUS path which the
+	// mock still doesn't support (that's a separate gap, called
+	// out in the design doc — fix when a caller surfaces it).
+	inventory map[uint16]mockKeyEntry
+
+	// FailStoreDataSW, when non-zero, makes the mock return the
+	// configured SW for any STORE DATA (INS=0xE2) reaching the
+	// authenticated dispatch. Used to drive partial-success
+	// recovery tests where PUT KEY succeeds and STORE DATA must
+	// then fail on the same logical command. Default zero
+	// preserves the historical record-and-9000 behavior.
+	FailStoreDataSW uint16
+}
+
+// mockKeyEntry represents one installed key in the mock's
+// inventory. Intentionally minimal: the (KID, KVN) tuple plus a
+// Components byte slice that gets emitted into the C0 template
+// body during GET DATA tag 0x00E0 response synthesis.
+//
+// Components is encoded as pairs of bytes where each pair is
+// (algorithm_tag, length_id) per GP §11.3.3.1. Common values:
+//
+//	{0x88, 0x10}             -- AES-128 (SCP03)
+//	{0x88, 0x18}             -- AES-192 (SCP03 192-bit variant)
+//	{0x88, 0x20}             -- AES-256 (SCP03 256-bit variant)
+//	{0x88, 0x88}             -- ECC, P-256 (SCP11 family)
+//
+// These match the yubikit-go test fixtures and the values our own
+// parseKeyInformation expects to round-trip. Future component
+// shapes (multiple pairs per template, additional algorithm tags)
+// are accepted by the parser but not currently emitted by this
+// mock.
+type mockKeyEntry struct {
+	KID        byte
+	KVN        byte
+	Components []byte
 }
 
 type mockSession struct {
@@ -90,8 +172,23 @@ type mockSession struct {
 //
 // The returned MockCard is usable as a Transport via its Transport()
 // method, which produces something satisfying transport.Transport.
+//
+// Initial inventory: one entry for the SCP03 key set at KID=0x01,
+// KVN=0xFF, components {0x88, 0x10} (AES-128). This matches what
+// the previously-static syntheticKeyInfo blob advertised — every
+// test that asserted "GET DATA tag E0 returns a KIT showing the
+// factory key" continues to pass without modification. PUT KEY,
+// DELETE KEY, and GENERATE EC KEY operations mutate the inventory
+// from this baseline.
+//
+// To start with a different inventory (e.g. a card simulating a
+// post-rotation state), call MockCard.SetInventory after
+// construction.
 func NewMockCard(keys StaticKeys) *MockCard {
-	return &MockCard{Keys: keys}
+	c := &MockCard{Keys: keys}
+	c.inventory = make(map[uint16]mockKeyEntry)
+	c.registerKey(0x01, 0xFF, []byte{0x88, 0x10})
+	return c
 }
 
 // Transport returns a transport.Transport backed by this mock card.
@@ -170,11 +267,36 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0x50: // INITIALIZE UPDATE
 		return c.doInitializeUpdate(cmd)
-	case 0xCA: // GET DATA — allow tag 0x66 (CRD) unauthenticated;
-		// real cards typically permit CRD probe before any session.
-		// Other tags require secure messaging.
+	case 0xCA: // GET DATA — pre-session reads of operator-discoverable
+		// data objects. Real YubiKeys permit several paths without
+		// authentication:
+		//
+		//   - tag 0x0066 (Card Recognition Data per GP §H.2): the
+		//     pre-handshake "what kind of card is this" probe
+		//     scpctl uses for unauthenticated identification.
+		//   - tag 0x5FC1 (sub-tag 09 = firmware version): the
+		//     YubiKey version object the profile package's Probe
+		//     reads to distinguish YubiKey from standard GP
+		//     cards. Standard GP cards return 6A88 for this tag;
+		//     since this mock is YubiKey-shaped, it answers as a
+		//     YubiKey would.
+		//   - tag 0x00E0 (Key Information Template): YubiKey
+		//     permits unauthenticated reads of the KIT so
+		//     ykman/scpctl `sd keys list` and similar inventory
+		//     commands work without prompting for SCP03 keys.
+		//     Standard GP cards typically gate KIT behind the
+		//     ISD authenticated state and answer 6982 here.
+		//
+		// Other GET DATA tags require secure messaging and get
+		// SW=6982 here.
 		if cmd.P1 == 0x00 && cmd.P2 == 0x66 {
-			return c.doGetData(cmd.P1, cmd.P2)
+			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
+		}
+		if cmd.P1 == 0x5F && cmd.P2 == 0xC1 {
+			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
+		}
+		if cmd.P1 == 0x00 && cmd.P2 == 0xE0 {
+			return c.doGetData(cmd.P1, cmd.P2, cmd.Data)
 		}
 		return &apdu.Response{SW1: 0x69, SW2: 0x82}, nil // security status not satisfied
 	default:
@@ -398,17 +520,73 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 	case 0xFD: // Echo (test)
 		return &apdu.Response{Data: data, SW1: 0x90, SW2: 0x00}, nil
 	case 0xCA: // GET DATA
-		return c.doGetData(p1, p2)
-	case 0xD8, 0xE2, 0xE4:
-		// PUT KEY (0xD8), STORE DATA (0xE2), DELETE KEY (0xE4) — the
-		// OCE-write commands the bootstrap-oce CLI issues. The mock
-		// records each write so tests can assert the host sent the
-		// right shape; the response is unconditionally 9000 because
+		return c.doGetData(p1, p2, data)
+	case 0xE2, 0xE4:
+		// STORE DATA (0xE2), DELETE KEY (0xE4) — the OCE-write
+		// commands the bootstrap-oce CLI issues. The mock records
+		// each write so tests can assert the host sent the right
+		// shape; the response is unconditionally 9000 because
 		// validating wire format is the securitydomain package's
-		// job, not the mock's. (The mock does not persist anything
-		// — a follow-up GET DATA against the same key reference
-		// will not return what was just PUT.)
+		// job, not the mock's. (Most STORE DATA shapes are pure
+		// recording — the mock has no persistence for allowlists
+		// or CA-issuer SKIs because no test currently rounds them
+		// trip via GET DATA against the same mock instance.)
 		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		if ins == 0xE2 && c.FailStoreDataSW != 0 {
+			// Forced STORE DATA failure: drive partial-success
+			// recovery tests where PUT KEY commits but STORE
+			// DATA must then fail. Recording happens above so
+			// tests can still assert the wire shape was right.
+			return &apdu.Response{SW1: byte(c.FailStoreDataSW >> 8), SW2: byte(c.FailStoreDataSW)}, nil
+		}
+		if ins == 0xE2 {
+			// Cert-chain STORE DATA is the one shape we DO persist:
+			// it round-trips with GET DATA tag BF21 in the same
+			// session, which is the bootstrap-scp11a-sd chain-
+			// validation flow. tryStoreCertChain returns true when
+			// the body matches A6{83{KID,KVN}} || BF21{certs}; for
+			// other STORE DATA shapes (allowlist, CA issuer, etc.)
+			// it returns false and we fall through to plain 9000.
+			c.tryStoreCertChain(data)
+		}
+		if ins == 0xE4 {
+			// DELETE KEY: parse D0{KID} and/or D2{KVN} from the
+			// body and remove matching inventory entries. Real
+			// cards are idempotent for "delete a key that doesn't
+			// exist" — they return 9000 either way; the mock
+			// matches that behavior. Only the inventory-side
+			// effect is conditional on the entry actually existing.
+			c.applyDeleteKeyToInventory(p2, data)
+		}
+		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
+	case 0xD8:
+		// PUT KEY (GP §11.8). Three flavors land here, each with a
+		// different response shape. We parse the body to choose the
+		// right one rather than blindly returning 9000-with-empty-
+		// body — the SCP03 key-set flavor expects the card to echo
+		// back KVN || KCV_enc || KCV_mac || KCV_dek, and the
+		// library's Session.PutSCP03Key checks that response with
+		// ErrChecksum on mismatch.
+		//
+		// Body distinguisher: the SCP03 AES key-set body starts with
+		// the new KVN byte and is followed by Tlv(0x88, encrypted)
+		// + 0x03 + KCV repeated three times. EC private (0xA1/0xB1)
+		// and EC public (0xB0) bodies have different leading tags
+		// and don't carry the KVN-then-tag pattern, so a single byte
+		// of lookahead is enough to disambiguate.
+		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		// Inventory side-effect: register the newly installed key
+		// (or replace an existing entry) before formulating the
+		// response. Errors here are non-fatal — the inventory
+		// model is a best-effort tracker, not a constraint on
+		// what bodies the mock accepts.
+		c.applyPutKeyToInventory(p1, p2, data)
+		if resp, ok := c.synthesizeSCP03KeySetPutKeyResponse(data); ok {
+			return &apdu.Response{Data: resp, SW1: 0x90, SW2: 0x00}, nil
+		}
+		// EC public / EC private PUT KEY: 9000 with no body, which
+		// is what real cards return and what PutECPublicKey /
+		// PutECPrivateKey expect.
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0xF0:
 		// SET STATUS (GP §11.1.10). Recorded for wire-shape
@@ -430,7 +608,15 @@ func (c *MockCard) processPlain(ins, p1, p2 byte, data []byte) (*apdu.Response, 
 		// to "store"). Tests that care about specific keys
 		// generated by GENERATE KEY can either parse the response
 		// out of the recorded transmit or override this method.
+		//
+		// Inventory side-effect: register at (P2 & 0x7F, P1 if
+		// non-zero else body[0]) with EC components. The library's
+		// generateECKeyCmd places the new KVN in P1; we also fall
+		// through to body[0] for safety in case future surface
+		// shifts to a body-carried KVN (matches the PUT KEY EC
+		// path's convention).
 		c.recorded = append(c.recorded, RecordedAPDU{INS: ins, P1: p1, P2: p2, Data: append([]byte(nil), data...)})
+		c.applyGenerateKeyToInventory(p1, p2, data)
 		respData, err := synthesizeGenerateKeyResponse()
 		if err != nil {
 			// Crypto failure here would mean Go's stdlib RNG broke,
@@ -465,62 +651,6 @@ func (c *MockCard) Recorded() []RecordedAPDU {
 	out := make([]RecordedAPDU, len(c.recorded))
 	copy(out, c.recorded)
 	return out
-}
-
-// doGetData answers the small set of GET DATA tags the host code in
-// this repo issues during smoke and integration tests:
-//
-//   - 0x0066 — Card Recognition Data (a synthetic GP 2.3.1 / SCP03
-//     i=0x65 blob, same shape as the cardrecognition package's
-//     test fixtures).
-//   - 0x00E0 — Key Information Template (one C0 entry: KID=0x01,
-//     KVN=0xFF, component {0x88: 0x10} — AES-128 marker).
-//
-// Other tags return 6A88 (reference data not found), matching real
-// card behavior. The mock does not attempt to be exhaustive — it
-// covers the GP §H.2 + §11.3.3.1 reads the host's Session methods
-// (GetCardRecognitionData, GetKeyInformation) actually issue.
-func (c *MockCard) doGetData(p1, p2 byte) (*apdu.Response, error) {
-	tag := uint16(p1)<<8 | uint16(p2)
-	switch tag {
-	case 0x0066:
-		return &apdu.Response{Data: append([]byte(nil), syntheticCRD...), SW1: 0x90, SW2: 0x00}, nil
-	case 0x00E0:
-		return &apdu.Response{Data: append([]byte(nil), syntheticKeyInfo...), SW1: 0x90, SW2: 0x00}, nil
-	default:
-		return &apdu.Response{SW1: 0x6A, SW2: 0x88}, nil // reference data not found
-	}
-}
-
-// syntheticCRD is the Card Recognition Data blob the mock returns
-// for GET DATA tag 0x0066. Hand-assembled per GP Card Spec §H.2:
-// outer 66 LL, inner 73 LL OID list, GP RID marker + GP version
-// (1.2.840.114283.2.2.3.1 = 2.3.1) + SCP info OID
-// (1.2.840.114283.4.3.65 = SCP03 i=0x65). Same shape as the test
-// fixture used by the cardrecognition package and #41 trace tests.
-var syntheticCRD = []byte{
-	0x66, 0x26,
-	0x73, 0x24,
-	0x06, 0x07, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x01,
-	0x60, 0x0C, 0x06, 0x0A, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x02, 0x02, 0x03, 0x01,
-	0x64, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xFC, 0x6B, 0x04, 0x03, 0x65,
-}
-
-// syntheticKeyInfo is a minimal Key Information Template the mock
-// returns for GET DATA tag 0x00E0. It advertises one keyset:
-//
-//	E0 06              -- Key Information container, 6 bytes
-//	  C0 04            -- one Key Information Template, 4 bytes
-//	    01             -- KID = 0x01 (SCP03)
-//	    FF             -- KVN = 0xFF (YubiKey factory)
-//	    88 10          -- component pair (algorithm 0x88 = AES, length-id 0x10)
-//
-// Decoded by securitydomain.parseKeyInformation as:
-//
-//	KeyInfo{Reference: {ID: 0x01, Version: 0xFF}, Components: {0x88: 0x10}}
-var syntheticKeyInfo = []byte{
-	0xE0, 0x06,
-	0xC0, 0x04, 0x01, 0xFF, 0x88, 0x10,
 }
 
 // MockTransport implements transport.Transport for the SCP03 mock card.
@@ -569,24 +699,4 @@ func (t *MockTransport) Close() error { return nil }
 // should refuse it by default.
 func (t *MockTransport) TrustBoundary() transport.TrustBoundary {
 	return transport.TrustBoundaryUnknown
-}
-
-// synthesizeGenerateKeyResponse builds a wire-shape response that
-// Session.GenerateECKey's parser accepts: Tlv(0xB0, <65-byte SEC1
-// uncompressed P-256 point>). The matching private key is discarded
-// because MockCard does not persist SD state — a subsequent
-// authenticated read against the supposed new KID will not work, but
-// the GENERATE KEY round-trip itself does.
-//
-// Tests that need to drive a specific keypair through GENERATE KEY
-// can replace this stub by wrapping the transport returned by
-// Transport(); for the common case (CLI hitting a synthetic card and
-// asserting the public key parses) the random keypair is enough.
-func synthesizeGenerateKeyResponse() ([]byte, error) {
-	priv, err := ecdh.P256().GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	point := priv.PublicKey().Bytes() // 65-byte uncompressed SEC1 (0x04 || X || Y)
-	return tlv.Build(tlv.Tag(0xB0), point).Encode(), nil
 }

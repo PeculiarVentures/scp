@@ -61,6 +61,15 @@ func TestPIVProvision_GenerateKey_Smoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
+	// pivsession.Session.GenerateKey requires mgmt-key auth
+	// host-side (matching real PIV behavior). The previous raw-
+	// APDU path didn't enforce this, so the smoke test passed
+	// without --mgmt-key against a permissive mock. The migration
+	// to OpenSCP11bPIV in cmd_piv_provision.go surfaces the gate.
+	// Configure the mock + pass --mgmt-key so the smoke flow
+	// completes the way it would against a real card.
+	mockCard.PIVMgmtKey = piv.DefaultMgmtKey
+	mockCard.PIVMgmtKeyAlgo = piv.AlgoMgmtAES192
 
 	var buf bytes.Buffer
 	env := &runEnv{
@@ -75,6 +84,8 @@ func TestPIVProvision_GenerateKey_Smoke(t *testing.T) {
 		"--pin", "123456",
 		"--slot", "9a",
 		"--algorithm", "eccp256",
+		"--mgmt-key", "default",
+		"--mgmt-key-algorithm", "aes192",
 		"--lab-skip-scp11-trust",
 		"--confirm-write",
 	})
@@ -115,6 +126,26 @@ func TestPIVProvision_WithCertAndAttest(t *testing.T) {
 		t.Fatalf("slot key generate: %v", err)
 	}
 	mockCard.PIVPresetKey = slotKey
+	mockCard.PIVMgmtKey = piv.DefaultMgmtKey
+	mockCard.PIVMgmtKeyAlgo = piv.AlgoMgmtAES192
+
+	// Stage a parseable cert as the ATTEST response. The mock
+	// can't sign a real attestation, but pivsession.Session.Attest
+	// parses the response as x509 and we want the test to drive
+	// the parse path end-to-end. A self-signed cert under the
+	// slot key serves as a valid syntactic stand-in.
+	attestTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(0xA77E57),
+		Subject:      pkix.Name{CommonName: "mock attestation"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	attestDER, err := x509.CreateCertificate(rand.Reader, attestTmpl, attestTmpl, &slotKey.PublicKey, slotKey)
+	if err != nil {
+		t.Fatalf("create attest cert: %v", err)
+	}
+	mockCard.PIVAttestCertDER = attestDER
 
 	certPath := writeMatchingPIVCert(t, slotKey)
 
@@ -132,6 +163,8 @@ func TestPIVProvision_WithCertAndAttest(t *testing.T) {
 		"--slot", "9c",
 		"--cert", certPath,
 		"--attest",
+		"--mgmt-key", "default",
+		"--mgmt-key-algorithm", "aes192",
 		"--lab-skip-scp11-trust",
 		"--confirm-write",
 	})
@@ -170,6 +203,8 @@ func TestPIVProvision_RejectsCertPubkeyMismatch(t *testing.T) {
 	}
 	slotKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	mockCard.PIVPresetKey = slotKey
+	mockCard.PIVMgmtKey = piv.DefaultMgmtKey
+	mockCard.PIVMgmtKeyAlgo = piv.AlgoMgmtAES192
 
 	// Different key for the cert — the binding check must catch
 	// the mismatch.
@@ -189,6 +224,8 @@ func TestPIVProvision_RejectsCertPubkeyMismatch(t *testing.T) {
 		"--pin", "123456",
 		"--slot", "9a",
 		"--cert", certPath,
+		"--mgmt-key", "default",
+		"--mgmt-key-algorithm", "aes192",
 		"--lab-skip-scp11-trust",
 		"--confirm-write",
 	})
@@ -360,16 +397,26 @@ func TestPIVProvision_RejectsWrongMgmtKey(t *testing.T) {
 	}
 }
 
-// TestPIVProvision_NoMgmtKey_StillWorksAgainstUnenforcingMock confirms
-// that without --mgmt-key the command still runs and the mock (with
-// no PIVMgmtKey configured) skips the auth path. This covers the
-// "test the mock without going through real auth" use case.
-func TestPIVProvision_NoMgmtKey_StillWorksAgainstUnenforcingMock(t *testing.T) {
+// TestPIVProvision_NoMgmtKey_FailsBeforeGenerateKey pins the
+// host-side mgmt-key gate that pivsession.Session.GenerateKey
+// enforces. Without --mgmt-key, the command runs through SCP11b
+// open and VERIFY PIN cleanly, then fails on GENERATE KEY because
+// the library refuses to send GENERATE ASYMMETRIC KEY without an
+// authenticated management key.
+//
+// This is a behavior change from the deprecated raw-APDU path,
+// which would have sent GENERATE KEY anyway and let the card
+// refuse with SW=6982. Surfacing the gate host-side is the
+// correctness improvement the migration to OpenSCP11bPIV brings.
+//
+// Per the fourth external review, cross-branch issue #2
+// (cmd_piv_provision migrated to OpenSCP11bPIV).
+func TestPIVProvision_NoMgmtKey_FailsBeforeGenerateKey(t *testing.T) {
 	mockCard, err := mockcard.New()
 	if err != nil {
 		t.Fatalf("mockcard.New: %v", err)
 	}
-	// No PIVMgmtKey set; mock won't attempt the flow.
+	// No PIVMgmtKey configured; --mgmt-key not passed.
 	var buf bytes.Buffer
 	env := &runEnv{
 		out: &buf, errOut: &buf,
@@ -384,12 +431,24 @@ func TestPIVProvision_NoMgmtKey_StillWorksAgainstUnenforcingMock(t *testing.T) {
 		"--lab-skip-scp11-trust",
 		"--confirm-write",
 	})
-	if err != nil {
-		t.Fatalf("cmdPIVProvision: %v\n--- output ---\n%s", err, buf.String())
+	// The command should report failures (GENERATE KEY refused
+	// host-side) and return a non-nil error to surface the
+	// problem to scripts.
+	if err == nil {
+		t.Fatalf("expected failure when --mgmt-key is omitted; output:\n%s", buf.String())
 	}
 	out := buf.String()
 	if !strings.Contains(out, "MGMT-KEY AUTH") || !strings.Contains(out, "SKIP") {
 		t.Errorf("expected MGMT-KEY AUTH SKIP entry; got:\n%s", out)
+	}
+	// GENERATE KEY must fail with the host-side auth gate
+	// message, not a card-side SW.
+	if !strings.Contains(out, "GENERATE KEY") || !strings.Contains(out, "FAIL") {
+		t.Errorf("expected GENERATE KEY FAIL; got:\n%s", out)
+	}
+	if !strings.Contains(out, "AuthenticateManagementKey") &&
+		!strings.Contains(out, "authentication has not been performed") {
+		t.Errorf("expected error to reference host-side mgmt-key gate; got:\n%s", out)
 	}
 }
 

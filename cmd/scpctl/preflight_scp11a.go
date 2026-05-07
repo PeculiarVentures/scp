@@ -17,10 +17,10 @@ import (
 // Return value:
 //
 //   - true  → emit the report as-is and exit the smoke (the report
-//             carries a SKIP that names the missing reference).
+//     carries a SKIP that names the missing reference).
 //   - false → preflight is satisfied, or it was inconclusive in a
-//             way that should not block the smoke. The caller
-//             continues to OpenSCP11.
+//     way that should not block the smoke. The caller
+//     continues to OpenSCP11.
 //
 // Inconclusive cases (KIT fetch fails for transport or card-status
 // reasons, e.g. a card that refuses unauthenticated KIT) downgrade
@@ -29,7 +29,7 @@ import (
 // the source of truth for whether the card can or cannot complete
 // the handshake.
 func preflightSCP11aSDKey(ctx context.Context, t transport.Transport, sdKID, sdKVN byte, report *Report) bool {
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t, nil)
+	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
 	if err != nil {
 		report.Skip("SCP11a SD key preflight",
 			fmt.Sprintf("could not open unauthenticated SD: %v; proceeding to open anyway", err))

@@ -14,6 +14,7 @@ import (
 	"github.com/PeculiarVentures/scp/channel"
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/scp11"
+	"github.com/PeculiarVentures/scp/securitydomain/profile"
 	"github.com/PeculiarVentures/scp/tlv"
 	"github.com/PeculiarVentures/scp/transport"
 )
@@ -72,6 +73,55 @@ type Session struct {
 	// authenticate this session. Required for PUT KEY operations that
 	// encrypt key material before transmission. Nil for SCP11 sessions.
 	dek []byte
+
+	// profile gates vendor-extension operations against the
+	// active card profile. Set via SetProfile after Open*; nil
+	// means "no gating, send anything" (backward compat for
+	// callers that haven't adopted the profile package yet).
+	//
+	// Wired into GenerateECKey today; future vendor-extension
+	// methods will consult this field too. Set once at session
+	// open and never mutated for the session's lifetime.
+	profile profile.Profile
+
+	// sdAID records which Security Domain AID this session
+	// targets. Set at Open* via the explicit sdAID parameter
+	// or defaulted to AIDSecurityDomain when none was given.
+	//
+	// Stored so callers / observers (telemetry, JSON output,
+	// post-open diagnostics) can recover the addressed AID
+	// without rebuilding it from external state. Read-only
+	// after construction; cloneAID at Open* time means a
+	// caller mutating the input slice can't corrupt this copy.
+	//
+	// Per the external review on feat/sd-keys-cli, Finding 2:
+	// non-default ISD AIDs must be addressable via the Open*
+	// API. The SDAID() accessor exposes the chosen value for
+	// CLI output and for sanity-checks across nested calls
+	// (e.g. lifecycle commands that want to assert they're
+	// operating on the AID the operator named, not on the
+	// implicit default).
+	sdAID []byte
+
+	// cardLocked records whether the SELECT that opened this
+	// session returned SW=6283. GP §11.1.2 documents 6283 as
+	// "selected file invalidated" — the card is in CARD_LOCKED
+	// lifecycle (see GP §5.3.1), the SELECT structurally
+	// succeeded (FCI was returned), but the card signals that
+	// management operations may be constrained.
+	//
+	// GlobalPlatformPro and OpenSC tolerate 6283 on SELECT and
+	// continue with whatever read-only data is available rather
+	// than treating it as a hard failure. The securitydomain
+	// package follows the same model: OpenUnauthenticatedWithAID
+	// records the warning and returns success; CardLocked()
+	// surfaces it to callers (sd info renders a CARD_LOCKED
+	// warning, programmatic consumers can decide whether to
+	// proceed).
+	//
+	// Per the third external review, Section 9 (locked-card
+	// SELECT behavior).
+	cardLocked bool
 }
 
 // dekProvider is the unexported capability interface that the SD
@@ -176,7 +226,37 @@ func sessionDEK(s scp.Session) []byte {
 // AIDSecurityDomain regardless of the values in cfg — Security Domain
 // management requires a fully-authenticated channel against the ISD,
 // and the wrapper would otherwise silently downgrade.
+//
+// For non-default ISD AIDs (vendor-specific cards, Supplementary
+// Security Domains addressed by AID), use OpenSCP03WithAID.
 func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*Session, error) {
+	return OpenSCP03WithAID(ctx, t, cfg, nil)
+}
+
+// OpenSCP03WithAID is OpenSCP03 with an explicit Security Domain AID.
+//
+// sdAID controls which Security Domain the SCP03 session targets via
+// the SELECT FILE that opens the channel:
+//
+//   - sdAID == nil OR len(sdAID) == 0: default to AIDSecurityDomain
+//     (the GP-standard ISD AID A0000001510000). Identical behavior
+//     to OpenSCP03; OpenSCP03 calls this function with nil.
+//
+//   - sdAID non-empty: SELECT this AID instead. Used for non-YubiKey
+//     GP cards whose ISD lives at a vendor-specific AID, and for
+//     Supplementary Security Domains (SSDs) addressed by AID rather
+//     than as the implicit default.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2: a
+// --sd-aid plumb-through across generic SD commands is the biggest
+// generic-GP interop blocker, since cards that use a non-default
+// ISD AID currently cannot be addressed at all.
+//
+// SecurityLevel is still forced to LevelFull for the same reason as
+// OpenSCP03 (full SCP03 SD management always requires a fully-
+// authenticated channel; allowing partial security levels here would
+// silently downgrade the channel). Only the AID is configurable.
+func OpenSCP03WithAID(ctx context.Context, t transport.Transport, cfg *scp03.Config, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
@@ -197,9 +277,7 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 	// we override are scalars / nil-able pointers, so a shallow copy
 	// is enough to isolate the side effect.
 	local := *cfg
-	if local.SelectAID == nil {
-		local.SelectAID = AIDSecurityDomain
-	}
+	local.SelectAID = effectiveSDAID(sdAID)
 	local.SecurityLevel = channel.LevelFull
 
 	scpSess, err := scp03.Open(ctx, t, &local)
@@ -217,6 +295,7 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 		authenticated:    true,
 		oceAuthenticated: sessionOCEAuthenticated(scpSess),
 		dek:              dek,
+		sdAID:            cloneAID(local.SelectAID),
 	}, nil
 }
 
@@ -235,7 +314,21 @@ func OpenSCP03(ctx context.Context, t transport.Transport, cfg *scp03.Config) (*
 // PutSCP03Key, PutECPrivateKey, and PutECPublicKey all failed with
 // "SCP03 session required" against an SCP11-authenticated session —
 // even though the SCP11 session DOES derive a usable DEK.
+//
+// For non-default ISD AIDs (vendor-specific cards, Supplementary
+// Security Domains addressed by AID), use OpenSCP11WithAID.
 func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*Session, error) {
+	return OpenSCP11WithAID(ctx, t, cfg, nil)
+}
+
+// OpenSCP11WithAID is OpenSCP11 with an explicit Security Domain AID.
+//
+// sdAID semantics match OpenSCP03WithAID: nil/empty defaults to
+// AIDSecurityDomain; non-empty selects that AID instead. Used for
+// non-YubiKey GP cards and for Supplementary Security Domains.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2.
+func OpenSCP11WithAID(ctx context.Context, t transport.Transport, cfg *scp11.Config, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
@@ -243,7 +336,7 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*
 		return nil, errors.New("securitydomain: scp11 Config is required (use scp11.YubiKeyDefaultSCP11bConfig() or scp11.StrictGPSCP11bConfig() as a starting point)")
 	}
 	local := *cfg
-	local.SelectAID = AIDSecurityDomain
+	local.SelectAID = effectiveSDAID(sdAID)
 	local.ApplicationAID = nil
 
 	scpSess, err := scp11.Open(ctx, t, &local)
@@ -256,6 +349,7 @@ func OpenSCP11(ctx context.Context, t transport.Transport, cfg *scp11.Config) (*
 		transport:        t,
 		authenticated:    true,
 		oceAuthenticated: sessionOCEAuthenticated(scpSess),
+		sdAID:            cloneAID(local.SelectAID),
 	}
 	if dek := sessionDEK(scpSess); len(dek) > 0 {
 		// SCP11-derived DEK passes the same length check used for
@@ -346,27 +440,90 @@ func validateDEK(dek []byte) error {
 }
 
 // OpenUnauthenticated opens a read-only session to the Security Domain.
-// OpenUnauthenticated opens a read-only session to the Security
-// Domain by SELECTing the named AID. Pass nil for sdAID to use
-// the GP-default ISD AID (AIDSecurityDomain). Pass a vendor- or
-// deployment-specific AID for cards that do not respond to the
-// default (some SafeNet/Fusion variants, custom JCOP installs).
-func OpenUnauthenticated(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
+//
+// Targets the GP-standard ISD AID. For non-default AIDs use
+// OpenUnauthenticatedWithAID.
+func OpenUnauthenticated(ctx context.Context, t transport.Transport) (*Session, error) {
+	return OpenUnauthenticatedWithAID(ctx, t, nil)
+}
+
+// OpenUnauthenticatedWithAID is OpenUnauthenticated with an explicit
+// Security Domain AID.
+//
+// sdAID semantics match OpenSCP03WithAID: nil/empty defaults to
+// AIDSecurityDomain; non-empty selects that AID instead. Used to
+// run non-destructive reads (CRD, KIT, registry walk) against a
+// non-default ISD AID or against a Supplementary Security Domain
+// addressed by AID.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2.
+//
+// Locked-card tolerance: SW=6283 from the SELECT is treated as
+// success-with-warning rather than failure. GP §11.1.2 documents
+// 6283 as "selected file invalidated" — the FCI returned but the
+// applet is in CARD_LOCKED lifecycle. GlobalPlatformPro and OpenSC
+// both tolerate this; the resulting Session has CardLocked() == true
+// so the caller can decide whether to proceed with read-only flows
+// (CRD probe, registry walk on locked-card-permitted scopes) or
+// surface a clear error.
+//
+// Per the third external review, Section 9.
+func OpenUnauthenticatedWithAID(ctx context.Context, t transport.Transport, sdAID []byte) (*Session, error) {
 	if t == nil {
 		return nil, errors.New("securitydomain: transport is required")
 	}
-	if len(sdAID) == 0 {
-		sdAID = AIDSecurityDomain
-	}
-	cmd := apdu.NewSelect(sdAID)
+	aid := effectiveSDAID(sdAID)
+	cmd := apdu.NewSelect(aid)
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", err)
 	}
-	if !resp.IsSuccess() {
-		return nil, &APDUError{Operation: "SELECT SD", SW: resp.StatusWord()}
+	locked := false
+	switch resp.StatusWord() {
+	case 0x9000:
+		// Normal success.
+	case 0x6283:
+		// CARD_LOCKED warning per GP §11.1.2 / §5.3.1. Card is
+		// in a constrained lifecycle but the SELECT returned
+		// FCI; downstream reads can still attempt to proceed.
+		// Flag the session so the caller knows.
+		locked = true
+	default:
+		// Return a typed APDUError so callers (notably
+		// DiscoverISD) can extract the SW via errors.As to
+		// distinguish "wrong AID, try next" (6A82, 6A87) from
+		// "card is broken, abort discovery" (everything else).
+		return nil, &APDUError{Operation: "select SD", SW: resp.StatusWord()}
 	}
-	return &Session{transport: t, authenticated: false}, nil
+	return &Session{
+		transport:     t,
+		authenticated: false,
+		sdAID:         cloneAID(aid),
+		cardLocked:    locked,
+	}, nil
+}
+
+// effectiveSDAID returns the AID an Open* call should target. Empty
+// or nil input falls back to the GP-standard ISD AID; non-empty
+// input is returned unchanged. The caller is responsible for cloning
+// before storing — Open* functions store via cloneAID so per-Session
+// state can't be mutated by a caller that retains a slice reference.
+func effectiveSDAID(sdAID []byte) []byte {
+	if len(sdAID) == 0 {
+		return AIDSecurityDomain
+	}
+	return sdAID
+}
+
+// cloneAID copies an AID slice so the Session retains a stable
+// reference even if the caller mutates the input.
+func cloneAID(aid []byte) []byte {
+	if len(aid) == 0 {
+		return nil
+	}
+	out := make([]byte, len(aid))
+	copy(out, aid)
+	return out
 }
 
 // Close terminates the session and zeros key material.
@@ -392,6 +549,26 @@ func (s *Session) Close() {
 // IsAuthenticated reports whether this session has a secure channel.
 func (s *Session) IsAuthenticated() bool { return s.authenticated }
 
+// SetProfile attaches a card profile for vendor-extension gating.
+// Operations that require a vendor-specific feature consult the
+// profile's Capabilities and return ErrUnsupportedByProfile if
+// the profile does not claim that feature.
+//
+// Pass nil to clear any previously-set profile (the session then
+// behaves as if no profile gating is in effect — equivalent to
+// the pre-profile-package default of "send any APDU the caller
+// requests").
+//
+// SetProfile is intended to be called once, immediately after
+// Open*, before any vendor-extension method. The profile is
+// captured by reference; mutating the underlying value after
+// SetProfile has unspecified effects.
+func (s *Session) SetProfile(p profile.Profile) { s.profile = p }
+
+// Profile returns the active profile, or nil if SetProfile was
+// never called or was called with nil.
+func (s *Session) Profile() profile.Profile { return s.profile }
+
 // OCEAuthenticated reports whether the off-card entity (host) was
 // authenticated to the card during the handshake. SCP03 mutual auth
 // and SCP11a/c return true; SCP11b (one-way card-to-host auth) and
@@ -411,6 +588,45 @@ func (s *Session) Protocol() string {
 		return s.scpSession.Protocol()
 	}
 	return "none"
+}
+
+// SDAID returns a defensive copy of the Security Domain AID this
+// session targets. The AID was set at Open* — either explicitly via
+// the sdAID parameter on the *WithAID variants or implicitly defaulted
+// to AIDSecurityDomain (the GP-standard ISD) when no AID was given.
+//
+// The returned slice is a copy: mutating it does not affect the
+// session's internal state, and the session's stored AID is never
+// mutated after construction.
+//
+// Per the external review on feat/sd-keys-cli, Finding 2: lets
+// callers verify which AID was actually addressed (useful in JSON
+// output that should record both the operator's --sd-aid input and
+// what the session ended up targeting).
+func (s *Session) SDAID() []byte {
+	return cloneAID(s.sdAID)
+}
+
+// CardLocked reports whether the SELECT that opened this session
+// returned SW=6283 (CARD_LOCKED warning per GP §11.1.2). When true,
+// the card's applet is in a constrained lifecycle: the SELECT
+// structurally succeeded so reads against the unauthenticated channel
+// can be attempted, but management operations and authenticated
+// reads may be rejected by the card with SW=6985 ("conditions of use
+// not satisfied") or similar.
+//
+// Returns false on a normal 9000 SELECT (the typical case) and on
+// every authenticated Open* path (which require 9000 by construction).
+//
+// Callers reporting card identity (e.g. sd info) should display the
+// CARD_LOCKED state prominently so an operator diagnosing a card
+// that "just isn't responding" sees the actual cause; programmatic
+// consumers can decide whether to proceed with read-only operations
+// or surface a clear error.
+//
+// Per the third external review, Section 9 (locked-card SELECT).
+func (s *Session) CardLocked() bool {
+	return s.cardLocked
 }
 
 // transmit sends a command through the appropriate channel.
@@ -599,12 +815,28 @@ func (s *Session) GetSupportedCaIdentifiers(ctx context.Context, kloc, klcc bool
 			return nil, fmt.Errorf("securitydomain: get CA identifiers: %w", err)
 		}
 		if !resp.IsSuccess() {
-			// Reference data not found is not an error — just means
-			// no identifiers of that type are configured.
-			if resp.StatusWord() == 0x6A88 {
+			// Treat "not present" SWs as empty — these indicate
+			// the optional DO simply isn't registered on this card.
+			// Treat all other failures as real errors so callers
+			// can distinguish "tag unsupported" (6D00) and "auth
+			// required" (6982) from "tag exists but empty." Prior
+			// behavior swallowed everything as empty, which made
+			// it impossible to tell an unauthenticated card with
+			// gated reads apart from a card with no KLOC/KLCC at
+			// all — both surfaced as silent empty results.
+			//
+			// 6A88 = Referenced data or reference data not found
+			//        (the addressed data object doesn't exist)
+			// 6A82 = File or application not found (some applets
+			//        return this for missing optional tags
+			//        instead of 6A88; semantically equivalent for
+			//        "not present" purposes)
+			sw := resp.StatusWord()
+			if sw == 0x6A88 || sw == 0x6A82 {
 				continue
 			}
-			continue
+			return nil, fmt.Errorf("securitydomain: get CA identifiers (tag 0x%04X): %w: %w",
+				entry.tag, ErrCardStatus, resp.Error())
 		}
 		ids, err := parseSupportedCaIdentifiers(resp.Data)
 		if err != nil {
@@ -656,9 +888,21 @@ func (s *Session) PutSCP03Key(ctx context.Context, ref KeyReference, keys scp03.
 
 // GenerateECKey generates a new NIST P-256 key pair on the device.
 // The private key never leaves the device.
+//
+// Profile gating: when SetProfile has been called with a profile
+// whose Capabilities().GenerateECKey is false (e.g. the standard
+// GP profile), this method returns ErrUnsupportedByProfile
+// without sending any APDU. GENERATE EC KEY (INS=0xF1) is a
+// Yubico extension; standard GP cards reject it with SW=6D00.
+// The host-side check turns that round-trip into a clear typed
+// error.
 func (s *Session) GenerateECKey(ctx context.Context, ref KeyReference, replaceKvn byte) (*ecdsa.PublicKey, error) {
 	if err := s.requireOCEAuth(); err != nil {
 		return nil, err
+	}
+	if s.profile != nil && !s.profile.Capabilities().GenerateECKey {
+		return nil, fmt.Errorf("securitydomain: GenerateECKey: %w (profile %q)",
+			profile.ErrUnsupportedByProfile, s.profile.Name())
 	}
 
 	cmd := generateECKeyCmd(ref, replaceKvn)
@@ -987,6 +1231,22 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 	if err := s.requireOCEAuth(); err != nil {
 		return err
 	}
+	// Profile gating: the wire shape this library emits for the
+	// allowlist (BER-TLV nesting plus the integer-encoded serial
+	// list) is the yubikit/Yubico shape, derived by reference-
+	// implementation parity with yubikit-python's store_allowlist
+	// and _int2asn1. We have not measured this wire shape against
+	// any non-YubiKey card. Profiles that don't claim Allowlist
+	// (currently: standard-sd) refuse the operation host-side
+	// rather than emitting Yubico bytes against an unmeasured card.
+	// When a non-YubiKey card is measured, lift the gate by setting
+	// Allowlist=true on that profile.
+	if s.profile != nil && !s.profile.Capabilities().Allowlist {
+		return fmt.Errorf("securitydomain: StoreAllowlist: %w (profile %q): "+
+			"the allowlist wire encoding is yubikit/Yubico-shape and has not been measured "+
+			"on non-YubiKey cards; lift the gate by switching to a profile that claims Allowlist=true",
+			profile.ErrUnsupportedByProfile, s.profile.Name())
+	}
 
 	payload, err := storeAllowlistData(ref, serials)
 	if err != nil {
@@ -1006,7 +1266,23 @@ func (s *Session) StoreAllowlist(ctx context.Context, ref KeyReference, serials 
 
 // ClearAllowlist removes the allowlist for the given key reference.
 // Ref: C# ClearAllowList calls StoreAllowlist with empty list.
+//
+// Profile gating: same rationale as StoreAllowlist — the wire shape
+// is yubikit/Yubico-specific and not measured on non-YubiKey cards.
+// Profiles that don't claim Allowlist refuse the operation host-side.
+// The check is duplicated here (rather than relying on the forwarding
+// call to StoreAllowlist to surface it) so the error names the
+// command the operator actually called.
 func (s *Session) ClearAllowlist(ctx context.Context, ref KeyReference) error {
+	if err := s.requireOCEAuth(); err != nil {
+		return err
+	}
+	if s.profile != nil && !s.profile.Capabilities().Allowlist {
+		return fmt.Errorf("securitydomain: ClearAllowlist: %w (profile %q): "+
+			"the allowlist wire encoding is yubikit/Yubico-shape and has not been measured "+
+			"on non-YubiKey cards; lift the gate by switching to a profile that claims Allowlist=true",
+			profile.ErrUnsupportedByProfile, s.profile.Name())
+	}
 	return s.StoreAllowlist(ctx, ref, nil)
 }
 

@@ -48,7 +48,7 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	sdAIDHex := fs.String("sd-aid", "",
 		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
 	}
@@ -91,7 +91,7 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	report.Data = data
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(cfg))
 
-	sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, cfg, sdAID)
 	if err != nil {
 		report.Fail("open SCP03 SD", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

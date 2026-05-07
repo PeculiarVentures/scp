@@ -11,6 +11,8 @@ type sdTerminateData struct {
 	LifecycleBefore string `json:"lifecycle_before,omitempty"`
 	LifecycleAfter  string `json:"lifecycle_after,omitempty"`
 	Terminated      bool   `json:"terminated"`
+	// LastSW: see sdLockData.LastSW. Same shape, same purpose.
+	LastSW string `json:"last_sw,omitempty"`
 }
 
 // cmdSDTerminate transitions the Issuer Security Domain to the
@@ -68,9 +70,15 @@ func cmdSDTerminate(ctx context.Context, env *runEnv, args []string) error {
 			"any operation. Modeled on 'sd reset's --confirm-reset-sd "+
 			"pattern — overloading a single confirm flag across "+
 			"reversible and irreversible operations is a foot-gun.")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 	scp03Cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
@@ -116,7 +124,7 @@ func cmdSDTerminate(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, scp03Cfg, sdAID)
 	if err != nil {
 		report.Fail("open SCP03", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -124,6 +132,7 @@ func cmdSDTerminate(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if err := sd.SetISDLifecycle(ctx, securitydomain.LifecycleTerminated); err != nil {
 		sd.Close()
+		data.LastSW = extractLifecycleSW(err)
 		report.Fail("terminate", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd terminate: SET STATUS: %w", err)

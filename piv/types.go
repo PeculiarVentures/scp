@@ -28,9 +28,9 @@ type Slot byte
 // piv.go at the wire level; the named-type form is preferred in new
 // code.
 const (
-	SlotPIVAuthentication Slot = 0x9A
-	SlotDigitalSignature  Slot = 0x9C
-	SlotKeyMgmt           Slot = 0x9D
+	SlotPIVAuthentication  Slot = 0x9A
+	SlotDigitalSignature   Slot = 0x9C
+	SlotKeyMgmt            Slot = 0x9D
 	SlotCardAuthentication Slot = 0x9E
 
 	// Retired key management slots 1..20 (0x82..0x95).

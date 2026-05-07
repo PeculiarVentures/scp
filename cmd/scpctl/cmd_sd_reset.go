@@ -61,8 +61,14 @@ func cmdSDReset(ctx context.Context, env *runEnv, args []string) error {
 			"be removed. Distinct from --confirm-write because SD reset and "+
 			"PIV reset have different blast radii and overloading a single "+
 			"flag across both is a foot-gun.")
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 
 	report := &Report{Subcommand: "sd reset", Reader: *reader}
@@ -79,7 +85,7 @@ func cmdSDReset(ctx context.Context, env *runEnv, args []string) error {
 	// remove (or, in dry-run mode, what it WOULD remove). Doing
 	// this before the dry-run check means the operator gets a
 	// useful "what's on the card" answer even on dry-run.
-	sdRead, err := securitydomain.OpenUnauthenticated(ctx, t, nil)
+	sdRead, err := securitydomain.OpenUnauthenticatedWithAID(ctx, t, sdAID)
 	if err != nil {
 		report.Fail("read pre-reset inventory", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -121,7 +127,7 @@ func cmdSDReset(ctx context.Context, env *runEnv, args []string) error {
 	// Post-reset inventory. The card should now show only the
 	// factory key set: SCP03 (KID 0x01-0x03 at KVN=0xFF) and the
 	// regenerated SCP11b at KID=0x13/KVN=0x01.
-	sdAfter, err := securitydomain.OpenUnauthenticated(ctx, t, nil)
+	sdAfter, err := securitydomain.OpenUnauthenticatedWithAID(ctx, t, sdAID)
 	if err != nil {
 		report.Fail("read post-reset inventory", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

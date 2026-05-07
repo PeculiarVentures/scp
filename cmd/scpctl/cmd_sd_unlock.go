@@ -11,6 +11,8 @@ type sdUnlockData struct {
 	LifecycleBefore string `json:"lifecycle_before,omitempty"`
 	LifecycleAfter  string `json:"lifecycle_after,omitempty"`
 	Unlocked        bool   `json:"unlocked"`
+	// LastSW: see sdLockData.LastSW. Same shape, same purpose.
+	LastSW string `json:"last_sw,omitempty"`
 }
 
 // cmdSDUnlock transitions the Issuer Security Domain from
@@ -46,9 +48,15 @@ func cmdSDUnlock(ctx context.Context, env *runEnv, args []string) error {
 		"Confirm destructive write. Without this flag, sd unlock runs in "+
 			"dry-run mode (validates inputs and reports the planned "+
 			"transition without transmitting SET STATUS).")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
+	sdAIDFlag := registerSDAIDFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	sdAID, err := sdAIDFlag.Resolve()
+	if err != nil {
+		return err
 	}
 	scp03Cfg, err := scp03Keys.applyToConfig()
 	if err != nil {
@@ -99,7 +107,7 @@ func cmdSDUnlock(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(scp03Cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, scp03Cfg)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, scp03Cfg, sdAID)
 	if err != nil {
 		report.Fail("open SCP03", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -107,6 +115,7 @@ func cmdSDUnlock(ctx context.Context, env *runEnv, args []string) error {
 	}
 	if err := sd.SetISDLifecycle(ctx, securitydomain.LifecycleSecured); err != nil {
 		sd.Close()
+		data.LastSW = extractLifecycleSW(err)
 		report.Fail("unlock", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
 		return fmt.Errorf("sd unlock: SET STATUS: %w", err)

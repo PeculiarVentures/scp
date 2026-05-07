@@ -138,7 +138,7 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	sdAIDHex := fs.String("sd-aid", "",
 		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
-	scp03Keys := registerSCP03KeyFlags(fs)
+	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	expectedCardID := fs.String("expected-card-id", "",
 		"If set, abort before any destructive APDU when the card's CIN (GET DATA 0x0045) does not match this hex value. Recommended for fleet automation: pin the CIN of the card you intended to install onto.")
 	confirm := fs.Bool("confirm-write", false,
@@ -294,7 +294,7 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	}
 	loadHash := hashSpec.Resolve(loadImage)
 	data.LoadHashAlgorithm = hashSpec.Label()
-	hashDetail := hashSpec.Label()
+	var hashDetail string
 	if hashSpec.Algorithm != "none" && len(loadHash) > 0 {
 		hashDetail = fmt.Sprintf("%s — %s", hashSpec.Label(), strings.ToUpper(hex.EncodeToString(loadHash)))
 	} else {
@@ -376,7 +376,7 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	defer t.Close()
 
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(cfg))
-	sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
+	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, cfg, sdAID)
 	if err != nil {
 		report.Fail("open SCP03 SD", err.Error())
 		_ = report.Emit(env.out, *jsonMode)

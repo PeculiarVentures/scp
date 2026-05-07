@@ -119,7 +119,7 @@ func FetchCardCerts(
 	t transport.Transport,
 	ref KeyReference,
 ) ([]*x509.Certificate, error) {
-	sd, err := OpenUnauthenticated(ctx, t, nil)
+	sd, err := OpenUnauthenticated(ctx, t)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: open SD: %w", err)
 	}

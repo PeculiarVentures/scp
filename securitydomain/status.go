@@ -137,6 +137,51 @@ func (e RegistryEntry) LifecycleString() string {
 	return fmt.Sprintf("unknown(0x%02X)", e.Lifecycle)
 }
 
+// Kind classifies a registry entry as one of "ISD", "SSD", "APP",
+// "LOAD_FILE", or "MODULE". Distinct from Scope: Scope is the GET
+// STATUS P1 byte that produced the entry (which lumps SSDs in with
+// Applications because GP §11.4.2 doesn't give SSDs a separate
+// scope), while Kind disambiguates by inspecting the entry's
+// privileges. APP entries that carry the SecurityDomain privilege
+// are GP-defined Supplementary Security Domains and should be
+// labelled SSD in human-readable output.
+//
+// This is the same promotion GlobalPlatformPro performs in its
+// GPRegistry.add() implementation: any entry returned in the
+// Applications scope gets reclassified to SSD if the
+// SecurityDomain privilege bit is set. Without this promotion, an
+// operator looking at the registry can't tell at a glance which
+// "applications" are actually SDs they could open authenticated
+// sessions against.
+//
+// Per the third external review on feat/sd-keys-cli, Section 8
+// (lifecycle rendering and registry entry classification).
+func (e RegistryEntry) Kind() string {
+	switch e.Scope {
+	case StatusScopeISD:
+		return "ISD"
+	case StatusScopeApplications:
+		// SSD promotion: an Applications-scope entry with the
+		// SecurityDomain privilege bit is structurally a
+		// Supplementary Security Domain. Match GlobalPlatformPro.
+		if e.Privileges.SecurityDomain {
+			return "SSD"
+		}
+		return "APP"
+	case StatusScopeLoadFiles, StatusScopeLoadFilesAndModules:
+		// Load File entries don't carry privileges (the
+		// Privileges field is the zero value), so the SSD
+		// promotion doesn't apply. Modules sit under their
+		// parent Load File and aren't returned as top-level
+		// entries by GET STATUS — when we expose them, they
+		// come from RegistryEntry.Modules rather than as their
+		// own entries — so MODULE is reserved for a future
+		// expansion if/when we project modules as flat rows.
+		return "LOAD_FILE"
+	}
+	return fmt.Sprintf("unknown(scope=0x%02X)", byte(e.Scope))
+}
+
 // Privileges represents the GP Table 6-1 privilege bits assigned to
 // an Application or Security Domain.
 type Privileges struct {
@@ -502,11 +547,53 @@ func parseRegistryEntry(node *tlv.Node, scope StatusScope) (RegistryEntry, error
 		}
 	}
 	if privOnly := tlv.Find(children, tagRegistryPrivOnly); privOnly != nil {
-		privs, err := ParsePrivileges(privOnly.Value)
-		if err != nil {
-			return RegistryEntry{}, err
+		// Legacy GP: tag 0xC5 carries privileges in either the
+		// 3-byte canonical form (GP §6.6.1 Table 6-1) or, on
+		// older Java Card platforms and reference test cards,
+		// in a 1-byte form that encodes only the first byte of
+		// the privilege set. GlobalPlatformPro tolerates both
+		// shapes; we follow the same rule so the registry walk
+		// against an old card surfaces AID + lifecycle even
+		// when the privileges field is non-canonical.
+		//
+		// Per the third external review, Section 7 (GET STATUS
+		// legacy/tagged parsing).
+		switch len(privOnly.Value) {
+		case 3:
+			privs, err := ParsePrivileges(privOnly.Value)
+			if err != nil {
+				return RegistryEntry{}, err
+			}
+			entry.Privileges = privs
+		case 1:
+			// Legacy 1-byte form: only byte 1 of the
+			// privilege set is present. Pad to 3 bytes
+			// with zeros and parse to extract the byte-1
+			// flags (SecurityDomain, DAPVerification,
+			// etc.). Byte 2 + 3 flags are absent on these
+			// cards so reading them as zero is correct.
+			padded := []byte{privOnly.Value[0], 0x00, 0x00}
+			privs, err := ParsePrivileges(padded)
+			if err != nil {
+				return RegistryEntry{}, err
+			}
+			entry.Privileges = privs
+		case 0:
+			// Empty privileges: card returned the tag with
+			// no value. Leave Privileges at the zero value
+			// (all flags false) and continue. Hard-failing
+			// here would refuse to describe an entry that
+			// happens to have no privileges set, which is
+			// legitimate for some load-file / package
+			// entries.
+		default:
+			// 2 bytes or 4+ bytes: shape we don't recognize.
+			// Treat as soft warning by zero-valuing
+			// Privileges rather than failing the entry.
+			// Future work could surface the raw bytes via
+			// a diagnostic field; today the AID + lifecycle
+			// path is what the operator needs most.
 		}
-		entry.Privileges = privs
 	}
 
 	if assoc := tlv.Find(children, tagRegistryAssocSD); assoc != nil {

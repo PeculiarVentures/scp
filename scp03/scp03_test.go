@@ -365,7 +365,7 @@ func (r *recordingTransport) Transmit(ctx context.Context, cmd *apdu.Command) (*
 func (r *recordingTransport) TransmitRaw(ctx context.Context, raw []byte) ([]byte, error) {
 	return r.inner.TransmitRaw(ctx, raw)
 }
-func (r *recordingTransport) Close() error                         { return r.inner.Close() }
+func (r *recordingTransport) Close() error                           { return r.inner.Close() }
 func (r *recordingTransport) TrustBoundary() transport.TrustBoundary { return r.inner.TrustBoundary() }
 
 // TestSCP03_Transmit_LongPayloadIsWrapThenChain is the regression

@@ -8,21 +8,32 @@ import (
 	"strings"
 
 	"github.com/PeculiarVentures/scp/scp03"
+	"github.com/PeculiarVentures/scp/securitydomain/profile"
 )
 
-// scp03KeyFlags is the flag set every SCP03 command shares for
-// configuring the static key set used in the handshake. Four modes,
-// mutually exclusive:
+// scp03KeyFlags is the flag set SCP03-aware commands share for
+// configuring the static key set used in the handshake. The flags
+// are the same in both modes; what changes is the meaning of "no
+// flags set":
 //
-//	(no flags)              YubiKey factory: KVN=0xFF and the
-//	                        well-known publicly documented default
-//	                        keys (404142...4F). Same as the
-//	                        historical default.
+//	scp03Required  used by destructive bootstrap-style commands that
+//	               always open an SCP03 channel. With no flags, the
+//	               channel uses the YubiKey factory keys (KVN=0xFF,
+//	               well-known publicly documented values).
 //
-//	--scp03-keys-default    Explicit opt-in to the same factory
-//	                        defaults — useful for scripts that want
-//	                        to make the choice deliberate rather
-//	                        than implicit.
+//	scp03Optional  used by read-only commands (sd keys list/export)
+//	               that default to unauthenticated reads. With no
+//	               flags, the command opens unauthenticated and the
+//	               SCP03 path is skipped entirely. Setting any flag
+//	               opts the operator into an authenticated read.
+//
+// Flag forms (same in both modes):
+//
+//	--scp03-keys-default    Explicit opt-in to factory keys.
+//	                        In scp03Required this matches the
+//	                        implicit default; in scp03Optional this
+//	                        is how the operator opts into an
+//	                        authenticated read with factory keys.
 //
 //	--scp03-kvn <byte>
 //	--scp03-enc <hex>       Custom key set for cards whose SCP03
@@ -40,28 +51,82 @@ import (
 //	                        Mutually exclusive with the split
 //	                        --scp03-{enc,mac,dek} flags above.
 type scp03KeyFlags struct {
+	mode       scp03FlagMode
 	useDefault *bool
 	kvn        *string
 	enc        *string
 	mac        *string
 	dek        *string
 	key        *string
+
+	// profile selection: "auto" (default, probe at session open),
+	// "yubikey-sd" (force YubiKey profile), or "standard-sd"
+	// (force standard GP profile). Affects:
+	//
+	//   - Whether --scp03-keys-default is acceptable (the
+	//     YubiKey factory keys are vendor-specific; on standard
+	//     GP cards the operator must pass the custom triple).
+	//   - Whether implicit factory-default fallback is acceptable
+	//     in required-auth mode (same reason).
+	//
+	// Verbs that have additional profile-dependent behavior
+	// (e.g. sd keys generate emits Yubico INS=0xF1) read the
+	// resolved profile via the library-level SetProfile +
+	// Capabilities mechanism; the CLI also short-circuits in
+	// the explicit standard-sd case for clearer diagnostics.
+	vendor *string
 }
 
+// scp03FlagMode selects the help-text wording for registerSCP03KeyFlags
+// so the same flag set can serve both required-auth (bootstrap) and
+// optional-auth (read-only) commands without confusing operators
+// about what "no flags" means.
+type scp03FlagMode int
+
+const (
+	// scp03Required: the command always opens an SCP03 channel.
+	// No flags = factory keys (current bootstrap behavior).
+	scp03Required scp03FlagMode = iota
+
+	// scp03Optional: the command opens unauthenticated by default
+	// and only opens SCP03 when at least one flag is set.
+	scp03Optional
+)
+
 // registerSCP03KeyFlags adds the SCP03 key flags to the given
-// FlagSet. Returns a handle to read parsed values and apply them
-// to a *scp03.Config.
-func registerSCP03KeyFlags(fs *flag.FlagSet) *scp03KeyFlags {
+// FlagSet, with help text appropriate to mode. Returns a handle
+// to read parsed values and apply them to a *scp03.Config.
+func registerSCP03KeyFlags(fs *flag.FlagSet, mode scp03FlagMode) *scp03KeyFlags {
+	// Help text for --scp03-keys-default and the custom-key trio
+	// varies by mode. The flag names and validation logic are
+	// identical; only the operator-facing wording changes so the
+	// help reflects what "no flags" actually does in this command.
+	var defaultHelp, customSuffix string
+	switch mode {
+	case scp03Required:
+		defaultHelp = "Explicit opt-in to YubiKey factory SCP03 keys (KVN=0xFF, " +
+			"well-known publicly documented values). Same as the implicit " +
+			"default for this command; useful for scripts that want to be " +
+			"explicit. Mutually exclusive with the --scp03-{kvn,enc,mac,dek} " +
+			"custom-key flags."
+		customSuffix = "Required together with --scp03-enc, --scp03-mac, " +
+			"--scp03-dek for cards whose keys have been rotated."
+	case scp03Optional:
+		defaultHelp = "Authenticate using YubiKey factory SCP03 keys (KVN=0xFF, " +
+			"well-known publicly documented values). Without any --scp03-* " +
+			"flag this command opens unauthenticated; pass this flag to " +
+			"force an authenticated read using factory keys. Mutually " +
+			"exclusive with the --scp03-{kvn,enc,mac,dek} custom-key flags."
+		customSuffix = "Implies SCP03-authenticated read. Required together " +
+			"with --scp03-enc, --scp03-mac, --scp03-dek for cards whose " +
+			"keys have been rotated."
+	}
+
 	return &scp03KeyFlags{
-		useDefault: fs.Bool("scp03-keys-default", false,
-			"Explicit opt-in to YubiKey factory SCP03 keys (KVN=0xFF, well-known "+
-				"publicly documented values). Same as the implicit default; useful "+
-				"for scripts that want to be explicit. Mutually exclusive with the "+
-				"--scp03-{kvn,enc,mac,dek} custom-key flags and the --scp03-key shorthand."),
+		mode:       mode,
+		useDefault: fs.Bool("scp03-keys-default", false, defaultHelp),
 		kvn: fs.String("scp03-kvn", "",
-			"SCP03 key version number, hex byte (e.g. 01, FF). Required together "+
-				"with --scp03-enc, --scp03-mac, --scp03-dek for cards whose keys "+
-				"have been rotated."),
+			"SCP03 key version number, hex byte (e.g. 01, FF). "+customSuffix),
 		enc: fs.String("scp03-enc", "",
 			"SCP03 channel encryption key, hex (16, 24, or 32 bytes for AES-128/192/256)."),
 		mac: fs.String("scp03-mac", "",
@@ -72,57 +137,185 @@ func registerSCP03KeyFlags(fs *flag.FlagSet) *scp03KeyFlags {
 			"SCP03 single-key shorthand: same hex value used for ENC, MAC, and DEK. "+
 				"Common on GP cards provisioned with a single master key. Requires "+
 				"--scp03-kvn. Mutually exclusive with the split --scp03-{enc,mac,dek} flags."),
+		vendor: fs.String("profile", "auto",
+			"Card profile selection. 'auto' (default) probes the card "+
+				"non-destructively at session open and selects YubiKey or "+
+				"Standard based on the result. 'yubikey-sd' forces the "+
+				"YubiKey profile (Yubico extensions enabled — GENERATE "+
+				"EC KEY etc.). 'standard-sd' forces the standard GP "+
+				"profile (Yubico extensions refused host-side; --scp03-keys-default "+
+				"rejected; KIDs labeled by raw value rather than YubiKey "+
+				"convention). The active profile is reported in JSON output."),
 	}
 }
 
-// explicitlyConfigured reports whether the operator made a
-// deliberate SCP03 key-set choice. True if --scp03-keys-default,
-// --scp03-key, or any of the custom split-key flags were set;
-// false if every flag is empty and the implicit YubiKey factory
-// default would apply.
+// VendorProfile returns the parsed --profile value, normalized.
+// Returns one of "auto", "yubikey-sd", "standard-sd". Verbs that
+// need the resolved profile (after auto-detect) call ResolveProfile
+// instead.
+func (kf *scp03KeyFlags) VendorProfile() string {
+	if kf == nil || kf.vendor == nil {
+		return "auto"
+	}
+	return *kf.vendor
+}
+
+// validateVendor returns a usageError if the --profile flag value
+// isn't recognized. Called from both applyToConfig variants so
+// the validation runs at the point of first SCP03 use.
+func (kf *scp03KeyFlags) validateVendor() error {
+	switch kf.VendorProfile() {
+	case "auto", "yubikey-sd", "standard-sd":
+		return nil
+	default:
+		return &usageError{msg: fmt.Sprintf(
+			"--profile: %q not recognized; valid values are 'auto', 'yubikey-sd', 'standard-sd'",
+			*kf.vendor)}
+	}
+}
+
+// effectiveProfileBeforeProbe returns the static profile when the
+// --profile value is non-auto. Returns nil when --profile is auto
+// (in which case the verb should call profile.Probe to resolve).
 //
-// Used by commands whose audience may not be running a YubiKey —
-// notably 'gp registry', whose generic-GP posture would make
-// silently trying the public 404142...4F factory keys against an
-// unknown card surprising and potentially bad operator hygiene.
-// Such commands gate themselves on this helper and refuse to run
-// without an explicit choice; legacy YubiKey-flavored commands
-// keep the implicit default.
-func (kf *scp03KeyFlags) explicitlyConfigured() bool {
+// This is the synchronous part of profile resolution: validation
+// and the explicit-pin path. The auto path requires a live
+// transport, which only the verb has.
+func (kf *scp03KeyFlags) effectiveProfileBeforeProbe() profile.Profile {
+	switch kf.VendorProfile() {
+	case "yubikey-sd":
+		return profile.YubiKey()
+	case "standard-sd":
+		return profile.Standard()
+	default:
+		return nil
+	}
+}
+
+// IsStandardSD reports whether the resolved (or pinned) profile is
+// the standard-sd profile. Used by validation paths that need to
+// reject vendor-specific shortcuts (e.g. --scp03-keys-default).
+//
+// Without auto-detection happening yet, this method conservatively
+// returns true only when --profile=standard-sd was explicitly
+// specified. The auto path defers the standard/yubikey decision
+// until the verb opens a transport and runs Probe; the
+// applyToConfig validation runs BEFORE that, so it can't block on
+// "auto might resolve to standard." The CLI-level fail-fast checks
+// (factory-key rejection, generate refusal) are accepted-as-best-
+// effort for auto: they fire on explicit standard-sd, not on auto.
+// Auto-resolved standard-sd is caught at the library level by the
+// SetProfile + Capabilities gate, which is the authoritative
+// safety net.
+func (kf *scp03KeyFlags) IsStandardSD() bool {
+	return kf.VendorProfile() == "standard-sd"
+}
+
+// applyToConfigOptional is the read-only-command counterpart to
+// applyToConfig. It returns (nil, nil) when no SCP03 key flag was
+// set — signalling "operator did not opt into authenticated reads,
+// caller should choose an unauthenticated open." When any flag is
+// set it dispatches to applyToConfig so factory / custom selection,
+// validation, and error messages are all single-sourced there.
+//
+// Bootstrap-style commands that always authenticate continue to call
+// applyToConfig directly; the implicit "no flags = factory" semantic
+// is preserved for them. Read-only commands call this method instead.
+func (kf *scp03KeyFlags) applyToConfigOptional() (*scp03.Config, error) {
+	if kf == nil {
+		return nil, nil
+	}
+	// Validate vendor profile even when no SCP03 flags are set —
+	// operators can typo the vendor value and the unauth fallback
+	// shouldn't silently swallow that. validateVendor is cheap.
+	if err := kf.validateVendor(); err != nil {
+		return nil, err
+	}
+	if !kf.anyFlagSet() {
+		return nil, nil
+	}
+	return kf.applyToConfig()
+}
+
+// anyFlagSet reports whether any of the SCP03 key flags is set.
+// Includes --scp03-keys-default, the four split-key flags
+// (--scp03-{kvn,enc,mac,dek}), and the --scp03-key shorthand.
+// Used by applyToConfigOptional and by callers that need to know
+// whether the operator made an explicit SCP03 choice.
+func (kf *scp03KeyFlags) anyFlagSet() bool {
 	if kf.useDefault != nil && *kf.useDefault {
 		return true
 	}
-	if kf.kvn != nil && *kf.kvn != "" {
-		return true
-	}
-	if kf.enc != nil && *kf.enc != "" {
-		return true
-	}
-	if kf.mac != nil && *kf.mac != "" {
-		return true
-	}
-	if kf.dek != nil && *kf.dek != "" {
-		return true
-	}
-	if kf.key != nil && *kf.key != "" {
-		return true
+	for _, p := range []*string{kf.kvn, kf.enc, kf.mac, kf.dek, kf.key} {
+		if p != nil && *p != "" {
+			return true
+		}
 	}
 	return false
+}
+
+// explicitlyConfigured is an alias for anyFlagSet kept for legacy
+// gp/main-body call-sites that prefer the more descriptive name.
+// Used by gp registry to refuse running without an explicit SCP03
+// choice (since silently trying YubiKey factory keys against an
+// unknown card would be surprising).
+func (kf *scp03KeyFlags) explicitlyConfigured() bool {
+	return kf.anyFlagSet()
 }
 
 // applyToConfig builds a *scp03.Config matching the flag selection.
 // Returns a *usageError on conflict, partial-custom, or hex parse
 // failures.
 func (kf *scp03KeyFlags) applyToConfig() (*scp03.Config, error) {
+	if err := kf.validateVendor(); err != nil {
+		return nil, err
+	}
 	custom := kf.kvn != nil && (*kf.kvn != "" || *kf.enc != "" || *kf.mac != "" || *kf.dek != "")
 	shorthand := kf.key != nil && *kf.key != ""
 
 	if *kf.useDefault && (custom || shorthand) {
 		return nil, &usageError{msg: "--scp03-keys-default and the custom-key flags are mutually exclusive"}
 	}
+
 	if shorthand && (*kf.enc != "" || *kf.mac != "" || *kf.dek != "") {
 		return nil, &usageError{msg: "--scp03-key and --scp03-{enc,mac,dek} are mutually exclusive (use one form or the other)"}
 	}
+
+	// Profile gates: the YubiKey factory keys are vendor-specific
+	// (KVN=0xFF, well-known publicly documented AES-128 values
+	// from Yubico). On a standard GP card these keys are wrong by
+	// definition, so we refuse the factory-default path
+	// explicitly when --profile=standard-sd was specified rather
+	// than emit an authenticated APDU that will fail in
+	// card-error noise.
+	//
+	// For --profile=auto: this CLI-level check doesn't fire because
+	// auto hasn't been resolved yet at flag-parse time. The
+	// authoritative gate runs at the library level via SetProfile +
+	// Capabilities; the CLI fast-fail here is best-effort for the
+	// explicit-pin case.
+	//
+	// Two cases to reject when standard-sd is pinned:
+	//   1. --scp03-keys-default was set explicitly
+	//   2. No SCP03 flags were set, and we're in required-auth
+	//      mode (so the implicit fallback would be factory keys)
+	//
+	// Optional-auth verbs (sd keys list, sd keys export) handle
+	// case 2 via applyToConfigOptional, which short-circuits
+	// before this function runs when no flags are set; this
+	// function only sees the "auth was requested" path.
+	if kf.IsStandardSD() {
+		if *kf.useDefault {
+			return nil, &usageError{msg: "--scp03-keys-default is not valid with --profile standard-sd " +
+				"(YubiKey factory keys don't apply to standard GP cards). Pass the explicit " +
+				"--scp03-{kvn,enc,mac,dek} triple instead."}
+		}
+		if !custom && !shorthand {
+			return nil, &usageError{msg: "--profile standard-sd requires explicit --scp03-{kvn,enc,mac,dek} or --scp03-key " +
+				"(no implicit YubiKey factory-key fallback for standard GP cards)."}
+		}
+	}
+
 	if !custom && !shorthand {
 		// Implicit or explicit factory default — same result.
 		return scp03.FactoryYubiKeyConfig(), nil
