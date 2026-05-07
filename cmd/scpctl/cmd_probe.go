@@ -8,6 +8,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/cardrecognition"
 	"github.com/PeculiarVentures/scp/securitydomain"
+	"github.com/PeculiarVentures/scp/transport"
 )
 
 // probeData is the JSON-friendly payload of the probe report. Strings
@@ -22,6 +23,23 @@ type probeData struct {
 	CardConfigDetailsOID  string   `json:"card_config_details_oid,omitempty"`
 	CardChipDetailsOID    string   `json:"card_chip_details_oid,omitempty"`
 	RawHex                string   `json:"raw_hex,omitempty"`
+
+	// AuthMode reports which session auth mode was used for the
+	// registry walk. Currently one of:
+	//   - "none": OpenUnauthenticated (cmdProbe; cmdSDInfo without
+	//     --scp03-* flags). Auth-required GET STATUS scopes appear
+	//     as SKIP under --full.
+	//   - "scp03": OpenSCP03 with the supplied keys. Auth-required
+	//     scopes populate.
+	//
+	// Per the external review on feat/sd-keys-cli, Finding 9: makes
+	// the auth posture of a probe report explicit, so an automated
+	// consumer reading the JSON can tell at a glance whether the
+	// SKIPped scopes are SKIPped because they're auth-gated and the
+	// session was unauthenticated, or because the card refused even
+	// the authenticated read. Future SCP11a/c paths will set this
+	// to "scp11a" / "scp11c" once Finding 4 lands.
+	AuthMode string `json:"auth_mode,omitempty"`
 
 	// KeyInfo is populated by 'sd info' (and other callers that set
 	// probeOptions.fetchKeyInfo). Each entry is a human-readable
@@ -114,16 +132,45 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	var fullMode *bool
+	var scp03Flags *scp03KeyFlags
 	if opts.allowFullStatus {
 		fullMode = fs.Bool("full", false,
 			"Walk the GP registry via GET STATUS (GP §11.4.2): "+
 				"ISD, Applications + SSDs, Load Files + Modules. "+
 				"Each scope reports separately; auth-required scopes "+
 				"appear as SKIP on cards that refuse them over an "+
-				"unauthenticated session.")
+				"unauthenticated session. Pass --scp03-* to authenticate "+
+				"the registry walk and replace SKIPs with populated entries.")
+		// scp03Optional: --scp03-* flags are accepted but not required.
+		// Without any of them, the session opens unauthenticated as
+		// before. With any of them, the session authenticates over
+		// SCP03 and the auth-required scopes (Applications + SSDs,
+		// Load Files + Modules) populate instead of SKIP-ing.
+		//
+		// Per the external review on feat/sd-keys-cli, Finding 9:
+		// 'sd info --full should let operators authenticate so the
+		// auth-gated scopes populate rather than always SKIPping.
+		// The unauthenticated default is correct for a probe, but
+		// the SKIP shouldn't be the only way to see the registry.'
+		scp03Flags = registerSCP03KeyFlags(fs, scp03Optional)
 	}
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
+	}
+
+	// SCP03 flags only make sense with --full. The CRD + KIT fetches
+	// are unauthenticated-mode-only (the card serves them over a
+	// plain SELECT regardless of auth state), so authenticating just
+	// for those reads would be wasted effort and would confuse the
+	// SCP03-as-authenticated-registry-walk semantic. Reject the
+	// combination loudly so 'sd info --scp03-keys-default' (without
+	// --full) doesn't silently authenticate-and-do-nothing.
+	if scp03Flags != nil && scp03Flags.anyFlagSet() && (fullMode == nil || !*fullMode) {
+		return &usageError{
+			msg: "--scp03-* flags require --full; SCP03 authentication " +
+				"is meaningful only for the registry walk, not for " +
+				"the unauthenticated CRD/KIT reads",
+		}
 	}
 
 	t, err := env.connect(ctx, *reader)
@@ -134,14 +181,12 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 
 	report := &Report{Subcommand: opts.reportLabel, Reader: *reader}
 
-	sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+	sd, authMode, err := openProbeSession(ctx, t, scp03Flags, fullMode, report)
 	if err != nil {
-		report.Fail("select ISD", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("select ISD: %w", err)
+		return err
 	}
 	defer sd.Close()
-	report.Pass("select ISD", "")
 
 	raw, err := sd.GetCardRecognitionData(ctx)
 	if err != nil {
@@ -164,7 +209,7 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	}
 	report.Pass("parse CRD", "")
 
-	data := &probeData{RawHex: hexEncode(raw)}
+	data := &probeData{RawHex: hexEncode(raw), AuthMode: authMode}
 	if len(info.GPVersion) > 0 {
 		data.GPVersion = joinInts(info.GPVersion, ".")
 	}
@@ -281,6 +326,83 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 		return fmt.Errorf("%s reported failures", opts.reportLabel)
 	}
 	return nil
+}
+
+// openProbeSession is the auth-mode-aware Session opener for the
+// probe / sd info family. Three branches:
+//
+//   - scp03Flags is nil (cmdProbe path, where allowFullStatus=false
+//     and no SCP03 flag was registered): always unauthenticated.
+//   - scp03Flags non-nil but no flag was set: unauthenticated, same
+//     as the historical behavior. Auth-required GET STATUS scopes
+//     under --full will SKIP as before.
+//   - scp03Flags non-nil with at least one flag set AND --full: open
+//     SCP03-authenticated. Auth-required scopes populate.
+//
+// Returns the session, the auth mode label ("none" or "scp03") for
+// inclusion in JSON output, and any error. On error, the report is
+// already populated with a Fail line so callers just need to Emit
+// and return.
+//
+// Per the external review on feat/sd-keys-cli, Finding 9.
+func openProbeSession(
+	ctx context.Context,
+	t transport.Transport,
+	scp03Flags *scp03KeyFlags,
+	fullMode *bool,
+	report *Report,
+) (*securitydomain.Session, string, error) {
+	// Decide auth mode. The --full + any-scp03-flag combination is
+	// the only path that authenticates; cmdProbe (no scp03Flags) and
+	// cmdSDInfo without the explicit auth flags both stay
+	// unauthenticated.
+	wantSCP03 := scp03Flags != nil && scp03Flags.anyFlagSet() &&
+		fullMode != nil && *fullMode
+
+	if !wantSCP03 {
+		sd, err := securitydomain.OpenUnauthenticated(ctx, t)
+		if err != nil {
+			report.Fail("select ISD", err.Error())
+			return nil, "none", fmt.Errorf("select ISD: %w", err)
+		}
+		report.Pass("select ISD", "")
+		return sd, "none", nil
+	}
+
+	// Authenticated path. Build the SCP03 config from the flag
+	// handle's optional-mode parser; this is the same applyToConfig
+	// path the bootstrap commands use, so the same custom-key
+	// validation (partial-triple rejection, hex parse errors,
+	// vendor-profile coherence) applies here.
+	cfg, err := scp03Flags.applyToConfigOptional()
+	if err != nil {
+		report.Fail("parse SCP03 flags", err.Error())
+		return nil, "scp03", err
+	}
+	if cfg == nil {
+		// applyToConfigOptional returns nil cfg when no flag was
+		// set, which we already filtered out above. If we get here
+		// it's a logic error in this function, not a card-side or
+		// operator-side problem.
+		report.Fail("open SCP03 SD", "internal: SCP03 flags requested but produced nil config")
+		return nil, "scp03", fmt.Errorf("internal: SCP03 flags requested but produced nil config")
+	}
+	report.Pass("SCP03 keys", scp03Flags.describeKeys(cfg))
+
+	// resolveProfile is a no-op for sd info's purposes (we don't
+	// emit any vendor-specific APDUs in the probe path) but we run
+	// it to surface profile-selection diagnostics and to keep the
+	// session.SetProfile contract consistent across read paths.
+	prof, _ := resolveProfile(ctx, t, scp03Flags, report)
+
+	sd, err := securitydomain.OpenSCP03(ctx, t, cfg)
+	if err != nil {
+		report.Fail("open SCP03 SD", err.Error())
+		return nil, "scp03", fmt.Errorf("open SCP03 SD: %w", err)
+	}
+	sd.SetProfile(prof)
+	report.Pass("open SCP03 SD", "")
+	return sd, "scp03", nil
 }
 
 // hexEncode formats a byte slice as uppercase hex without spaces.
