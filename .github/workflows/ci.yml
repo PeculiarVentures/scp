@@ -36,7 +36,7 @@ jobs:
   # The lint job runs golangci-lint v1.64.8 against the parent module
   # plus each submodule below.
   #
-  # install-mode: goinstall (set on every golangci-lint-action@v6 step)
+  # install-mode: goinstall (set on every golangci-lint-action@v8 step)
   # builds the v1.64.8 binary from source under the active Go toolchain
   # — Go 1.26.2 from the setup-go step above — rather than downloading
   # the pre-built binary, which is published built with Go 1.23.
@@ -63,9 +63,9 @@ jobs:
           go-version: '1.26.2'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64.8
+          version: v2.4.0
           install-mode: goinstall
           args: --timeout=5m
 
@@ -193,25 +193,25 @@ jobs:
           sudo apt-get install -y libpcsclite-dev
 
       - name: golangci-lint transport/pcsc
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64.8
+          version: v2.4.0
           install-mode: goinstall
           working-directory: transport/pcsc
           args: --timeout=5m
 
       - name: golangci-lint transport/pcsc/example
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64.8
+          version: v2.4.0
           install-mode: goinstall
           working-directory: transport/pcsc/example
           args: --timeout=5m
 
       - name: golangci-lint cmd/scpctl
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64.8
+          version: v2.4.0
           install-mode: goinstall
           working-directory: cmd/scpctl
           args: --timeout=5m
@@ -236,17 +236,17 @@ jobs:
           sudo apt-get install -y libpcsclite-dev
 
       - name: golangci-lint transport/grpc
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64.8
+          version: v2.4.0
           install-mode: goinstall
           working-directory: transport/grpc
           args: --timeout=5m
 
       - name: golangci-lint transport/grpc/example
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64.8
+          version: v2.4.0
           install-mode: goinstall
           working-directory: transport/grpc/example
           args: --timeout=5m

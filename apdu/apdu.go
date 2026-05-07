@@ -89,7 +89,7 @@ func (c *Command) encodeShort() ([]byte, error) {
 
 	if c.Le >= 0 {
 		if c.Le > 256 {
-			return nil, errors.New("Le exceeds 256 for short encoding; use ExtendedLength")
+			return nil, errors.New("le exceeds 256 for short encoding; use ExtendedLength")
 		}
 		if c.Le == 256 {
 			buf = append(buf, 0x00)
@@ -130,7 +130,7 @@ func (c *Command) encodeExtended() ([]byte, error) {
 			buf = append(buf, 0x00)
 		}
 		if c.Le > 65536 {
-			return nil, errors.New("Le exceeds 65536")
+			return nil, errors.New("le exceeds 65536")
 		}
 		if c.Le == 65536 || c.Le == 0 {
 			buf = append(buf, 0x00, 0x00)

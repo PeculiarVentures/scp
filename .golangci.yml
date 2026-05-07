@@ -1,0 +1,89 @@
+version: "2"
+
+# Top-level config for golangci-lint v2.x. Pinned at the repo root and
+# applied to all submodules (cmd/scpctl, transport/pcsc, transport/grpc)
+# via golangci-lint-action's per-working-directory invocation.
+#
+# Linter selection
+# ================
+#
+# The default v2 linter set is errcheck, govet, ineffassign, staticcheck,
+# unused. We keep all five via 'default: standard'. No additional
+# linters enabled — the default set covers correctness; opinionated
+# style linters (gocyclo, lll, mnd, etc.) generate noise without
+# correctness wins.
+#
+# Formatter selection
+# ===================
+#
+# gofmt is enabled as a formatter so format drift fails CI. The v1.x
+# config that preceded this file did not enforce gofmt — drift
+# accumulated across 20+ files before the rehab round caught it.
+# gofumpt is NOT enabled (stricter than gofmt; reformats existing
+# style choices that aren't wrong, just opinionated).
+#
+# Issue caps
+# ==========
+#
+# v2 defaults cap each linter at 50 issues per run and 3 same-rule-
+# same-file. For a clean codebase the caps are fine; we lift both so
+# new violations can't sneak in under the limit. Revisit per-rule if
+# a future tooling change surfaces a flood.
+
+linters:
+  default: standard
+  exclusions:
+    rules:
+      # Close and similar cleanup methods are conventionally
+      # called in defer or at the end of test bodies where
+      # checking the error adds noise without value. The Go
+      # community-standard pattern is to ignore Close errors
+      # except in narrow cases (writing to a file with buffered
+      # writes that need to flush). Apply broadly across the
+      # codebase, not just tests.
+      - linters:
+          - errcheck
+        text: 'Error return value of .+\.Close. is not checked'
+      # fmt.Fprint*/Print* writing to stdout/stderr is
+      # fire-and-forget. The errors that can occur (broken pipe,
+      # disk full when redirected) cannot be usefully recovered
+      # from inside print statements; the conventional pattern
+      # is to ignore the return value. CLI output and help text
+      # use this constantly.
+      - linters:
+          - errcheck
+        text: 'Error return value of .fmt\.(F?Print|Print|Fprintln|Println|Printf|Fprintf|Fprint).+ is not checked'
+      # Test variable and type names often mirror spec section
+      # numbers (e.g. refMutualAuthRAPDU_11a for "spec section
+      # 11a") where the underscore is a deliberate separator
+      # for readability. ST1003's "no underscores" rule fights
+      # that convention without correctness wins.
+      - path: _test\.go
+        linters:
+          - staticcheck
+        text: 'ST1003:'
+  settings:
+    staticcheck:
+      # Default staticcheck check set covers SA (correctness),
+      # S (simplifications), ST (style), QF (quickfix). The QF
+      # family is opt-in stylistic refactoring suggestions —
+      # "could remove embedded field from selector," "could apply
+      # De Morgan's law," "could omit type from declaration" —
+      # that flag perfectly clear code as "could be different."
+      # Disable the entire family; keep SA/S/ST which are
+      # correctness and clarity gates.
+      checks:
+        - all
+        - -QF1001
+        - -QF1003
+        - -QF1008
+        - -QF1011
+        - -QF1012
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
