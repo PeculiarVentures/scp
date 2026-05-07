@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/asn1"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -27,6 +28,17 @@ func candidateAIDStr(c gp.ISDCandidate) string {
 // for OIDs (decimal-dotted) so JSON output is human-readable without
 // custom encoders.
 type probeData struct {
+	// Profile is the resolved card profile name ("yubikey-sd",
+	// "standard-sd"). Comes from securitydomain/profile.Probe's
+	// Card-Identification-OID classification: YubiKey emits
+	// 1.2.840.114283.3 in the CRD, every other GP card we've
+	// observed emits a different OID or none. Operators read
+	// this field to confirm auto-detection landed where they
+	// expected; automation reads it to decide whether YubiKey-
+	// extension commands (GENERATE EC KEY, ATTEST, INS=0xFB
+	// reset) are valid for the card.
+	Profile string `json:"profile,omitempty"`
+
 	GPVersion             string   `json:"gp_version,omitempty"`
 	SCPVersion            string   `json:"scp_version,omitempty"`
 	SCPParameter          string   `json:"scp_parameter,omitempty"`
@@ -322,6 +334,20 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 	report.Pass("parse CRD", "")
 
 	data := &probeData{RawHex: hexEncode(raw), AuthMode: authMode, CardLocked: cardLocked}
+
+	// Profile classification mirrors securitydomain/profile.Probe:
+	// YubiKey 5.7+ emits CardIdentificationOID 1.2.840.114283.3
+	// in the CRD. Any other CardIdentificationOID (or none) lands
+	// on standard-sd. Computed here rather than re-running
+	// profile.Probe because cmdProbe has already done the SELECT
+	// + GET DATA tag 0x66 work; running Probe again would
+	// duplicate the round trips.
+	if info.CardIdentificationOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 114283, 3}) {
+		data.Profile = "yubikey-sd"
+	} else {
+		data.Profile = "standard-sd"
+	}
+
 	if len(info.GPVersion) > 0 {
 		data.GPVersion = joinInts(info.GPVersion, ".")
 	}

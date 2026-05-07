@@ -121,15 +121,11 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 		sdAID = AIDSecurityDomain
 	}
 
-	// Step 1: SELECT the SD.
-	sel := &apdu.Command{
-		CLA:  0x00,
-		INS:  0xA4,
-		P1:   0x04,
-		P2:   0x00,
-		Data: sdAID,
-		Le:   -1,
-	}
+	// Step 1: SELECT the SD. apdu.NewSelect sets Le=0 (request
+	// FCI body) on the wire — Le=-1 would encode case-1 (no
+	// expected response) and the YubiKey returns a successful
+	// 9000 with no FCI body, leaving CardInfo unpopulated.
+	sel := apdu.NewSelect(sdAID)
 	resp, err := t.Transmit(ctx, sel)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain/profile: SELECT SD: %w", err)
@@ -140,14 +136,31 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 
 	out := &ProbeResult{SelectResponse: resp.Data}
 
-	// Step 2: try parsing SELECT response as inline CRD.
-	if info, err := cardrecognition.Parse(resp.Data); err == nil {
+	// Step 2: try parsing SELECT response as inline CRD. Some
+	// cards return CRD in the SELECT FCI; if cardrecognition
+	// can decode it directly, we skip the GET DATA round trip.
+	// Only accept the result if it carries the discriminator
+	// (CardIdentificationOID) — a parse-success without OID
+	// usually means the SELECT FCI was something else entirely
+	// (FCP, an AID-only response, etc.) and we should fall
+	// through to the explicit GET DATA path.
+	if info, err := cardrecognition.Parse(resp.Data); err == nil && len(info.CardIdentificationOID) > 0 {
 		out.CardInfo = info
 	}
 
 	// Step 3: fall back to GET DATA tag 0x66 if SELECT didn't
-	// give us CRD. Some cards return a minimal SELECT response
-	// and expect the host to fetch CRD explicitly.
+	// give us CRD with a Card Identification OID. Some cards
+	// (YubiKey 5.7+) return CRD only via this explicit GET DATA;
+	// the SELECT FCI carries different data.
+	//
+	// Le must be 0 (not -1) so the encoded APDU includes the Le
+	// byte that tells the card "send up to 256 bytes of
+	// response." Le=-1 encodes as a case-1 APDU with no Le byte
+	// — the YubiKey interprets that as "no response data
+	// expected" and returns 9000 with an empty body, leaving
+	// CardInfo unpopulated and Probe falling through to
+	// Standard. This is a wire-shape match with the library's
+	// own GetCardRecognitionData path which uses Le=0.
 	if out.CardInfo == nil {
 		getCRD := &apdu.Command{
 			CLA:  0x00,
@@ -155,7 +168,7 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 			P1:   0x00,
 			P2:   crdGetDataTagP2,
 			Data: nil,
-			Le:   -1,
+			Le:   0,
 		}
 		if crdResp, err := t.Transmit(ctx, getCRD); err == nil && crdResp.IsSuccess() {
 			if info, err := cardrecognition.Parse(crdResp.Data); err == nil {

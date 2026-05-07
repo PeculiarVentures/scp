@@ -234,3 +234,88 @@ func TestProbe_NoCRDFallsThroughToStandard(t *testing.T) {
 		t.Errorf("CardInfo should be nil when no CRD reachable, got %+v", res.CardInfo)
 	}
 }
+
+// leAwareTransport models a real card's behavior: GET DATA without
+// an Le byte (case 1, Le=-1 in apdu.Command) returns SW=9000 with
+// an empty body — the card is told "no response data expected" and
+// honors that. GET DATA with Le=0 (case 2 short, "send up to 256")
+// returns the full CRD.
+//
+// This pins the wire-shape bug surfaced during YubiKey 5.7.4
+// hardware verification: profile.Probe was constructing GET DATA
+// with Le=-1 (no Le byte), the YubiKey returned 9000 with no body,
+// CardInfo stayed nil, and Probe fell through to Standard for
+// every real YubiKey. The fix uses Le=0 (or apdu.NewSelect /
+// apdu.NewGetData which set Le=0 by default).
+type leAwareTransport struct {
+	selectSW   uint16
+	selectData []byte
+	crdData    []byte
+}
+
+func (l *leAwareTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	encoded, err := cmd.Encode()
+	if err != nil {
+		return nil, err
+	}
+	// For SELECT (case 4: data + Le): the Le byte is the LAST
+	// byte if and only if encoded length == 5 + len(Data). When
+	// Le=-1 was used, Encode emits no Le byte and the encoded
+	// length is exactly 5 + len(Data). When Le=0 was used,
+	// Encode emits Le=0x00 and the encoded length is one byte
+	// longer.
+	hasLe := false
+	if cmd.INS == 0xA4 { // SELECT: data present
+		hasLe = len(encoded) > 5+len(cmd.Data)
+	} else { // GET DATA: no data
+		hasLe = len(encoded) > 4
+	}
+
+	if !hasLe {
+		// Card sees case-1 / case-3 APDU — "no response
+		// expected" — and returns empty body.
+		return &apdu.Response{
+			SW1: byte(l.selectSW >> 8),
+			SW2: byte(l.selectSW),
+		}, nil
+	}
+
+	switch cmd.INS {
+	case 0xA4:
+		return &apdu.Response{
+			SW1:  byte(l.selectSW >> 8),
+			SW2:  byte(l.selectSW),
+			Data: l.selectData,
+		}, nil
+	case 0xCA:
+		return &apdu.Response{
+			SW1:  0x90,
+			SW2:  0x00,
+			Data: l.crdData,
+		}, nil
+	}
+	return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
+}
+
+// TestProbe_EncodesGetDataWithLeByte is the regression test for
+// the YubiKey 5.7.4 hardware bug where Probe always returned
+// standard-sd because GET DATA was sent without an Le byte. With
+// the fix, the GET DATA fallback uses Le=0 and the card returns
+// the full CRD; Probe correctly classifies as yubikey-sd.
+func TestProbe_EncodesGetDataWithLeByte(t *testing.T) {
+	tr := &leAwareTransport{
+		selectSW:   0x9000,
+		selectData: nil, // SELECT FCI body empty — matches YubiKey behavior
+		crdData:    realYubiKeyCRD,
+	}
+	res, err := profile.Probe(context.Background(), tr, nil)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if res.Profile == nil || res.Profile.Name() != "yubikey-sd" {
+		t.Errorf("expected yubikey-sd (Le=0 wire form), got %v", res.Profile)
+	}
+	if res.CardInfo == nil {
+		t.Fatal("CardInfo should be populated when GET DATA returns CRD")
+	}
+}
