@@ -241,6 +241,15 @@ type Card struct {
 	// Used by tests that exercise the locked-card SELECT
 	// tolerance without requiring a real CARD_LOCKED card.
 	MockSelectSW uint16
+
+	// PIVAttestCertDER, when non-nil, is returned as the response
+	// body for INS=0xF9 (YubiKey ATTEST) instead of the default
+	// synthetic stub. Used by tests that drive
+	// pivsession.Session.Attest end-to-end, which now parses the
+	// response as an x509.Certificate; the synthetic stub fails
+	// that parse. Tests that don't care about parseability can
+	// leave this nil.
+	PIVAttestCertDER []byte
 }
 
 // LastGeneratedPIVKey returns the public key from the most recent
@@ -646,9 +655,17 @@ func (c *Card) dispatchINS(cmd *apdu.Command, underSM bool) (*apdu.Response, err
 		if !c.pivSelected {
 			return mkSW(0x6985), nil
 		}
-		// Return a small synthetic blob that looks like cert data so
-		// the host can decode "got a non-empty response." Not a real
-		// attestation; the mock can't sign a meaningful one.
+		// If the test injected a parseable cert, return it so
+		// pivsession.Session.Attest can decode it cleanly.
+		if len(c.PIVAttestCertDER) > 0 {
+			return &apdu.Response{Data: c.PIVAttestCertDER, SW1: 0x90, SW2: 0x00}, nil
+		}
+		// Otherwise return a small synthetic blob that looks like
+		// cert data so the host can decode "got a non-empty
+		// response." Not a real attestation; the mock can't sign
+		// a meaningful one. The synthetic shape will fail x509
+		// parsing — tests using pivsession.Session.Attest must
+		// set PIVAttestCertDER.
 		return &apdu.Response{Data: []byte{0x30, 0x82, 0x01, 0x00}, SW1: 0x90, SW2: 0x00}, nil
 
 	case 0x87: // PIV GENERAL AUTHENTICATE (mgmt-key mutual auth at P2=0x9B)

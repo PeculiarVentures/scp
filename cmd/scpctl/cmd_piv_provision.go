@@ -9,16 +9,13 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/piv"
-	pivapdu "github.com/PeculiarVentures/scp/piv/apdu"
-	"github.com/PeculiarVentures/scp/scp11"
+	pivsession "github.com/PeculiarVentures/scp/piv/session"
 )
 
 type pivProvisionData struct {
@@ -148,10 +145,30 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 	}
 	defer t.Close()
 
-	cfg := scp11.YubiKeyDefaultSCP11bConfig()
-	cfg.SelectAID = scp11.AIDPIV
-	cfg.ApplicationAID = nil
-	proceed, err := trust.applyTrust(cfg, report)
+	// Open SCP11b against PIV via the SD-first-then-PIV path.
+	// pivsession.OpenSCP11bPIV resolves PK.SD.ECKA from the
+	// Security Domain (where BF21 actually lives), validates the
+	// chain, then opens scp11 against PIV with the preverified
+	// key — bypassing the broken "GET DATA BF21 against PIV
+	// returns 6D00" path that the deprecated
+	// scp11.Open(cfg{SelectAID:AIDPIV}) shape would hit.
+	//
+	// Per the fourth external review, cross-branch issue #2:
+	// 'A later commit documents that piv-reset was still using
+	//  an old path: set SelectAID = PIV, then scp11.Open, which
+	//  tried to fetch BF21 from PIV and got 6D00. The fix was to
+	//  fetch the SD public key from the SD first, then open
+	//  SCP11b against PIV with the preverified key.'
+	//
+	// Other piv operator commands (piv reset, piv pin, etc.)
+	// already migrated to OpenSCP11bPIV via openPIVSession; this
+	// brings piv provision in line. Mock tests passed against
+	// the deprecated shape because mockcard answered BF21 from
+	// any selected applet; real cards (including YubiKey 5.7+)
+	// return 6D00 for BF21 against PIV per the comment in
+	// scp11/scp11.go on PreverifiedCardStaticPublicKey.
+	var sessOpts pivsession.SCP11bPIVOptions
+	proceed, err := trust.applyTrustToPIV(&sessOpts, report)
 	if err != nil {
 		return err
 	}
@@ -160,7 +177,7 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 		return nil
 	}
 
-	sess, err := scp11.Open(ctx, t, cfg)
+	sess, err := pivsession.OpenSCP11bPIV(ctx, t, sessOpts)
 	if err != nil {
 		report.Fail("open SCP11b vs PIV", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
@@ -171,107 +188,78 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("open SCP11b vs PIV", "")
 
 	if mgmtKey != nil {
-		if err := runMgmtKeyMutualAuth(ctx, sess, mgmtKey, mgmtKeyAlgo, mgmtKeyAlgoName, report); err != nil {
-			_ = report.Emit(env.out, *jsonMode)
-			return err
+		mk := piv.ManagementKey{
+			Algorithm: piv.ManagementKeyAlgorithm(mgmtKeyAlgo),
+			Key:       mgmtKey,
 		}
+		if err := sess.AuthenticateManagementKey(ctx, mk); err != nil {
+			report.Fail("MGMT-KEY AUTH", err.Error())
+			_ = report.Emit(env.out, *jsonMode)
+			return fmt.Errorf("mgmt-key auth: %w", err)
+		}
+		report.Pass("MGMT-KEY AUTH", mgmtKeyAlgoName)
 		data.MgmtAuthDone = true
 	} else {
 		data.MgmtAuthSkipped = true
 		report.Skip("MGMT-KEY AUTH", "no --mgmt-key supplied; GENERATE KEY/PUT CERTIFICATE may be refused with 6982")
 	}
 
-	verifyCmd, err := pivapdu.VerifyPIN([]byte(*pin))
-	if err != nil {
-		report.Fail("VERIFY PIN (build)", err.Error())
+	if err := sess.VerifyPIN(ctx, []byte(*pin)); err != nil {
+		report.Fail("VERIFY PIN", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("verify PIN build: %w", err)
-	}
-	resp, err := sess.Transmit(ctx, verifyCmd)
-	if err != nil {
-		report.Fail("VERIFY PIN (transmit)", err.Error())
-		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("verify PIN transmit: %w", err)
-	}
-	if !resp.IsSuccess() {
-		report.Fail("VERIFY PIN", fmt.Sprintf("SW=%04X", resp.StatusWord()))
-		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("VERIFY PIN: SW=%04X", resp.StatusWord())
+		return fmt.Errorf("verify PIN: %w", err)
 	}
 	report.Pass("VERIFY PIN", "")
 
-	genCmd := pivapdu.GenerateKey(slot, algo)
-	resp, err = sess.Transmit(ctx, genCmd)
+	generatedPub, err := sess.GenerateKey(ctx, piv.Slot(slot), pivsession.GenerateKeyOptions{
+		Algorithm: piv.Algorithm(algo),
+	})
 	if err != nil {
-		report.Fail("GENERATE KEY (transmit)", err.Error())
-		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("generate key transmit: %w", err)
-	}
-	if !resp.IsSuccess() {
 		hint := ""
 		if mgmtKey == nil {
 			hint = " (likely needs --mgmt-key to authenticate first)"
 		}
-		report.Fail("GENERATE KEY", fmt.Sprintf("SW=%04X%s", resp.StatusWord(), hint))
+		report.Fail("GENERATE KEY", err.Error()+hint)
 	} else {
 		data.KeyGenerated = true
-		report.Pass("GENERATE KEY", fmt.Sprintf("slot 0x%02X, %s, %d bytes pubkey returned", slot, algoName, len(resp.Data)))
-	}
-
-	// Parse the generated public key. Used both for the cert-binding
-	// check below and to surface a clean error if the card returned
-	// something the parser doesn't understand. X25519 returns
-	// pivapdu.ErrNoCertBinding here, which is fine — we just don't get
-	// a key to compare against and skip the binding check.
-	var generatedPub crypto.PublicKey
-	if data.KeyGenerated {
-		k, err := pivapdu.ParseGeneratedPublicKey(resp.Data, algo)
-		switch {
-		case errors.Is(err, pivapdu.ErrNoCertBinding):
-			report.Skip("parse pubkey", "X25519 — no cert binding applies")
-		case err != nil:
-			report.Fail("parse pubkey", err.Error())
-		default:
-			generatedPub = k
-			report.Pass("parse pubkey", describePub(k))
-		}
+		report.Pass("GENERATE KEY", fmt.Sprintf("slot 0x%02X, %s", slot, algoName))
+		report.Pass("parse pubkey", describePub(generatedPub))
 	}
 
 	if cert != nil && data.KeyGenerated {
-		// Cert-to-pubkey binding check. Without this, a wrong cert
-		// (different slot, stale chain, typo'd path) installs onto
-		// a slot whose keypair doesn't actually correspond — the
-		// slot then attests to an identity the operator didn't
-		// intend. The check refuses PUT CERTIFICATE on mismatch
-		// rather than installing the misleading cert.
-		if generatedPub != nil {
-			if !pivapdu.PublicKeysEqual(generatedPub, cert.PublicKey) {
-				report.Fail("cert binding", fmt.Sprintf(
-					"cert public key does not match slot 0x%02X generated key — refusing to install",
-					slot))
-				data.CertInstalled = false
-				_ = report.Emit(env.out, *jsonMode)
-				return fmt.Errorf("cert/pubkey mismatch on slot 0x%02X", slot)
-			}
+		// Cert-to-pubkey binding check is now performed by
+		// pivsession.PutCertificate when RequirePubKeyBinding is
+		// set. ExpectedPublicKey defaults to the most recent
+		// GenerateKey result on the same slot, which is exactly
+		// what we want here.
+		err := sess.PutCertificate(ctx, piv.Slot(slot), cert, pivsession.PutCertificateOptions{
+			RequirePubKeyBinding: true,
+			ExpectedPublicKey:    generatedPub,
+		})
+		switch {
+		case err != nil && strings.Contains(err.Error(), "public key does not match"):
+			// Library-side cert-to-pubkey binding refusal —
+			// pivsession.PutCertificate returns this when
+			// RequirePubKeyBinding is set and the cert's SPKI
+			// doesn't match ExpectedPublicKey. The error has no
+			// sentinel today; matching the substring is the
+			// only way to distinguish from a card-side SW
+			// failure that happens to mention "public key".
+			// String-matching is fragile; if a sentinel error
+			// gets added in piv/session/keys.go, switch to
+			// errors.Is at that point.
+			report.Fail("cert binding", fmt.Sprintf(
+				"cert public key does not match slot 0x%02X generated key — refusing to install",
+				slot))
+			data.CertInstalled = false
+			_ = report.Emit(env.out, *jsonMode)
+			return fmt.Errorf("cert/pubkey mismatch on slot 0x%02X: %w", slot, err)
+		case err != nil:
+			report.Fail("PUT CERTIFICATE", err.Error())
+		default:
 			report.Pass("cert binding", "cert matches generated slot key")
-		} else {
-			report.Skip("cert binding", "no parsed pubkey to compare against")
-		}
-
-		putCmd, err := pivapdu.PutCertificate(slot, cert)
-		if err != nil {
-			report.Fail("PUT CERTIFICATE (build)", err.Error())
-		} else {
-			resp, err = sess.Transmit(ctx, putCmd)
-			switch {
-			case err != nil:
-				report.Fail("PUT CERTIFICATE (transmit)", err.Error())
-			case !resp.IsSuccess():
-				report.Fail("PUT CERTIFICATE", fmt.Sprintf("SW=%04X", resp.StatusWord()))
-			default:
-				data.CertInstalled = true
-				report.Pass("PUT CERTIFICATE", "")
-			}
+			data.CertInstalled = true
+			report.Pass("PUT CERTIFICATE", "")
 		}
 	} else if cert != nil {
 		report.Skip("PUT CERTIFICATE", "GENERATE KEY did not succeed")
@@ -281,21 +269,20 @@ func cmdPIVProvision(ctx context.Context, env *runEnv, args []string) error {
 	}
 
 	if *doAttest && data.KeyGenerated {
-		attestCmd := pivapdu.Attest(slot)
-		// scp11.Session.Transmit doesn't chain GET RESPONSE on
-		// SW=61xx, but PIV ATTEST against retail YubiKey 5.7+
-		// routinely returns 61xx because the cert chain spans
-		// multiple frames. apdu.TransmitWithChaining drives the
-		// full chain and returns the concatenated body.
-		resp, err = apdu.TransmitWithChaining(ctx, sess, attestCmd)
+		// pivsession.Attest internally drives GET RESPONSE
+		// chaining for SW=61xx (which is what real YubiKey 5.7+
+		// returns for ATTEST because the cert chain spans
+		// multiple frames) and parses the result into a
+		// *x509.Certificate. The earlier raw-APDU path used
+		// apdu.TransmitWithChaining and returned bytes; the
+		// high-level method does both pieces.
+		attestCert, err := sess.Attest(ctx, piv.Slot(slot))
 		switch {
 		case err != nil:
-			report.Fail("ATTESTATION (transmit)", err.Error())
-		case !resp.IsSuccess():
-			report.Fail("ATTESTATION", fmt.Sprintf("SW=%04X", resp.StatusWord()))
+			report.Fail("ATTESTATION", err.Error())
 		default:
 			data.AttestRetrieved = true
-			report.Pass("ATTESTATION", fmt.Sprintf("%d bytes", len(resp.Data)))
+			report.Pass("ATTESTATION", fmt.Sprintf("CN=%q", attestCert.Subject.CommonName))
 		}
 	} else if *doAttest {
 		report.Skip("ATTESTATION", "GENERATE KEY did not succeed")
@@ -380,61 +367,6 @@ func loadOneCert(path string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("parse %q: %w", path, err)
 	}
 	return c, nil
-}
-
-// (apdu import retained because the doc comment references *apdu.Command;
-// the actual apdu package usage is via piv.* builders.)
-var _ = (*apdu.Command)(nil)
-
-// runMgmtKeyMutualAuth orchestrates the two-APDU PIV management-key
-// mutual auth exchange. Reports each step to `report` so failures
-// surface specifically (challenge-build, parse-witness, response-build,
-// or final-verify) rather than collapsing into one opaque "auth
-// failed."
-func runMgmtKeyMutualAuth(ctx context.Context, sess interface {
-	Transmit(context.Context, *apdu.Command) (*apdu.Response, error)
-}, mgmtKey []byte, algo byte, algoName string, report *Report) error {
-	// Step 1: request witness.
-	chal := pivapdu.MgmtKeyMutualAuthChallenge(algo)
-	resp, err := sess.Transmit(ctx, chal)
-	if err != nil {
-		report.Fail("MGMT-KEY AUTH (request witness)", err.Error())
-		return fmt.Errorf("mgmt-key auth request witness: %w", err)
-	}
-	if !resp.IsSuccess() {
-		report.Fail("MGMT-KEY AUTH (request witness)", fmt.Sprintf("SW=%04X", resp.StatusWord()))
-		return fmt.Errorf("mgmt-key auth request witness: SW=%04X", resp.StatusWord())
-	}
-	witness, err := pivapdu.ParseMutualAuthWitness(resp.Data, algo)
-	if err != nil {
-		report.Fail("MGMT-KEY AUTH (parse witness)", err.Error())
-		return fmt.Errorf("parse witness: %w", err)
-	}
-
-	// Step 2: respond with decrypted witness + fresh challenge.
-	respCmd, hostChallenge, err := pivapdu.MgmtKeyMutualAuthRespond(witness, mgmtKey, algo)
-	if err != nil {
-		report.Fail("MGMT-KEY AUTH (build response)", err.Error())
-		return fmt.Errorf("build response: %w", err)
-	}
-	resp, err = sess.Transmit(ctx, respCmd)
-	if err != nil {
-		report.Fail("MGMT-KEY AUTH (transmit response)", err.Error())
-		return fmt.Errorf("mgmt-key auth transmit response: %w", err)
-	}
-	if !resp.IsSuccess() {
-		report.Fail("MGMT-KEY AUTH (response)", fmt.Sprintf("SW=%04X", resp.StatusWord()))
-		return fmt.Errorf("mgmt-key auth response: SW=%04X", resp.StatusWord())
-	}
-
-	// Step 3: verify the card's response under our challenge.
-	if err := pivapdu.VerifyMutualAuthResponse(resp.Data, hostChallenge, mgmtKey, algo); err != nil {
-		report.Fail("MGMT-KEY AUTH (verify card)", err.Error())
-		return fmt.Errorf("verify card response: %w", err)
-	}
-
-	report.Pass("MGMT-KEY AUTH", algoName)
-	return nil
 }
 
 // parseMgmtKey decodes the --mgmt-key flag value and validates it
