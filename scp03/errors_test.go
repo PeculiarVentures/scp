@@ -3,6 +3,7 @@ package scp03_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -101,4 +102,131 @@ func TestSentinelsAreDistinct(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestCryptogramMismatchError_FieldsAndError pins the new rich
+// auth-failure shape. Builds a CryptogramMismatchError directly,
+// asserts that the bytes round-trip on the value, that errors.Is
+// against ErrAuthFailed succeeds (so existing callers using
+// errors.Is(err, ErrAuthFailed) continue to match), and that the
+// rendered Error() string carries both bytes plus the brick-risk
+// warning so log lines stay informative.
+func TestCryptogramMismatchError_FieldsAndError(t *testing.T) {
+	cm := &scp03.CryptogramMismatchError{
+		Expected: []byte{0xB2, 0xF3, 0x92, 0xD2, 0xCF, 0xB9, 0xA4, 0x59},
+		Received: []byte{0x76, 0x53, 0x2D, 0x72, 0xCF, 0x9D, 0xE0, 0x5F},
+	}
+
+	// errors.Is via ErrAuthFailed.
+	if !errors.Is(cm, scp03.ErrAuthFailed) {
+		t.Errorf("CryptogramMismatchError should errors.Is as ErrAuthFailed")
+	}
+
+	// errors.As against the concrete type for byte recovery.
+	var got *scp03.CryptogramMismatchError
+	if !errors.As(error(cm), &got) {
+		t.Fatal("errors.As should recover the concrete type")
+	}
+	if string(got.Expected) != string(cm.Expected) {
+		t.Errorf("Expected bytes mismatch: got %X want %X", got.Expected, cm.Expected)
+	}
+	if string(got.Received) != string(cm.Received) {
+		t.Errorf("Received bytes mismatch: got %X want %X", got.Received, cm.Received)
+	}
+
+	// Rendered message must include both bytes (uppercase hex,
+	// matching gppro) and the brick-risk warning.
+	msg := cm.Error()
+	for _, want := range []string{
+		"B2F392D2CFB9A459", // expected
+		"76532D72CF9DE05F", // received
+		"Do not re-try",
+		"counter",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() missing %q; got:\n%s", want, msg)
+		}
+	}
+}
+
+// TestCryptogramMismatchError_IsThroughWrap confirms the type
+// continues to satisfy errors.Is(err, ErrAuthFailed) when wrapped
+// behind another error in a fmt.Errorf %w chain. Pre-fix the
+// callsite produced fmt.Errorf("%w: ...", ErrAuthFailed); post-fix
+// it returns *CryptogramMismatchError directly. Both should
+// behave the same for downstream callers using errors.Is.
+func TestCryptogramMismatchError_IsThroughWrap(t *testing.T) {
+	cm := &scp03.CryptogramMismatchError{
+		Expected: []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
+		Received: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17},
+	}
+	wrapped := fmt.Errorf("opening session: %w", cm)
+
+	if !errors.Is(wrapped, scp03.ErrAuthFailed) {
+		t.Errorf("wrapped CryptogramMismatchError should errors.Is as ErrAuthFailed")
+	}
+
+	var got *scp03.CryptogramMismatchError
+	if !errors.As(wrapped, &got) {
+		t.Fatal("errors.As should still recover the concrete type through wrap")
+	}
+	if got.Received[0] != 0x10 {
+		t.Errorf("byte recovery failed through wrap: got %X", got.Received)
+	}
+}
+
+// TestOpen_WrongKeys_SurfacesCryptogramBytes is the integration-
+// level check. Drives a real handshake against the SCP03 mock with
+// deliberately-wrong host keys. The mock's INITIALIZE UPDATE
+// response includes a card cryptogram derived from the mock's
+// configured (correct) keys; the host computes its own cryptogram
+// from the wrong keys; the mismatch surfaces as a
+// CryptogramMismatchError carrying both byte sequences.
+func TestOpen_WrongKeys_SurfacesCryptogramBytes(t *testing.T) {
+	// The mock card is configured with DefaultKeys.
+	card := scp03.NewMockCard(scp03.DefaultKeys)
+
+	// The host opens with a different key set. Both have to be
+	// AES-128 (or all the same length) since scp03.Open enforces
+	// uniform key length.
+	wrongKeys := scp03.StaticKeys{
+		ENC: bytes16(0xAA),
+		MAC: bytes16(0xBB),
+		DEK: bytes16(0xCC),
+	}
+
+	_, err := scp03.Open(context.Background(), card.Transport(), &scp03.Config{
+		Keys: wrongKeys,
+	})
+	if err == nil {
+		t.Fatal("expected auth failure with mismatched keys; got nil")
+	}
+
+	if !errors.Is(err, scp03.ErrAuthFailed) {
+		t.Errorf("errors.Is(err, ErrAuthFailed) = false; err = %v", err)
+	}
+
+	var cm *scp03.CryptogramMismatchError
+	if !errors.As(err, &cm) {
+		t.Fatalf("errors.As should recover *CryptogramMismatchError; err = %v", err)
+	}
+	if len(cm.Expected) == 0 || len(cm.Received) == 0 {
+		t.Errorf("CryptogramMismatchError should populate both byte slices; got expected=%X received=%X", cm.Expected, cm.Received)
+	}
+	if len(cm.Expected) != len(cm.Received) {
+		t.Errorf("Expected and Received should have equal length (S8=8 or S16=16); got %d / %d", len(cm.Expected), len(cm.Received))
+	}
+	// They must differ — that's the whole point.
+	if string(cm.Expected) == string(cm.Received) {
+		t.Errorf("Expected and Received should differ on a key mismatch; both = %X", cm.Expected)
+	}
+}
+
+// bytes16 returns a 16-byte slice filled with v. Test helper.
+func bytes16(v byte) []byte {
+	out := make([]byte, 16)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }
