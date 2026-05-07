@@ -2,7 +2,7 @@
 
 This document captures what we learned investigating the SafeNet Token JC family in May 2026, so the next person who plugs one of these in has the answers waiting instead of repeating the same searches.
 
-In short, `scpctl probe` works fully against the Token JC, and the structured Card Capability decode added in #138 is byte-exact against gppro for the same response. Authenticating to the card's Issuer Security Domain (INITIALIZE UPDATE / EXTERNAL AUTHENTICATE) is a separate question, gated on GP-layer keys that aren't published anywhere we could find. That part of the inventory stays unvalidated until somebody supplies keys.
+In short, the card is discoverable and inventory-readable, but in its current state it refuses SCP03 establishment at INITIALIZE UPDATE. The rejection occurs before card cryptogram exchange, so key material is not the active gate. `scpctl probe` works fully against the Token JC, and the structured Card Capability decode added in #138 is byte-exact against gppro for the same response. Authentication is a separate question, layered: even with the right GP-layer keys (which aren't published anywhere we could find for this SKU), the card's current state would still refuse `INITIALIZE UPDATE` with SW=6982. The "What happens when we try to authenticate" section walks through both observed phases and what we know vs hypothesize about the transition between them.
 
 ## Card identification
 
@@ -78,23 +78,31 @@ Keys are not the gate. The card is refusing SCP03 establishment at the policy le
 
 ### What changed between phases
 
-The most plausible explanation is that the Phase 1 failed attempt transitioned the Card Manager's SD to a locked or blocking lifecycle state. Per GP Card Spec §11.5, SCP establishment can be refused with 6982 when the SD is in a state that doesn't permit host-initiated authentication, and per the FIPS Security Policy §5.7.2 this card's authentication mechanism includes "a counter of failed authentication and a blocking mechanism." A single failed cryptogram check may not flip the SD into the blocking state on most cards, but on this firmware it apparently did. We don't have a confirmed transition log because we didn't read SD lifecycle state between the attempts; that's a fixture for next time.
+This is a hypothesis, not a confirmed finding. We don't have a lifecycle/status read of the Card Manager between the two phases, so we can't prove what state the SD was in. What we can say is that the card moved from "responds to INITIALIZE UPDATE with a 32-byte challenge/cryptogram payload" to "rejects INITIALIZE UPDATE with SW=6982" between sessions, and that's a state change consistent with the Card Manager transitioning to a more restrictive state.
 
-A second possibility, complementary not exclusive: the card may always have required a vendor-specific precondition before host-initiated SCP03 is permitted. SafeNet Authentication Client mediates a token-level handshake before opening Card Manager-level operations on cards in the field, and that handshake may set state the card requires before accepting `INITIALIZE UPDATE`. Without source access to SAC's protocol, we can't disprove this.
+Several causes are consistent with the observed transition, listed roughly in order of plausibility:
+
+- **Failed-auth state change.** The Phase 1 cryptogram-mismatch attempt may have transitioned the SD into a locked or blocking lifecycle state. Per GP Card Spec §11.5, SCP establishment can be refused with 6982 when the SD is in a state that doesn't permit host-initiated authentication, and per the FIPS Security Policy §5.7.2 this card's authentication mechanism includes "a counter of failed authentication and a blocking mechanism." A single failed cryptogram check may not flip the SD into the blocking state on most cards; whether this firmware does so on the first failure is unconfirmed.
+- **Vendor-mediated precondition.** The card may have always required a vendor-specific precondition before host-initiated SCP03 is permitted, and that precondition was satisfied in Phase 1 (perhaps as a side effect of running scpctl probe earlier in the same session) but not in Phase 2. SafeNet Authentication Client mediates a token-level handshake before opening Card Manager-level operations on cards in the field, and that handshake may set transient state the card requires before accepting `INITIALIZE UPDATE`. Without source access to SAC's protocol, this stays a possibility we can't disprove.
+- **Card lifecycle progression independent of failed auth.** The card may have been in `OP_READY` (or a similar state permitting open SCP03 establishment) during Phase 1 and progressed to `INITIALIZED` or `SECURED` state by Phase 2 through some unrelated event. Less plausible without a triggering action, but not ruled out.
+
+What we'd need to disambiguate: a `GET STATUS` read of the SD between attempts (would tell us the Card Manager lifecycle state), or a successful Phase-2-style trace from a different card in the same family (would tell us whether the 6982 behavior is per-card-state or platform-wide). Neither was available in this investigation.
 
 ### Diagnostic surface in the library
 
-After #140, both failure modes get distinct error types in the library:
+After #140 and #142, both failure modes get distinct error types in the library, with attempt context preserved on the error:
 
 ```go
 sess, err := scp03.Open(ctx, transport, cfg)
 switch {
 case errors.As(err, &iue):
-    // *InitializeUpdateError. Phase-2 Token JC behavior. The
-    // SW (e.g. 6982) is recoverable via iue.SW(); iue.Diagnostic
-    // names the GP-spec interpretation; iue.RetryDifferentKeys
-    // is false for state/policy SWs and true for SWs that name
-    // wrong key material (6A88, 63CX). Don't cycle keys when
+    // *InitializeUpdateError. Phase-2 Token JC behavior. iue.SW()
+    // returns the status word; iue.Diagnostic names the GP-spec
+    // interpretation; iue.RetryDifferentKeys is false for
+    // state/policy SWs and true for SWs that name wrong key
+    // material (6A88, 63CX). iue.KeyVersion, iue.KeyIdentifier,
+    // and iue.AID preserve the attempt context (P1, P2, and
+    // SELECTed AID respectively). Don't cycle keys when
     // RetryDifferentKeys is false.
 case errors.As(err, &cm):
     // *CryptogramMismatchError. Phase-1 Token JC behavior. The
@@ -105,11 +113,11 @@ case errors.Is(err, scp03.ErrAuthFailed):
 }
 ```
 
-The Token JC's current state surfaces as `*InitializeUpdateError` with `SW=6982` and `RetryDifferentKeys=false`. Operators reading the rendered error see "retrying with different keys will not help. Investigate SD lifecycle, card state, or vendor preconditions" rather than ambiguous "auth failed" framing.
+The Token JC's current state surfaces as `*InitializeUpdateError` with `SW=6982` and `RetryDifferentKeys=false`. The rendered error names the SW, the attempt context, and the operator-facing interpretation: "Security status not satisfied. SCP03 establishment was refused before cryptographic verification, so key material was not tested. Consistent with locked/vendor-managed SD, missing vendor precondition, lifecycle restriction, or policy-blocked INITIALIZE UPDATE; lifecycle/status read needed to confirm which."
 
 ### About the failed-auth counter
 
-Per the FIPS Security Policy §5.7.2, the platform's default threshold for failed-authentication counter is **80** (not the more common GP default of 10). The counter only decrements on cryptogram verification failures. Since Phase 2 attempts are rejected before cryptogram verification, they are likely not consuming counter slots. We don't have a way to confirm this without reading internal state, and we should remain cautious. From this state, even with sourced keys, the card likely won't open until something resets it. A SAC-mediated reinitialization may be the only path that puts the SD back into a state where `INITIALIZE UPDATE` succeeds.
+Per the FIPS Security Policy §5.7.2, the platform's default threshold for the failed-authentication counter is **80** (not the more common GP default of 10). Per the same section, the counter "is decremented prior to any attempt to authenticate and is only reset to its threshold (maximum value) upon successful authentication." Whether SW=6982 at INITIALIZE UPDATE counts as "an attempt to authenticate" for counter-decrement purposes is firmware-specific and unconfirmed for this card. Operators should treat the counter as potentially decrementing on each attempt and budget accordingly. From the current state, even with sourced keys, the card likely won't open until something resets the SD lifecycle. A SAC-mediated reinitialization is the conventional path that puts the SD back into a state where `INITIALIZE UPDATE` succeeds, but we haven't confirmed this against this specific card.
 
 ## The keys question, clearly
 
