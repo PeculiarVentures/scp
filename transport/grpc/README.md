@@ -97,5 +97,5 @@ client, err := scpgrpc.Dial(ctx, scpgrpc.DialOptions{
 defer client.Close()
 
 // Use it like any other transport — same SCP11 stack as a local card.
-sd, err := securitydomain.OpenSCP11(ctx, client, scp11.YubiKeyDefaultSCP11bConfig())
+sd, err := securitydomain.OpenSCP11(ctx, client, yubikey.SCP11bConfig())
 ```

@@ -104,15 +104,19 @@ var realYubiKeyCRD = mustHex(
 	"663F733D" +
 		"06072A864886FC6B01" + // GP RID
 		"600C060A2A864886FC6B02020301" + // GP 2.3.1
-		"630906072A864886FC6B03" + // card identification scheme (the YubiKey signature OID)
+		"630906072A864886FC6B03" + // Card_IDS (GP-standard, not YubiKey-specific)
 		"640B06092A864886FC6B040360" + // SCP03 i=0x60
 		"640C060A2A864886FC6B04119B06") // SCP11 i=0x0D86
 
 // nonYubiKeyCRD is a synthetic CRD with a Card Identification
 // Scheme OID that's NOT 1.2.840.114283.3 — uses 1.2.840.114283.99
-// (an out-of-band-allocated arc that isn't the YubiKey signature)
-// to verify Probe's discriminator only fires on the exact Yubico
-// OID, not on any GP-RID-rooted card identification.
+// (an out-of-band-allocated arc that isn't a real Card_IDS) to
+// verify classifyByCRD's first-gate check rejects CRDs where the
+// Card Identification arc is some other vendor-specific value.
+// Real-world non-YubiKey cards that do emit the GP-standard
+// 1.2.840.114283.3 (e.g. SafeNet eToken Fusion) are covered by
+// realSafeNetEtokenFusionCRD, which exercises the chip-details and
+// SCP11-advertised narrowing signals instead.
 //
 // Length math: outer tag 0x66 length 0x24 (=36 bytes inner). Inner
 // tag 0x73 length 0x22 (=34 bytes children). Children: GP RID OID
@@ -170,8 +174,8 @@ func TestProbe_DetectsYubiKeyViaCRD(t *testing.T) {
 // some cards return a minimal SELECT response that doesn't
 // include CRD, and the probe must issue GET DATA tag 0x66 to
 // fetch CRD explicitly. When that fallback succeeds and produces
-// a YubiKey-signature CRD, classification still lands on
-// yubikey-sd.
+// a YubiKey-shaped CRD (Card_IDS OID present, no chip details,
+// SCP11 advertised), classification still lands on yubikey-sd.
 func TestProbe_FallsBackToCRDViaGetData(t *testing.T) {
 	tr := &scriptedTransmitter{
 		selectSW:   0x9000,
@@ -189,11 +193,17 @@ func TestProbe_FallsBackToCRDViaGetData(t *testing.T) {
 }
 
 // TestProbe_NonYubiKeyCRDFallsThroughToStandard verifies that a
-// card emitting CRD with a non-YubiKey Card Identification
-// Scheme OID drops to Standard, not YubiKey. The discriminator
-// must be exact-OID match — matching just the GP-RID prefix
-// would misclassify any card that happens to fill the card-id
-// arc with a vendor-specific value.
+// card emitting CRD with a Card Identification Scheme OID other
+// than the GP-standard 1.2.840.114283.3 drops to standard-sd.
+// classifyByCRD requires the GP-standard Card_IDS OID as its
+// first gate; any other arc (here, 1.2.840.114283.99) fails the
+// gate immediately and never reaches the chip-details and SCP11-
+// advertised checks. Pre-fix the classifier matched on the
+// GP-standard OID alone and would have classified any GP-
+// conformant card as YubiKey; that path is covered by the
+// SafeNet test (real card, Card_IDS present, classifies as
+// standard-sd because CardChipDetailsOID is set and SCP11 is
+// not advertised).
 func TestProbe_NonYubiKeyCRDFallsThroughToStandard(t *testing.T) {
 	tr := &scriptedTransmitter{
 		selectSW:   0x9000,

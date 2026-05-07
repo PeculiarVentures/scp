@@ -165,19 +165,19 @@ All paths below are at SHA `6d6c154dd55b3dc5406d980345d44c8e4ed01a72`.
 Behavioral reference, not a vector import. yubikit is the canonical
 reference for how a YubiKey expects to be talked to:
 
-* **Empty-data SCP03 wrapping.** `EmptyDataEncryption = EmptyDataYubico`
+* **Empty-data SCP03 wrapping.** `EmptyDataEncryption = EmptyDataPadAndEncrypt`
   (default) matches yubikit's `ScpState.encrypt` behavior of padding
   empty plaintext to a full AES block before encrypt. The alternative
-  policy `EmptyDataGPLiteral` matches a stricter reading of the GP
-  spec. `channel/channel_test.go::TestEmptyData_YubicoDefault_PadsAndEncrypts`
-  pins the YubiKey-compatible default.
+  policy `EmptyDataNoOp` matches a stricter reading of the GP spec.
+  `channel/channel_test.go::TestEmptyData_PadAndEncrypt_Default` pins
+  the YubiKey-verified default.
 * **SCP11a PSO certificate framing.** One extended-length APDU per
   certificate, P1 high-bit clear on every cert except the leaf.
   `mockcard/scp11_ephemeral_key_test.go::TestSCP11a_PSO_WireFormat`
   documents this layout and the GP §7.5.2 / yubikit alignment.
 * **Factory-key behavior.** YubiKey factory SCP03 uses
   `KeyVersionNumber = 0xFF` and well-known default AES-128 key bytes.
-  `scp03.YubiKeyFactoryKeyVersion` and `scp03.FactoryYubiKeyConfig()`
+  `yubikey.FactoryKeyVersion` and `yubikey.FactorySCP03Config()`
   reflect that.
 * **A6/90 KID byte.** The KID encoded in the A6/90 control reference
   during SCP11 MUTUAL_AUTHENTICATE is hardcoded to `0x11` to match

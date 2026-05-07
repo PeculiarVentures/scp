@@ -911,10 +911,10 @@ var syntheticCPLC = []byte{
 	0x51, 0x80, 0x9F, 0x60,
 }
 
-// syntheticCRD is hand-assembled GP 2.3.1 / SCP03 i=0x65 Card
-// Recognition Data, returned by GET DATA tag 0x0066. Same shape as
-// the test fixture used elsewhere in the repo. See GP Card Spec
-// §H.2 for the structure.
+// syntheticCRD is hand-assembled GP 2.3.1 / SCP03 i=0x60 / SCP11
+// i=0x0D86 Card Recognition Data, returned by GET DATA tag 0x0066.
+// Same shape as the test fixture used elsewhere in the repo. See GP
+// Card Spec §H.2 for the structure.
 //
 // Matches the byte-exact CRD captured from a retail YubiKey 5.7.4
 // (also pinned in cardrecognition's TestParse_RetailYubiKey5_BothSCPs):

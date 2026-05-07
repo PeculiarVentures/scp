@@ -97,17 +97,36 @@ Opens an unauthenticated Security Domain session, fetches Card Recognition Data 
 scpctl probe --reader "YubiKey"
 ```
 
-Sample output:
+Sample output (against a retail YubiKey 5.7+):
 
 ```
 scpctl probe
   reader: YubiKey
-  select ISD                       PASS
-  GET DATA tag 0x66                PASS — 76 bytes
+  data:
+    auth_mode: none
+    card_identification_oid: 1.2.840.114283.3
+    cplc: {"ic_fabricator":"4090", "ic_serial_number":"BD969B1A", ...}
+    gp_version: 2.3.1
+    profile: yubikey-sd
+    scp_parameter: 0x60
+    scp_version: 0x03
+    scps: ["SCP03 i=0x60", "SCP11 i=0x0D86"]
+  discover ISD attempt             PASS — A000000151000000 — GP Card Spec v2.3.1 §F.6 (default Issuer Security Domain AID) — SW=9000
+  discover ISD                     PASS — matched A000000151000000
+  GET DATA tag 0x66                PASS — 65 bytes
   parse CRD                        PASS
   GP version                       PASS — 2.3.1
-  SCP advertised                   PASS — SCP03 i=0x65
+  SCP advertised                   PASS — SCP03 i=0x60
+  SCP advertised                   PASS — SCP11 i=0x0D86
+  GET DATA tag 0x9F7F (CPLC)       PASS — IC fabricator=0x4090 serial=BD969B1A
+  GET DATA tag 0x0042 (IIN)        SKIP — not present (SW=6A88)
+  GET DATA tag 0x0045 (CIN)        SKIP — not present (SW=6A88)
+  GET DATA tag 0x00CF (KDD)        SKIP — not present (SW=6A88)
+  GET DATA tag 0x00C1 (SSC)        SKIP — not present (SW=6A88)
+  GET DATA tag 0x0067 (Card Capabilities) SKIP — not present (SW=6A88)
 ```
+
+YubiKey reports CPLC with the post-fabrication date fields holding random per-card serial bytes (the parser tolerates this and renders affected dates as `"{raw} (raw)"`); IIN/CIN/KDD/SSC/Card Capabilities are not exposed by YubiKey 5.x and surface as SKIP. A SafeNet eToken Fusion or other Thales/Gemalto card under the same probe populates all five reads with hex bytes (the IIN value ASCII-decodes to the issuer name) and decodes valid CPLC dates.
 
 CRD is **discovery input, not authorization**. A card that lies about its CRD is the card's bug; this tool does not infer trust from the probe output.
 
@@ -387,7 +406,7 @@ These are not v0-only constraints; they're intentional shape:
 - **SCP is applet-scoped on YubiKey.** This tool sets `SelectAID` on the SCP `Config` before opening the channel rather than opening on the ISD and then SELECTing PIV inside. Selecting a different applet inside an SCP session terminates the session.
 - **CRD is advisory.** The probe reports what the card claims; subsequent commands do not inherit trust from the probe.
 - **SCP11b never authorizes writes.** SCP11b proves card-to-host authentication only. Any operation requiring OCE authentication will be refused under SCP11b regardless of what the user asks for.
-- **The library expects an explicit Config.** `nil` configs are rejected by both `scp03.Open` and `scp11.Open`. The CLI passes specific helper-built configs (e.g. `scp03.FactoryYubiKeyConfig()`) so it's obvious to anyone reading the code which keys are in use.
+- **The library expects an explicit Config.** `nil` configs are rejected by both `scp03.Open` and `scp11.Open`. The CLI passes specific helper-built configs (e.g. `yubikey.FactorySCP03Config()`) so it's obvious to anyone reading the code which keys are in use.
 
 ## Cross-references
 
