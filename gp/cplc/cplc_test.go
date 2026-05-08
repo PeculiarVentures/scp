@@ -419,12 +419,20 @@ func TestDecodeDate_LeapDay366(t *testing.T) {
 		t.Errorf("YDDD=0366 in 2020 (leap) should be valid; got %+v", d.OperatingSystemReleaseDate)
 	}
 
-	// YDDD = 0366 with clock in 2020. Most-recent-year-not-after
-	// for Y=0 is 2020. Leap. Valid.
+	// YDDD = 0366 with clock at June 1 2020. The encoded date
+	// would resolve to 2020-12-31 against the initial year
+	// resolution (Y=0, current year 2020). But Dec 31 is later in
+	// the year than June 1, so the future-date walk-back fires
+	// and the year goes back to 2010. 2010 is not a leap year,
+	// so day=366 is invalid in the walked-back year and the
+	// field is rejected. This case demonstrates the heuristic
+	// won't produce a future-relative-to-clock date even when
+	// year-digit equals current-year's last digit.
 	exact := time.Date(2020, 6, 1, 0, 0, 0, 0, time.UTC)
 	d2, _ := cplc.Parse(buildCPLCWithOSReleaseDate(t, [2]byte{0x03, 0x66}), fixedClock(exact))
-	if !d2.OperatingSystemReleaseDate.Valid {
-		t.Errorf("YDDD=0366 in 2020 should be valid")
+	if d2.OperatingSystemReleaseDate.Valid {
+		t.Errorf("YDDD=0366 with clock=2020-06-01 should walk back to 2010 (non-leap) and be invalid; got %+v",
+			d2.OperatingSystemReleaseDate)
 	}
 
 	// YDDD = 0366 with clock in 2025. Most recent year ending in
@@ -493,16 +501,17 @@ func buildCPLCWithOSReleaseDate(t *testing.T, dateBytes [2]byte) []byte {
 //
 //   - ICType 7164 broadens the chip-variant coverage beyond the
 //     Fusion family.
-//   - The fabrication date Y=6 D=160 exercises a corner case of
-//     the decade heuristic where the year-digit matches the
-//     current year's last digit (Y=6 in 2026), causing the
-//     heuristic to resolve to the current year. gppro v25.10.20
-//     produces 2016 for the same bytes (likely cross-referencing
-//     against OS release ordering); ours produces 2026. The
-//     divergence is documented in the test comment and is a
-//     future-fixture target if a smarter heuristic ships.
+//   - The fabrication date Y=6 D=160 exercises the future-date
+//     walk-back rule introduced in PR #147. The initial year
+//     resolution lands on the current year (2026), but the
+//     encoded day-of-year (160 = June 8) is later than today's
+//     day-of-year (May 8 = 128 in 2026), so the heuristic walks
+//     back a decade to 2016. This matches gppro v25.10.20's
+//     interpretation of the same bytes against this card and
+//     against the contemporary OS release date (2022-06-21).
 //   - The OS release date Y=2 D=172 exercises the previous-decade
-//     branch and agrees with gppro's interpretation (2022-06-21).
+//     branch (year != currentYear) and agrees with gppro's
+//     interpretation (2022-06-21).
 //
 // Bytes captured from gppro v25.10.20 GET DATA tag 9F7F response.
 const ml840CPLCHex = "9F7F2A" +
@@ -527,18 +536,13 @@ const ml840CPLCHex = "9F7F2A" +
 
 // TestParse_ML840 exercises the parser against the third real-card
 // CPLC fixture. Spot-checks the chip-variant codes that differ from
-// the SafeNet fixtures. Also exercises a corner case in the decade
-// heuristic: when the card's year-digit matches the current year's
-// last digit (Y=6 in 2026), the heuristic picks the current year
-// rather than walking back to a prior decade. For this card that's
-// likely wrong (an OS release date of 2022 against a fabrication
-// date of 2026 is the wrong temporal ordering), but the bytes
-// alone don't carry enough information to decide between "Y matches
-// current year exactly" and "Y is 10/20/... years ago." gppro v25.10.20
-// produces 2016 for the same bytes, possibly by cross-referencing
-// against OS release ordering or using a different rule. The
-// divergence is documented in docs/safenet-token-jc.md and is a
-// future-fixture target if a smarter heuristic ships.
+// the SafeNet fixtures, plus the future-date walk-back rule
+// introduced in PR #147: when the year-digit matches the current
+// year's last digit and the encoded day-of-year is later in the
+// year than today, the heuristic walks back a decade. For ML840
+// against a 2026 clock this resolves Y=6 D=160 to 2016-06-08
+// (gppro's interpretation) rather than 2026-06-09 (the older
+// without-context heuristic).
 func TestParse_ML840(t *testing.T) {
 	clock := time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC)
 	d, err := cplc.Parse(mustHex(t, ml840CPLCHex), fixedClock(clock))
@@ -556,26 +560,24 @@ func TestParse_ML840(t *testing.T) {
 		t.Errorf("ICSerialNumber = %X, want 2F05211A", d.ICSerialNumber)
 	}
 
-	// Fabrication date Y=6 D=160. Against a 2026 clock, the
-	// heuristic resolves Y=6 to 2026 (current year ends in 6).
-	// DDD=160 = day-of-year 160 in 2026 = June 9. This is most
-	// likely wrong for this specific card (gppro produces 2016),
-	// but it's the deterministic output of the without-context
-	// heuristic and the test pins it as such. A future change
-	// to the heuristic that produces 2016-06-08 here would be a
-	// behavior change worth catching.
-	wantFabDate := time.Date(2026, 6, 9, 0, 0, 0, 0, time.UTC)
+	// Fabrication date Y=6 D=160. Initial year resolution lands
+	// on 2026 (current year ends in 6). Encoded day-of-year 160
+	// (June 8 in 2016, June 9 in 2026 since 2026 is not leap) is
+	// later than clock.YearDay() = 128 (May 8), so the future-date
+	// walk-back fires and the year goes back to 2016. 2016 is leap
+	// so day 160 = June 8.
+	wantFabDate := time.Date(2016, 6, 8, 0, 0, 0, 0, time.UTC)
 	if !d.ICFabricationDate.Valid {
 		t.Fatal("ICFabricationDate should be valid")
 	}
 	if got := d.ICFabricationDate.Time(); !got.Equal(wantFabDate) {
-		t.Errorf("ICFabricationDate = %s, want %s (decade heuristic vs gppro divergence)", got, wantFabDate)
+		t.Errorf("ICFabricationDate = %s, want %s", got, wantFabDate)
 	}
 
-	// OS release date Y=2 D=172. Heuristic against 2026 clock
-	// resolves Y=2 to 2022 (the most recent past year ending in 2).
-	// DDD=172 = day-of-year 172 = June 21. This case agrees with
-	// gppro's interpretation.
+	// OS release date Y=2 D=172. Year resolution lands on 2022
+	// (year != currentYear, walk-back doesn't apply). DDD=172 =
+	// day-of-year 172 = June 21. This case agrees with gppro's
+	// interpretation.
 	wantOSReleaseDate := time.Date(2022, 6, 21, 0, 0, 0, 0, time.UTC)
 	if !d.OperatingSystemReleaseDate.Valid {
 		t.Fatal("OperatingSystemReleaseDate should be valid")
@@ -591,5 +593,106 @@ func TestParse_ML840(t *testing.T) {
 	if d.ICPersonalizationDate.Valid {
 		t.Errorf("ICPersonalizationDate should be invalid (zero bytes); got %s",
 			d.ICPersonalizationDate.Time())
+	}
+}
+
+// TestDecodeDate_FutureWalkBack pins the future-date walk-back rule
+// independently of the ML840 fixture. The rule is that when the
+// initial year resolution lands on the current year and the encoded
+// day-of-year is later in the year than today, the heuristic walks
+// back a decade. CPLC dates describe past production events, so a
+// resolved date in the future relative to clock is by construction
+// the wrong interpretation.
+func TestDecodeDate_FutureWalkBack(t *testing.T) {
+	// May 8, 2026. clock.YearDay() = 128.
+	clock := time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name     string
+		raw      [2]byte
+		wantYear int
+		wantDay  int
+		wantOK   bool
+	}{
+		{
+			// Y=6 D=323 (Nov 19). Initial resolution: 2026.
+			// 323 > 128, walk back to 2016.
+			name:     "future_in_current_year_walks_back",
+			raw:      [2]byte{0x63, 0x23},
+			wantYear: 2016,
+			wantDay:  323,
+			wantOK:   true,
+		},
+		{
+			// Y=6 D=001 (Jan 1). Initial resolution: 2026.
+			// 1 < 128, no walk-back. Stays 2026.
+			name:     "past_in_current_year_no_walk_back",
+			raw:      [2]byte{0x60, 0x01},
+			wantYear: 2026,
+			wantDay:  1,
+			wantOK:   true,
+		},
+		{
+			// Y=6 D=128 (May 8). Same as today. day == clock.YearDay(),
+			// not strictly greater, no walk-back. Stays 2026.
+			name:     "today_no_walk_back",
+			raw:      [2]byte{0x61, 0x28},
+			wantYear: 2026,
+			wantDay:  128,
+			wantOK:   true,
+		},
+		{
+			// Y=6 D=129 (May 9). One day after today. day > YearDay,
+			// walk back to 2016.
+			name:     "tomorrow_walks_back",
+			raw:      [2]byte{0x61, 0x29},
+			wantYear: 2016,
+			wantDay:  129,
+			wantOK:   true,
+		},
+		{
+			// Y=2 D=323 (Nov 19, 2022). Initial resolution: 2022
+			// (year != currentYear). Walk-back doesn't apply. Stays
+			// at 2022 even though Nov 19 is after today's date in
+			// the year (the rule only fires for current-year matches).
+			name:     "previous_decade_unaffected",
+			raw:      [2]byte{0x23, 0x23},
+			wantYear: 2022,
+			wantDay:  323,
+			wantOK:   true,
+		},
+		{
+			// Y=0 D=366 (Dec 31). Initial resolution: 2020 (Y=0,
+			// most recent year ending in 0 not after 2026). Walk-back
+			// doesn't apply since year (2020) != currentYear (2026).
+			// 2020 is leap so day 366 is valid.
+			name:     "leap_day_in_past_decade_valid",
+			raw:      [2]byte{0x03, 0x66},
+			wantYear: 2020,
+			wantDay:  366,
+			wantOK:   true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, err := cplc.Parse(buildCPLCWithOSReleaseDate(t, c.raw), fixedClock(clock))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got := d.OperatingSystemReleaseDate
+			if got.Valid != c.wantOK {
+				t.Fatalf("Valid = %v, want %v; got=%+v", got.Valid, c.wantOK, got)
+			}
+			if !c.wantOK {
+				return
+			}
+			if got.Year != c.wantYear {
+				t.Errorf("Year = %d, want %d", got.Year, c.wantYear)
+			}
+			if got.Day != c.wantDay {
+				t.Errorf("Day = %d, want %d", got.Day, c.wantDay)
+			}
+		})
 	}
 }

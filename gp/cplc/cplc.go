@@ -215,10 +215,32 @@ func stripTLV(b []byte) ([]byte, error) {
 // whose day-of-year falls in [1, 366].
 //
 // The year-of-decade ambiguity is resolved against clock by picking
-// the most recent year ending in Y that is not after clock's current
-// year. Y=Y0 with current year ending in Y0 maps to the current year;
-// otherwise the year is chosen so that the resulting date is as
-// recent as possible without being in the future.
+// the most recent year ending in Y that is not in the future relative
+// to clock's current date. The rule has two parts:
+//
+//  1. Initial year resolution picks the most recent year whose last
+//     digit equals the encoded year-digit and which is not greater
+//     than clock's current year. For yearDigit=2 in 2026 this is
+//     2022; for yearDigit=7 in 2026 this is 2017; for yearDigit=6
+//     in 2026 this is 2026 (the current year itself).
+//
+//  2. Future-date walk-back. CPLC dates describe past production
+//     events (chip fabrication, module packaging, OS release, etc.),
+//     so a resolved date in the future relative to clock is by
+//     construction the wrong interpretation. When the initial
+//     resolution lands on the current year but the encoded
+//     day-of-year is later in the year than today, the heuristic
+//     walks back a decade. Without this, a chip whose CPLC says
+//     fab-date Y=6 D=323 captured during May 2026 would render as
+//     2026-11-19 (six months in the future); with this, the date
+//     resolves to 2016-11-19, the more plausible past
+//     interpretation.
+//
+// gppro's behavior on the same data is consistent with rule 2: it
+// produces 2016-11-19 for the same bytes against a 2026 clock.
+// Until this change our parser produced 2026-11-19, which was the
+// "future date" divergence documented in the ML840 fixture comment
+// in cplc_test.go.
 func decodeDate(raw [2]byte, clock time.Time) DateField {
 	d := DateField{Raw: raw}
 	if raw[0] == 0 && raw[1] == 0 {
@@ -240,15 +262,28 @@ func decodeDate(raw [2]byte, clock time.Time) DateField {
 	if day < 1 || day > 366 {
 		return d
 	}
-	// Resolve the year. Walk back from clock's current year until
-	// we land on a year ending in yearDigit and not after clock.
+	// Step 1: resolve the year. Walk back from clock's current year
+	// until we land on a year ending in yearDigit and not after
+	// clock.
 	currentYear := clock.Year()
 	year := currentYear - ((currentYear - yearDigit) % 10)
-	if year > currentYear {
+
+	// Step 2: future-date walk-back. If the initial resolution put
+	// us on the current year but the encoded day-of-year is later
+	// in the year than today, the date would be in the future. CPLC
+	// dates are production events and can't be in the future, so
+	// walk back a decade. See the function-level comment for the
+	// motivating real-card example.
+	if year == currentYear && day > clock.YearDay() {
 		year -= 10
 	}
-	// Reject day=366 in non-leap years rather than silently producing
-	// March 1 via time.Date's normalization.
+
+	// Step 3: reject day=366 in non-leap years rather than silently
+	// producing March 1 via time.Date's normalization. Note this
+	// has to run after the walk-back: the walked-back year may
+	// differ in leap status from the originally-resolved year, and
+	// a day=366 date that's invalid against currentYear may be
+	// valid against currentYear-10 (or vice versa).
 	if day == 366 && !isLeap(year) {
 		return d
 	}
