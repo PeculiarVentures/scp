@@ -24,10 +24,13 @@ type pivInfoData struct {
 	Capabilities []string `json:"capabilities"`
 
 	// Notes carries human- and machine-readable advisories about the
-	// detected profile. The Standard PIV profile is spec-implemented
-	// but not yet hardware-verified end to end; that fact surfaces
-	// here so operators and automation see it without consulting
-	// docs/piv-compatibility.md.
+	// detected profile. The Standard PIV profile's identity detection
+	// and capability classification are hardware-verified against a
+	// non-YubiKey card; cryptographic operations (PIN verify, mgmt-key
+	// auth, GENERATE KEY, certificate operations, attestation) are
+	// not yet hardware-verified against a non-YubiKey card. That fact
+	// surfaces here so operators and automation see it without
+	// consulting docs/piv-compatibility.md.
 	Notes []string `json:"notes,omitempty"`
 }
 
@@ -99,13 +102,17 @@ func cmdPIVInfo(ctx context.Context, env *runEnv, args []string) error {
 	if probeRes.SelectResponse != nil {
 		data.SelectRawHex = hex.EncodeToString(probeRes.SelectResponse)
 	}
-	// Standard PIV is spec-implemented but not yet hardware-verified
-	// end to end against a non-YubiKey card. Surface this in the
-	// machine output and the human report so it does not require
-	// consulting docs/piv-compatibility.md.
+	// Standard PIV identity detection and capability classification
+	// are spec-implemented and have been hardware-verified against
+	// a non-YubiKey card (GoldKey Security PIV Token, May 2026).
+	// Cryptographic operations (PIN verify, mgmt-key auth,
+	// GENERATE KEY, certificate operations, attestation) are not
+	// yet hardware-verified against a non-YubiKey card. Surface
+	// the precise scope in the machine output and human report so
+	// it does not require consulting docs/piv-compatibility.md.
 	if caps.StandardPIV {
 		data.Notes = append(data.Notes,
-			"standard-piv profile: spec-implemented per SP 800-73-4 / SP 800-78-5, not yet hardware-verified end to end against a non-YubiKey card. See docs/piv-compatibility.md.")
+			"standard-piv profile: identity detection and capability classification verified against non-YubiKey hardware; cryptographic operations (PIN verify, mgmt-key auth, GENERATE KEY, certificate operations, attestation) not yet hardware-verified against a non-YubiKey card. See docs/piv-compatibility.md.")
 	}
 	report.Data = data
 	report.Pass("capabilities", strings.Join(data.Capabilities, ", "))

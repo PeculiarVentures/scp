@@ -15,7 +15,7 @@ Tracks which PIV operations have been exercised end to end against which cards. 
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | YubiKey 5.7.2+ | verified | verified | verified | verified | verified | verified | verified | verified |
 | YubiKey pre-5.7 | verified | verified | verified | verified | verified | verified | verified | n/a |
-| Standard PIV (generic) | spec | spec | spec | n/a | spec | n/a | n/a | — |
+| Standard PIV (generic) | verified | spec | spec | n/a | spec | n/a | n/a | — |
 | Unknown card | probe only | — | — | — | — | — | — | — |
 
 ## What `verified` means for the YubiKey rows
@@ -27,6 +27,11 @@ Most recent end-to-end hardware verification: **YubiKey 5C NFC firmware 5.7.4, M
 ## What `spec` means for the Standard PIV row
 
 The library emits the SP 800-73-4 instruction subset for Standard PIV operations (SELECT, VERIFY, CHANGE REFERENCE DATA, RESET RETRY COUNTER, GENERATE ASYMMETRIC KEY PAIR, GENERAL AUTHENTICATE, PUT DATA, GET DATA). The host-side capability gate refuses YubiKey-proprietary instructions under the Standard PIV profile, so a Standard PIV card cannot be issued an INS byte it does not understand.
+
+Status notes for the Standard PIV row's individual cells:
+
+- **SELECT: verified.** `scpctl piv info` was driven against a GoldKey Security PIV Token (ATR `3B941881B1807D1F0319C80050DC`) in May 2026. The probe correctly classified the card as `standard-piv`, the SELECT response decoded as a spec-conformant application property template (PIX `A000000308000010000100`), and the capability classifier produced `RSA-2048, ECC P-256, ECC P-384`. This run satisfies step 1 of the promotion checklist below; the remaining `spec` cells need steps 2-4.
+- **PIN ops, Generate, Put cert: spec.** The wire bytes are spec-conformant by code review and CI mock test coverage but have not been driven against non-YubiKey hardware end to end.
 
 What is **not** yet validated:
 

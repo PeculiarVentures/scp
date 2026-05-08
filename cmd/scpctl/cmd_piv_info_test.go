@@ -57,6 +57,23 @@ func TestPIVInfo_MockFallsThroughToStandardPIV_TextOutput(t *testing.T) {
 	}
 
 	// And capabilities the Standard PIV profile must NOT claim.
+	// Check the capabilities line specifically rather than the
+	// whole output, because the note line legitimately mentions
+	// "attestation", "PIN verify", and similar operation names in
+	// a list of operations not yet hardware-verified — that's
+	// information about what the profile DOESN'T support, which
+	// is the opposite of a capability claim.
+	capLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "capabilities") &&
+			(strings.Contains(line, "PASS") || strings.Contains(line, "alg:")) {
+			capLine = line
+			break
+		}
+	}
+	if capLine == "" {
+		t.Fatalf("could not find capabilities line in output:\n%s", out)
+	}
 	for _, mustNot := range []string{
 		"reset",
 		"attestation",
@@ -65,9 +82,9 @@ func TestPIVInfo_MockFallsThroughToStandardPIV_TextOutput(t *testing.T) {
 		"pin-policy",
 		"touch-policy",
 	} {
-		if strings.Contains(out, mustNot) {
-			t.Errorf("piv info output should not include %q under Standard PIV\n--- output ---\n%s",
-				mustNot, out)
+		if strings.Contains(capLine, mustNot) {
+			t.Errorf("capabilities line should not include %q under Standard PIV\n--- capabilities ---\n%s",
+				mustNot, capLine)
 		}
 	}
 }
