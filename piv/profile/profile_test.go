@@ -542,3 +542,81 @@ func TestProbe_FeitianPIVKey_RealBytesSelectResponse(t *testing.T) {
 			res.PIVVersion)
 	}
 }
+
+// TestProbe_TreasuryGemalto_RealBytesSelectResponse pins the
+// application property template captured from a US Treasury
+// Gemalto PIV test card vintage 2012 (read through reader
+// "OMNIKEY AG Smart Card Reader USB") on May 2026. This is
+// the third non-YubiKey real-bytes PIV SELECT in the test
+// suite, alongside GoldKey (#154) and Feitian (#156).
+//
+// Its value is a cross-vendor data point: the byte sequence is
+// IDENTICAL to the YubiKey 5.7+ shape (truncated 6-byte PIX,
+// 5-byte RID-only coexistent, 17-byte outer template). That
+// proves the truncated-PIX encoding of SP 800-73-4 §3.1.3 is
+// not a YubiKey-specific quirk; it is a NIST-conformant shape
+// that 2012-vintage federal Gemalto cards and 2026 YubiKeys
+// emit identically. The classifier's correctness must therefore
+// rely on GET VERSION (which only YubiKey responds to) rather
+// than SELECT response shape — a 6D00 here pushes the card to
+// standard-piv exactly as it should.
+//
+// The bytes:
+//
+//	61 11                                          -- outer template, 17 bytes
+//	  4F 06 000010000100                           -- AID (truncated 6-byte PIX)
+//	  79 07                                        -- coexistent tag allocation authority, 7 bytes
+//	    4F 05 A000000308                           -- RID only (NIST 5-byte RID)
+//
+// Probe should classify as standard-piv (no GET VERSION → not
+// YubiKey, regardless of identical SELECT shape), populate
+// SelectResponse with the raw 19 bytes, and return PIVVersion=nil.
+//
+// Cross-vendor note: scpctl reads this card. gppro v25.10.20
+// also reads it but reports identification differently (the
+// 2012 card pre-dates several GP CRD conventions gppro relies
+// on). The PIV applet itself is fully readable from both tools.
+func TestProbe_TreasuryGemalto_RealBytesSelectResponse(t *testing.T) {
+	const treasuryGemaltoPIVSelectHex = "6111" +
+		"4f06000010000100" +
+		"79074f05a000000308"
+
+	raw, err := hex.DecodeString(treasuryGemaltoPIVSelectHex)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+	if len(raw) != 19 {
+		t.Fatalf("fixture: expected 19 bytes, got %d", len(raw))
+	}
+
+	tx := &fakeTransmitter{
+		responses: []apduPair{
+			// SELECT AID PIV returns the Treasury-captured template.
+			{resp: &apdu.Response{Data: raw, SW1: 0x90, SW2: 0x00}},
+			// GET VERSION not supported (Gemalto is not a YubiKey).
+			// This 6D00 is the load-bearing signal: the SELECT shape
+			// alone is identical to the YubiKey shape, so the
+			// classifier MUST rely on GET VERSION presence/absence
+			// to disambiguate.
+			{resp: &apdu.Response{Data: nil, SW1: 0x6D, SW2: 0x00}},
+		},
+	}
+	res, err := Probe(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+
+	if res.Profile.Name() != "standard-piv" {
+		t.Errorf("Profile.Name = %q, want standard-piv (a YubiKey-shape SELECT response from a non-YubiKey card must still classify as standard-piv when GET VERSION is unsupported)", res.Profile.Name())
+	}
+	if res.YubiKeyFW != nil {
+		t.Errorf("YubiKeyFW should be nil on a non-YubiKey card; got %+v", res.YubiKeyFW)
+	}
+	if !bytes.Equal(res.SelectResponse, raw) {
+		t.Errorf("SelectResponse = %X, want %X", res.SelectResponse, raw)
+	}
+	if res.PIVVersion != nil {
+		t.Errorf("PIVVersion should be nil on a card that omits tag 5FC107; got %X",
+			res.PIVVersion)
+	}
+}

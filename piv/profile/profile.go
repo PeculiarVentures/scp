@@ -25,10 +25,13 @@
 //     management key requires 5.4.2+; SCP11b-over-PIV requires 5.7+).
 //
 //   - StandardPIVProfile: NIST SP 800-73-4 instruction subset only.
-//     Spec-implemented and protocol-correct, awaiting hardware
-//     verification against a non-YubiKey PIV card. The compatibility
-//     matrix in docs/piv-compatibility.md tracks which behaviors have
-//     been exercised end to end.
+//     Spec-implemented and protocol-correct. Identity detection and
+//     capability classification are hardware-verified against
+//     non-YubiKey PIV cards (GoldKey, Feitian, Treasury Gemalto
+//     vintage 2012); cryptographic operations remain awaiting
+//     hardware verification. The compatibility matrix in
+//     docs/piv-compatibility.md tracks which behaviors have been
+//     exercised end to end.
 //
 //   - ProbedProfile: wraps one of the above based on a non-destructive
 //     probe (SELECT AID + GET DATA on YubiKey version object 0x5FC109).
