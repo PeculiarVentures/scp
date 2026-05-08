@@ -71,7 +71,7 @@ NIST SP 800-73-4 / SP 800-78-5 instruction subset only. Refuses YubiKey-propriet
 
 Algorithms: RSA-2048, ECC P-256, ECC P-384. Default management key: 3DES per SP 800-78-4.
 
-This profile's identity detection and capability classification have been hardware-verified against two non-YubiKey PIV cards (GoldKey Security PIV Token and Feitian-built Taglio PIVKey, May 2026). Cryptographic operations remain spec-implemented and protocol-correct by code review; no Standard-PIV hardware run has yet exercised a full provisioning flow (PIN verify → mgmt-key auth → GENERATE KEY → put cert → attestation) end to end. It sits in the same assurance tier as SCP03 AES-192/256 in the README's tier table: the wire bytes are correct by code review and the algorithm refusals are correct by code review. The compatibility matrix tracks which behaviors have been exercised end to end on a per-cell basis.
+This profile's identity detection and capability classification have been hardware-verified against three non-YubiKey PIV cards (GoldKey Security PIV Token, Feitian-built Taglio PIVKey, US Treasury Gemalto PIV test card vintage 2012; all May 2026). Cryptographic operations remain spec-implemented and protocol-correct by code review; no Standard-PIV hardware run has yet exercised a full provisioning flow (PIN verify → mgmt-key auth → GENERATE KEY → put cert → attestation) end to end. It sits in the same assurance tier as SCP03 AES-192/256 in the README's tier table: the wire bytes are correct by code review and the algorithm refusals are correct by code review. The compatibility matrix tracks which behaviors have been exercised end to end on a per-cell basis.
 
 ### `ProbedProfile`
 
