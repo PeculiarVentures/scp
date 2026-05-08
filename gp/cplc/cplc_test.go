@@ -481,3 +481,115 @@ func buildCPLCWithOSReleaseDate(t *testing.T, dateBytes [2]byte) []byte {
 	}
 	return out
 }
+
+// ml840CPLCHex is the CPLC blob captured from a Thales-built GP 2.1.1
+// card with ATR 3B7F96000080318065B0850300EF120FFE829000, presented
+// as "ML840" during May 2026 hardware investigation. This card uses
+// a different chip generation from the SafeNet eToken Fusion family
+// (ICType 7164 vs Fusion's 7861/7897), runs SCP01 only rather than
+// SCP03, and has a fabrication date Y=6 D=160 captured during 2026.
+//
+// Useful as a third real-card CPLC fixture because:
+//
+//   - ICType 7164 broadens the chip-variant coverage beyond the
+//     Fusion family.
+//   - The fabrication date Y=6 D=160 exercises a corner case of
+//     the decade heuristic where the year-digit matches the
+//     current year's last digit (Y=6 in 2026), causing the
+//     heuristic to resolve to the current year. gppro v25.10.20
+//     produces 2016 for the same bytes (likely cross-referencing
+//     against OS release ordering); ours produces 2026. The
+//     divergence is documented in the test comment and is a
+//     future-fixture target if a smarter heuristic ships.
+//   - The OS release date Y=2 D=172 exercises the previous-decade
+//     branch and agrees with gppro's interpretation (2022-06-21).
+//
+// Bytes captured from gppro v25.10.20 GET DATA tag 9F7F response.
+const ml840CPLCHex = "9F7F2A" +
+	"4090" + // IC fabricator (NXP)
+	"7164" + // IC type
+	"1291" + // OS ID
+	"2172" + // OS release date Y=2 D=172
+	"0300" + // OS release level
+	"6160" + // IC fabrication date Y=6 D=160
+	"2F05211A" + // IC serial
+	"254F" + // IC batch
+	"1292" + // IC module fabricator
+	"6160" + // IC module packaging date
+	"5003" + // ICC manufacturer
+	"6160" + // IC embedding date
+	"5004" + // IC pre-personalizer
+	"6160" + // IC pre-personalization equipment date
+	"00000047" + // IC pre-personalization equipment ID
+	"0000" + // IC personalizer (zero, unprovisioned)
+	"0000" + // IC personalization date (zero, unprovisioned)
+	"00000000" // IC personalization equipment ID (zero, unprovisioned)
+
+// TestParse_ML840 exercises the parser against the third real-card
+// CPLC fixture. Spot-checks the chip-variant codes that differ from
+// the SafeNet fixtures. Also exercises a corner case in the decade
+// heuristic: when the card's year-digit matches the current year's
+// last digit (Y=6 in 2026), the heuristic picks the current year
+// rather than walking back to a prior decade. For this card that's
+// likely wrong (an OS release date of 2022 against a fabrication
+// date of 2026 is the wrong temporal ordering), but the bytes
+// alone don't carry enough information to decide between "Y matches
+// current year exactly" and "Y is 10/20/... years ago." gppro v25.10.20
+// produces 2016 for the same bytes, possibly by cross-referencing
+// against OS release ordering or using a different rule. The
+// divergence is documented in docs/safenet-token-jc.md and is a
+// future-fixture target if a smarter heuristic ships.
+func TestParse_ML840(t *testing.T) {
+	clock := time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC)
+	d, err := cplc.Parse(mustHex(t, ml840CPLCHex), fixedClock(clock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if d.ICType != [2]byte{0x71, 0x64} {
+		t.Errorf("ICType = %X, want 7164 (ML840 chip variant)", d.ICType)
+	}
+	if d.ICCManufacturer != [2]byte{0x50, 0x03} {
+		t.Errorf("ICCManufacturer = %X, want 5003", d.ICCManufacturer)
+	}
+	if d.ICSerialNumber != [4]byte{0x2F, 0x05, 0x21, 0x1A} {
+		t.Errorf("ICSerialNumber = %X, want 2F05211A", d.ICSerialNumber)
+	}
+
+	// Fabrication date Y=6 D=160. Against a 2026 clock, the
+	// heuristic resolves Y=6 to 2026 (current year ends in 6).
+	// DDD=160 = day-of-year 160 in 2026 = June 9. This is most
+	// likely wrong for this specific card (gppro produces 2016),
+	// but it's the deterministic output of the without-context
+	// heuristic and the test pins it as such. A future change
+	// to the heuristic that produces 2016-06-08 here would be a
+	// behavior change worth catching.
+	wantFabDate := time.Date(2026, 6, 9, 0, 0, 0, 0, time.UTC)
+	if !d.ICFabricationDate.Valid {
+		t.Fatal("ICFabricationDate should be valid")
+	}
+	if got := d.ICFabricationDate.Time(); !got.Equal(wantFabDate) {
+		t.Errorf("ICFabricationDate = %s, want %s (decade heuristic vs gppro divergence)", got, wantFabDate)
+	}
+
+	// OS release date Y=2 D=172. Heuristic against 2026 clock
+	// resolves Y=2 to 2022 (the most recent past year ending in 2).
+	// DDD=172 = day-of-year 172 = June 21. This case agrees with
+	// gppro's interpretation.
+	wantOSReleaseDate := time.Date(2022, 6, 21, 0, 0, 0, 0, time.UTC)
+	if !d.OperatingSystemReleaseDate.Valid {
+		t.Fatal("OperatingSystemReleaseDate should be valid")
+	}
+	if got := d.OperatingSystemReleaseDate.Time(); !got.Equal(wantOSReleaseDate) {
+		t.Errorf("OS release date = %s, want %s", got, wantOSReleaseDate)
+	}
+
+	// Personalizer fields are zero (this card was captured in an
+	// unprovisioned state). The parser should leave the date
+	// fields at Valid=false rather than synthesizing a date from
+	// 0000 bytes.
+	if d.ICPersonalizationDate.Valid {
+		t.Errorf("ICPersonalizationDate should be invalid (zero bytes); got %s",
+			d.ICPersonalizationDate.Time())
+	}
+}
