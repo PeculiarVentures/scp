@@ -749,8 +749,15 @@ func (s *Session) selectApplet(ctx context.Context) error {
 	// SELECT the target applet — UNENCRYPTED since we don't yet
 	// have a secure channel. That applet's SCP key set is what the
 	// handshake will authenticate against.
+	//
+	// Routed through apdu.TransmitWithChaining so cards that respond
+	// with SW=61xx (FCI fetched separately via GET RESPONSE) get
+	// their FCI assembled transparently. PR #150 fixed the same bug
+	// class in piv/profile/probe.go; this is the parallel fix for
+	// the SCP11 plaintext SELECT, which sits ahead of every SCP11
+	// handshake.
 	cmd := apdu.NewSelect(s.config.SelectAID)
-	resp, err := s.transport.Transmit(ctx, cmd)
+	resp, err := apdu.TransmitWithChaining(ctx, s.transport, cmd)
 	if err != nil {
 		return err
 	}

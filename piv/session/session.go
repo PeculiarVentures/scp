@@ -255,6 +255,14 @@ func (a transmitterAdapter) Transmit(ctx context.Context, cmd *apdu.Command) (*a
 // are transport-level only; status-word interpretation is the
 // caller's job because New wants to branch on 6A82 specifically
 // before treating it as terminal.
+//
+// Routed through apdu.TransmitWithChaining so cards that respond
+// to SELECT with SW=61xx ("application property template is xx
+// bytes, fetch with GET RESPONSE") get their template assembled
+// transparently. PR #150 fixed the same bug class in
+// piv/profile/probe.go's selectPIVApplet; this is the parallel
+// fix for the session-layer SELECT, which sits ahead of every
+// PIV operation that goes through session.New.
 func selectPIV(ctx context.Context, tx Transmitter, aid []byte) (*apdu.Response, error) {
 	cmd := &apdu.Command{
 		CLA:  0x00,
@@ -264,5 +272,5 @@ func selectPIV(ctx context.Context, tx Transmitter, aid []byte) (*apdu.Response,
 		Data: aid,
 		Le:   0,
 	}
-	return tx.Transmit(ctx, cmd)
+	return apdu.TransmitWithChaining(ctx, tx, cmd)
 }
