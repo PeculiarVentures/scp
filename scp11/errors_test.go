@@ -69,29 +69,6 @@ func TestErrInvalidConfig_NoTrustPosture(t *testing.T) {
 	}
 }
 
-// TestErrInvalidConfig_HostIDRejected confirms that setting HostID
-// (which is not yet wired through AUTHENTICATE) is reported as
-// ErrInvalidConfig with the "HostID" message preserved.
-func TestErrInvalidConfig_HostIDRejected(t *testing.T) {
-	mc, err := mockcard.New()
-	if err != nil {
-		t.Fatalf("mockcard.New: %v", err)
-	}
-	cfg := testYubiKeySCP11bConfig()
-	cfg.InsecureSkipCardAuthentication = true
-	cfg.HostID = []byte{0x01, 0x02, 0x03}
-	_, err = Open(context.Background(), mc.Transport(), cfg)
-	if err == nil {
-		t.Fatal("expected error for HostID set; got nil")
-	}
-	if !errors.Is(err, ErrInvalidConfig) {
-		t.Errorf("errors.Is(err, ErrInvalidConfig) = false; err = %v", err)
-	}
-	if !strings.Contains(err.Error(), "HostID") {
-		t.Errorf("error should retain 'HostID' context; got: %v", err)
-	}
-}
-
 // TestErrTrustValidation_CustomValidatorRejection confirms that when
 // a custom validator returns a non-P-256 key, the error chain carries
 // ErrTrustValidation. SCP11 mandates P-256 regardless of what the

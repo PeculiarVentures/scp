@@ -18,12 +18,13 @@ package main
 //   - SCP11c: mutual auth with a receipt that lets a follow-up
 //     session script-replay against the same key schedule. Standard
 //     GP slot is KID=0x15. SCP11c WITHOUT HostID/CardGroupID works
-//     identically to SCP11a-with-receipt-validation; SCP11c WITH
-//     those parameters needs the wire-side AUTHENTICATE encoding
-//     (parameter bit + tag-0x84 control reference) which scp11.Open
-//     gates behind ErrInvalidConfig until vectors land. This helper
-//     accepts SCP11c without HostID/CardGroupID; setting either
-//     surfaces as an Open-time error from the library.
+//     identically to SCP11a-with-receipt-validation, which is what
+//     this helper exposes. SCP11c WITH HostID/CardGroupID needs the
+//     wire-side AUTHENTICATE encoding (parameter bit + tag-0x84
+//     control reference) and the matching KDF shared-info; that
+//     path is not part of scp11.Config today and lands when
+//     transcript vectors are available (see the project README's
+//     expansion-targets section).
 //
 // SCP11b is deliberately NOT offered by this helper. SCP11b is
 // one-way auth (card authenticates to host, host does not

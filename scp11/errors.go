@@ -33,9 +33,8 @@ var (
 
 	// ErrInvalidConfig indicates Open was called with a Config that
 	// failed validation: no trust posture configured, missing OCE
-	// material for SCP11a/c, unsupported variant, rejected security
-	// level, or one of the not-yet-supported features set (HostID,
-	// CardGroupID). Wraps a more specific message describing which
+	// material for SCP11a/c, unsupported variant, or rejected
+	// security level. Wraps a more specific message describing which
 	// check failed.
 	ErrInvalidConfig = errors.New("scp11: invalid configuration")
 

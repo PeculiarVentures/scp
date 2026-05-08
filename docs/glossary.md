@@ -50,7 +50,7 @@ Definitions for the GlobalPlatform, ISO 7816, and PKI terms that appear througho
 
 ## H
 
-**HostID / CardGroupID.** Optional SCP11 fields that bind a session to a specific host or group of cards via the AUTHENTICATE parameter bit and tag `0x84` TLV. The wire-side encoding is an [expansion target](../README.md#expansion-targets); today `Open` fails closed if either field is set.
+**HostID / CardGroupID.** Optional SCP11 fields that bind a session to a specific host or group of cards via the AUTHENTICATE parameter bit and tag `0x84` TLV. The host-identifier path is an [expansion target](../README.md#expansion-targets); the `scp11.Config` struct deliberately does not advertise the fields today (committing to a wire-side encoding without ground-truth transcript vectors would silently establish sessions under a different key schedule than the card).
 
 ## I
 
