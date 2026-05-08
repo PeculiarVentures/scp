@@ -479,10 +479,20 @@ func OpenUnauthenticatedWithAID(ctx context.Context, t transport.Transport, sdAI
 
 // openSelectAIDLiteral sends SELECT with the given AID byte-for-byte,
 // without the effectiveSDAID convenience fallback. A nil or empty
-// sdAID produces a SELECT with empty data field — the ISO/IEC 7816-4
-// §5.3.1 default-selection probe. Used by DiscoverISD so that the
+// sdAID produces a SELECT with empty data field (the ISO/IEC 7816-4
+// §5.3.1 default-selection probe). Used by DiscoverISD so that the
 // curated candidate list's nil-AID entry actually exercises empty
 // SELECT rather than collapsing to AIDSecurityDomain.
+//
+// SELECT is sent through transport.TransmitCollectAll rather than
+// the bare t.Transmit, so that cards which respond to SELECT with
+// SW=61xx ("FCI is xx bytes, fetch with GET RESPONSE") get their
+// FCI assembled transparently. Real-world example: a Thales-built
+// GP 2.1.1 card (ATR 3B7F96000080318065B0850300EF120FFE829000)
+// responds to SELECT A000000018434D00 with SW=6167 when the host
+// doesn't supply Le=00 or doesn't auto-follow the chain. Without
+// the chain follow, DiscoverISD reports SW=6167 as a SELECT failure
+// and aborts; with it, the FCI is fetched and the SD opens cleanly.
 //
 // Other callers should use OpenUnauthenticatedWithAID, which keeps
 // the convenience that "no AID supplied" means "the standard ISD."
@@ -491,7 +501,7 @@ func openSelectAIDLiteral(ctx context.Context, t transport.Transport, sdAID []by
 		return nil, errors.New("securitydomain: transport is required")
 	}
 	cmd := apdu.NewSelect(sdAID)
-	resp, err := t.Transmit(ctx, cmd)
+	resp, err := transport.TransmitCollectAll(ctx, t, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain: select SD: %w", err)
 	}
