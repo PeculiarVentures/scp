@@ -458,3 +458,75 @@ func TestProbe_EncodesGetDataWithLeByte(t *testing.T) {
 		t.Fatal("CardInfo should be populated when GET DATA returns CRD")
 	}
 }
+
+// chained61xxTransmitter models the response shape that broke
+// profile.Probe pre-#146: SELECT returns SW=61xx (FCI is xx bytes,
+// fetch via GET RESPONSE) instead of SW=9000 plus FCI inline. The
+// follow-up GET RESPONSE returns the FCI body under SW=9000. This
+// is the wire shape some Thales/Gemalto cards emit when the host
+// doesn't supply Le=00 in the SELECT trailer or when the underlying
+// PC/SC layer doesn't auto-follow the chain.
+type chained61xxTransmitter struct {
+	fci []byte
+	// Counters so tests can assert the chain was actually followed.
+	selectCalls  int
+	getRespCalls int
+}
+
+func (s *chained61xxTransmitter) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	switch cmd.INS {
+	case 0xA4: // SELECT
+		s.selectCalls++
+		l := len(s.fci)
+		if l > 0xFF {
+			l = 0xFF
+		}
+		return &apdu.Response{SW1: 0x61, SW2: byte(l)}, nil
+	case 0xC0: // GET RESPONSE
+		s.getRespCalls++
+		return &apdu.Response{
+			SW1: 0x90, SW2: 0x00,
+			Data: append([]byte(nil), s.fci...),
+		}, nil
+	}
+	return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
+}
+
+// TestProbe_Follows61xxChainOnSelect is the regression for the
+// SELECT-with-61xx response pattern. Pre-#146 profile.Probe used
+// bare t.Transmit and would have stopped at the 61xx response
+// without fetching the FCI; post-#146 it routes through
+// apdu.TransmitWithChaining and the chain is followed transparently.
+//
+// The fixture FCI is the same SCP01-only CRD captured from the
+// ML840 hardware investigation, so a successful chain follow
+// ends up with profile = standard-sd and SCPs[0].Version = 0x01.
+func TestProbe_Follows61xxChainOnSelect(t *testing.T) {
+	ml840CRD := mustHex(
+		"664C" +
+			"734A" +
+			"06072A864886FC6B01" + // GP RID
+			"600C060A2A864886FC6B02020101" + // GP 2.1.1
+			"630906072A864886FC6B03" + // Card_IDS
+			"640B06092A864886FC6B040105" + // SCP01 i=05
+			"650B06092B8510864864020103" + // Card config
+			"660C060A2B060104012A026E0102") // JavaCard v2
+
+	tr := &chained61xxTransmitter{fci: ml840CRD}
+	res, err := profile.Probe(context.Background(), tr, nil)
+	if err != nil {
+		t.Fatalf("Probe should follow 61xx chain on SELECT; got err = %v", err)
+	}
+	if tr.selectCalls != 1 {
+		t.Errorf("selectCalls = %d, want 1", tr.selectCalls)
+	}
+	if tr.getRespCalls != 1 {
+		t.Errorf("getRespCalls = %d, want 1 (the chain follow)", tr.getRespCalls)
+	}
+	if res.CardInfo == nil {
+		t.Fatal("CardInfo should be populated after chain follow")
+	}
+	if len(res.CardInfo.SCPs) != 1 || res.CardInfo.SCPs[0].Version != 0x01 {
+		t.Errorf("SCPs = %+v, want one entry with Version=0x01", res.CardInfo.SCPs)
+	}
+}

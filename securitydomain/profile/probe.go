@@ -135,8 +135,19 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 	// FCI body) on the wire — Le=-1 would encode case-1 (no
 	// expected response) and the YubiKey returns a successful
 	// 9000 with no FCI body, leaving CardInfo unpopulated.
+	//
+	// Routed through apdu.TransmitWithChaining rather than the
+	// bare t.Transmit so that cards which respond to SELECT with
+	// SW=61xx ("FCI is xx bytes, fetch with GET RESPONSE") get
+	// their FCI assembled transparently. Real-world example: a
+	// Thales-built GP 2.1.1 card with ATR
+	// 3B7F96000080318065B0850300EF120FFE829000 returns SW=6167
+	// to SELECT A000000018434D00 when the host doesn't supply Le=00
+	// or doesn't auto-follow the chain. The corresponding fix in
+	// the discover-SD path landed in PR #144; this path needed the
+	// same treatment.
 	sel := apdu.NewSelect(sdAID)
-	resp, err := t.Transmit(ctx, sel)
+	resp, err := apdu.TransmitWithChaining(ctx, t, sel)
 	if err != nil {
 		return nil, fmt.Errorf("securitydomain/profile: SELECT SD: %w", err)
 	}
@@ -180,7 +191,7 @@ func Probe(ctx context.Context, t Transmitter, sdAID []byte) (*ProbeResult, erro
 			Data: nil,
 			Le:   0,
 		}
-		if crdResp, err := t.Transmit(ctx, getCRD); err == nil && crdResp.IsSuccess() {
+		if crdResp, err := apdu.TransmitWithChaining(ctx, t, getCRD); err == nil && crdResp.IsSuccess() {
 			if info, err := cardrecognition.Parse(crdResp.Data); err == nil {
 				out.CardInfo = info
 			}
