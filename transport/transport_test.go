@@ -175,3 +175,119 @@ func TestDrainGetResponse_IterationCap(t *testing.T) {
 		t.Fatal("expected error when card signals more data forever")
 	}
 }
+
+// scriptedTransport replays a list of canned responses in order
+// and records all the commands sent through it. Used to drive
+// TransmitCollectAll through specific 6Cxx and 6Cxx-then-61xx flows
+// against a Treasury Gemalto-shaped fixture.
+type scriptedTransport struct {
+	responses []*apdu.Response
+	idx       int
+	sent      []*apdu.Command
+}
+
+func (s *scriptedTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	// Copy the command so later mutations by the helper don't change
+	// what the test inspects.
+	c := *cmd
+	s.sent = append(s.sent, &c)
+	if s.idx >= len(s.responses) {
+		return nil, fmt.Errorf("scriptedTransport: out of canned responses")
+	}
+	r := s.responses[s.idx]
+	s.idx++
+	return r, nil
+}
+
+func (s *scriptedTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return nil, nil
+}
+func (s *scriptedTransport) Close() error                 { return nil }
+func (s *scriptedTransport) TrustBoundary() TrustBoundary { return TrustBoundaryUnknown }
+
+// TestTransmitCollectAll_6Cxx_RetriesWithCorrectedLe is the
+// regression for the 2012-vintage federal Gemalto PIV test card
+// captured May 2026: empty-AID default-SELECT returned SW=6C67
+// ("Le incorrect; correct length is 0x67 / 103 bytes"). Pre-fix,
+// discovery aborted at 6C67 because openSelectAIDLiteral threaded
+// any non-9000/non-6Axx SW up as a hard error. Post-fix, the
+// helper retries with Le=0x67 and surfaces the second response.
+func TestTransmitCollectAll_6Cxx_RetriesWithCorrectedLe(t *testing.T) {
+	body := make([]byte, 103)
+	for i := range body {
+		body[i] = byte(i ^ 0xA5)
+	}
+	tr := &scriptedTransport{
+		responses: []*apdu.Response{
+			{SW1: 0x6C, SW2: 0x67}, // "wrong Le; correct is 0x67"
+			{Data: body, SW1: 0x90, SW2: 0x00},
+		},
+	}
+	cmd := &apdu.Command{INS: 0xA4, P1: 0x04, P2: 0x00, Le: 0}
+	resp, err := TransmitCollectAll(context.Background(), tr, cmd)
+	if err != nil {
+		t.Fatalf("TransmitCollectAll: %v", err)
+	}
+	if len(tr.sent) != 2 {
+		t.Fatalf("sent %d APDUs, want 2 (original + Le-corrected retry)", len(tr.sent))
+	}
+	if got := tr.sent[1].Le; got != 0x67 {
+		t.Errorf("retry Le = %d, want 0x67 (103) per the SW2 hint", got)
+	}
+	if resp.StatusWord() != 0x9000 {
+		t.Errorf("SW = %04X, want 9000", resp.StatusWord())
+	}
+	if !bytes.Equal(resp.Data, body) {
+		t.Errorf("Data mismatch; len=%d want 103", len(resp.Data))
+	}
+}
+
+// TestTransmitCollectAll_6C00_IsTreatedAs256: per ISO 7816-4 §5.3.4
+// the 6Cxx hint byte 0x00 means 256 (max short-form Le), not zero.
+// A retry with Le=0 would re-trigger the same situation; the helper
+// must encode the hint correctly.
+func TestTransmitCollectAll_6C00_IsTreatedAs256(t *testing.T) {
+	body := make([]byte, 256)
+	tr := &scriptedTransport{
+		responses: []*apdu.Response{
+			{SW1: 0x6C, SW2: 0x00},
+			{Data: body, SW1: 0x90, SW2: 0x00},
+		},
+	}
+	cmd := &apdu.Command{INS: 0xA4, P1: 0x04, P2: 0x00, Le: 0}
+	if _, err := TransmitCollectAll(context.Background(), tr, cmd); err != nil {
+		t.Fatalf("TransmitCollectAll: %v", err)
+	}
+	if got := tr.sent[1].Le; got != 256 {
+		t.Errorf("retry Le = %d, want 256 (per ISO 7816-4 §5.3.4)", got)
+	}
+}
+
+// TestTransmitCollectAll_6CxxThen61xx pins the composed case: the
+// card returns 6Cxx originally, then 61xx on the retry, then 9000
+// on the GET RESPONSE step. All three recovery paths must compose
+// in order.
+func TestTransmitCollectAll_6CxxThen61xx(t *testing.T) {
+	tr := &scriptedTransport{
+		responses: []*apdu.Response{
+			{SW1: 0x6C, SW2: 0x10}, // wrong Le, hint 0x10
+			{Data: []byte{0xAA, 0xBB, 0xCC, 0xDD}, SW1: 0x61, SW2: 0x03},
+			{Data: []byte{0xEE, 0xFF, 0x11}, SW1: 0x90, SW2: 0x00},
+		},
+	}
+	cmd := &apdu.Command{INS: 0xCA}
+	resp, err := TransmitCollectAll(context.Background(), tr, cmd)
+	if err != nil {
+		t.Fatalf("TransmitCollectAll: %v", err)
+	}
+	if len(tr.sent) != 3 {
+		t.Fatalf("sent %d APDUs, want 3 (original + Le-retry + GET RESPONSE)", len(tr.sent))
+	}
+	want := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11}
+	if !bytes.Equal(resp.Data, want) {
+		t.Errorf("Data = %X, want %X", resp.Data, want)
+	}
+	if resp.StatusWord() != 0x9000 {
+		t.Errorf("SW = %04X, want 9000", resp.StatusWord())
+	}
+}

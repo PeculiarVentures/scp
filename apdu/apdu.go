@@ -245,16 +245,36 @@ type Transmitter interface {
 const MaxResponseChainSteps = 64
 
 // TransmitWithChaining issues cmd via tx and transparently follows
-// any GET RESPONSE chain the card emits with SW1 == 0x61. The
-// returned response carries the full concatenated body and the final
-// status word.
+// the two ISO 7816-4 / GP-spec "data delivery" status-word patterns
+// the card uses when the host's request couldn't deliver the full
+// response in one APDU:
 //
-// This mirrors Yubico yubikit's ResponseChainingProcessor: SW=61xx
-// is a "more data available" signal, not a terminal error. Callers
-// that surface 61xx as failure see the symptom Ryan hit on retail
-// YubiKey 5.7.4 PIV ATTEST: "ATTEST: SW=6100 (more data available)"
-// where ykman's equivalent succeeded because its transport layer
-// chains automatically.
+//   - SW=6Cxx ("wrong Le; correct Le is xx"). The card's response
+//     payload was longer than the host's Le bound. Fix is to retry
+//     the SAME command with Le=xx as the card hinted. The hint byte
+//     0x00 means 256 (the maximum short-form Le).
+//   - SW=61xx ("more data available; fetch with GET RESPONSE Le=xx").
+//     The card emits a GET RESPONSE chain that the host walks until
+//     a non-61xx terminator arrives. The full body is concatenated.
+//
+// 6Cxx and 61xx can compose: a card may answer the original APDU
+// with 6Cxx, then answer the Le-corrected retry with 61xx and a
+// chain. The helper handles that.
+//
+// This mirrors Yubico yubikit's ResponseChainingProcessor for 61xx
+// and the OpenSC opensc-tool transmit path for 6Cxx. Callers that
+// surface either status word as failure see two real-card symptoms:
+//
+//   - 61xx: ATTEST against retail YubiKey 5.7.4 PIV ("ATTEST: SW=6100,
+//     more data available") where ykman's transport chains automatically.
+//   - 6Cxx: discovery's empty-AID default-SELECT against a 2012-vintage
+//     federal Gemalto PIV test card returning SW=6C67 (FCI is 0x67
+//     bytes, retry with Le=0x67). The card is responding correctly;
+//     the host's exploratory SELECT just used Le=0 (max short form)
+//     and the card's 0x67-byte FCI doesn't fit that on the underlying
+//     transport. (Behavior is reader/transport-dependent; some readers
+//     mask 6Cxx by retrying transparently below the API surface, others
+//     pass it up.)
 //
 // On any wire error or after MaxResponseChainSteps iterations, the
 // helper returns an error rather than partial data presented as
@@ -264,6 +284,28 @@ func TransmitWithChaining(ctx context.Context, tx Transmitter, cmd *Command) (*R
 	if err != nil {
 		return nil, err
 	}
+
+	// 6Cxx: the card is telling the host "you asked with the wrong
+	// Le; correct Le is SW2." Retry the SAME command with that Le.
+	// Per ISO 7816-4 §5.3.4 the hint byte 0x00 means 256 (max
+	// short-form Le, which our Command.Le==0 sentinel encodes for).
+	if resp.SW1 == 0x6C {
+		retry := *cmd
+		if resp.SW2 == 0x00 {
+			retry.Le = 256
+		} else {
+			retry.Le = int(resp.SW2)
+		}
+		resp, err = tx.Transmit(ctx, &retry)
+		if err != nil {
+			return nil, fmt.Errorf("6Cxx Le-retry: %w", err)
+		}
+		// If the retry itself returns 6Cxx the card is misbehaving;
+		// don't loop. Fall through to the 61xx check below — a
+		// well-behaved card may answer the retry with 61xx, in
+		// which case chaining is the correct next step.
+	}
+
 	if resp.SW1 != 0x61 {
 		// Common case: no chaining needed. Avoid the buffer copy.
 		return resp, nil
