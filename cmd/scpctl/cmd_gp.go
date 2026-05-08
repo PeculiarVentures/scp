@@ -40,15 +40,15 @@ Usage:
   scpctl gp <subcommand> [flags]
 
 Subcommands:
-  probe       Use the existing default ISD probe path: SELECT
-              with empty AID, GET DATA tag 0x66 for Card
-              Recognition Data. Reports GP version and supported
-              SCPs. Read-only. Functionally equivalent to
-              'scpctl probe' under a gp-tagged report label.
-              This MVP does not yet support alternate SD AID
-              probing or non-default SELECT, so cards that
-              require either (for example SafeNet/Fusion with a
-              custom ISD AID) will still fail with SW=6A82.
+  probe       Unauthenticated GP card probe: SELECT the SD, GET
+              DATA tag 0x66 for Card Recognition Data, plus the
+              GP §H.6 / §H.4 identification reads (CPLC, IIN,
+              CIN, KDD, SSC, Card Capabilities). Reports GP
+              version and supported SCPs. Read-only. Supports
+              --sd-aid for cards with a non-default ISD and
+              --discover-sd to walk a curated AID list. Functionally
+              equivalent to 'scpctl probe' under a gp-tagged report
+              label.
   registry    Open an authenticated SCP03 session and walk the GP
               registry across three scopes (ISD, Applications,
               LoadFiles+Modules) via GET STATUS. Output uses the
@@ -57,13 +57,10 @@ Subcommands:
               scope failure policy: 6A88 (no entries) is PASS,
               6982/6A86/6D00 (auth required, unsupported P2 form,
               unsupported INS) is SKIP per scope, OpenSCP03 itself
-              failing is FAIL. Like 'gp probe' above, this MVP
-              uses the default ISD AID; cards that require an
-              alternate ISD AID (some JCOP and SafeNet variants)
-              are not yet supported. Requires explicit SCP03 key
-              choice: --scp03-keys-default, --scp03-key with
-              --scp03-kvn, or --scp03-{enc,mac,dek} with
-              --scp03-kvn.
+              failing is FAIL. Supports --sd-aid for cards with a
+              non-default ISD. Requires explicit SCP03 key choice:
+              --scp03-keys-default, --scp03-key with --scp03-kvn,
+              or --scp03-{enc,mac,dek} with --scp03-kvn.
   cap         CAP file utilities (host-only):
                 inspect <path>  Print package AID and version,
                                 applet inventory, and component
@@ -86,8 +83,9 @@ Subcommands:
               be absent.
 
 What is NOT in this group today (deferred to future work):
-  - SafeNet/Fusion exploratory probing beyond the discovery
-    candidate list with 6A87 fallthrough.
+  - Exploratory AID probing beyond the discovery candidate
+    list (e.g. brute-force with 6A87 fallthrough heuristics for
+    cards whose AID isn't in any documentation).
   - Vendor-specific INSTALL parameter generators (CIN/IIN
     binding, NFC LCM bits, JC platform-specific TLVs).
     Operators can pass these as raw bytes via --install-params
