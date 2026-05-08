@@ -31,9 +31,14 @@ import (
 func gpUsage(w io.Writer) {
 	fmt.Fprint(w, `scpctl gp - Generic GlobalPlatform card-content management
 
-Maturity: spec-implemented per GP Card Specification v2.3.1 and
-mock-validated against a YubiKey-shaped GP simulator. Not yet
-hardware-verified end to end against real cards; production use
+Maturity: spec-implemented per GP Card Specification v2.3.1.
+'gp probe' is hardware-verified against retail YubiKey 5.7+ and
+a wide range of non-YubiKey cards (SafeNet eToken Fusion,
+SafeNet Token JC, ML840, Oberthur, GoldKey, Feitian, Treasury
+Gemalto). 'gp registry', 'gp install', 'gp delete', and
+'gp cap inspect' are mock-validated against a YubiKey-shaped
+GP simulator; not yet hardware-verified end to end against
+real cards. Production use of the not-yet-verified subcommands
 requires operator-side acceptance testing on the target card.
 
 Usage:

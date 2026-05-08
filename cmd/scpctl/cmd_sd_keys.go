@@ -340,6 +340,6 @@ func authRequiredHint(err error, channel, command string) string {
 			"%s currently supports SCP03 fallback only. "+
 			"Pass --scp03-key (or --scp03-keys-default for the YubiKey factory keys) "+
 			"to authenticate the read. SCP11a-authenticated reads are not implemented "+
-			"in this branch.",
+			"in this command (use 'scpctl scp11a-sd-read' for SCP11a-authenticated SD reads).",
 		command)
 }
