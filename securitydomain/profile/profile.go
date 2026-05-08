@@ -30,8 +30,14 @@
 //     only. PUT KEY for SCP03/SCP11 keysets, STORE DATA for
 //     certificates and allowlists, GET DATA, GET KEY INFORMATION,
 //     DELETE KEY. No vendor-extension instructions.
-//     Spec-implemented and protocol-correct, awaiting hardware
-//     verification against a non-YubiKey GP card.
+//     Spec-implemented and protocol-correct. Unauthenticated read
+//     paths (GET DATA on tag 0x66 / 0x9F7F / 0x42 / 0x45 / 0xCF /
+//     0xC1 / 0x67, GET KEY INFORMATION) are hardware-verified
+//     against several non-YubiKey cards (SafeNet eToken Fusion,
+//     SafeNet Token JC, ML840, Oberthur, GoldKey, Feitian, Treasury
+//     Gemalto). Authenticated write paths (PUT KEY, STORE DATA,
+//     DELETE KEY) remain awaiting hardware verification against a
+//     non-YubiKey GP card.
 //
 //   - ProbedProfile: wraps one of the above based on a non-
 //     destructive probe (SELECT ISD + GET DATA on the YubiKey
