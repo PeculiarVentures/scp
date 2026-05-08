@@ -36,38 +36,6 @@ func (v YubiKeyVersion) AtLeast(major, minor, patch byte) bool {
 	return v.Patch >= patch
 }
 
-// IsROCAAffected reports whether v falls in the YubiKey firmware
-// range that ships the Infineon RSALib version vulnerable to ROCA
-// (CVE-2017-15361). Per Yubico Security Advisory YSA-2017-01, the
-// affected range is 4.2.6 inclusive through 4.3.4 inclusive.
-//
-// Operationally, RSA keys *generated on-card* in this firmware
-// range are factorable in practice (Has, Klima, Susil, Matyas,
-// Nemec showed practical key-recovery attacks against the affected
-// RSALib in 2017; Estonia, Slovakia, and several smartcard PKI
-// programs revoked tens of millions of keys in response). ECC
-// keys are unaffected. RSA keys *imported* onto the card are
-// unaffected. Yubico fixed the issue in firmware 4.3.5+.
-//
-// This method exists so callers (CLI tools, library users running
-// provisioning flows) can surface a clear advisory before any
-// RSA-generation operation runs against an affected card.
-func (v YubiKeyVersion) IsROCAAffected() bool {
-	if v.Major != 4 {
-		return false
-	}
-	switch {
-	case v.Minor < 2:
-		return false
-	case v.Minor == 2:
-		return v.Patch >= 6
-	case v.Minor == 3:
-		return v.Patch <= 4
-	default: // 4.4+ (none shipped publicly, but be precise)
-		return false
-	}
-}
-
 // ParseYubiKeyVersion parses the 3-byte version blob YubiKey returns
 // for tag 0x5FC109. The blob is exactly three bytes; anything else is
 // an error.
