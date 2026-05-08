@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/PeculiarVentures/scp/gp"
@@ -279,5 +280,120 @@ func TestSession_Install_RejectsMalformedExplicitLoadFile(t *testing.T) {
 	// No card mutation happened: registries empty.
 	if len(mc.RegistryLoadFiles) != 0 {
 		t.Errorf("registry should be empty after pre-stage refusal; got %d entries", len(mc.RegistryLoadFiles))
+	}
+}
+
+// TestSession_Install_RejectsLoadFileLFDBMismatch pins the
+// pre-stage rejection of disagreeing LoadFileDataBlock and
+// LoadFile fields. Pre-fix, a caller could set LoadFileDataBlock
+// to one byte string and LoadFile to a C4-wrap of a DIFFERENT
+// byte string, and the library would happily accept it: the
+// wire would carry the LoadFile's LFDB while the install hash
+// (computed from LoadFileDataBlock by the CLI) and the
+// operator-facing report would describe the LoadFileDataBlock
+// value, leaving a quiet inconsistency between the host's
+// belief and the card's observation. Fail closed instead.
+func TestSession_Install_RejectsLoadFileLFDBMismatch(t *testing.T) {
+	sess, mc := openInstallSession(t)
+
+	// Fixture: two distinct LFDBs of the same length, then build
+	// LoadFile from the second while leaving LoadFileDataBlock
+	// pointing at the first.
+	lfdbA := []byte{0xAA, 0xBB, 0xCC}
+	lfdbB := []byte{0xDD, 0xEE, 0xFF}
+	loadFileFromB, err := gp.BuildPlainLoadFile(lfdbB, gp.LoadFileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := sampleOpts()
+	opts.LoadImage = nil
+	opts.LoadFileDataBlock = lfdbA
+	opts.LoadFile = loadFileFromB
+
+	err = sess.Install(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected refusal of LFDB-vs-LoadFile mismatch")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Errorf("err = %v, want 'does not match' diagnostic", err)
+	}
+	if len(mc.RegistryLoadFiles) != 0 {
+		t.Errorf("registry should be empty after pre-stage refusal; got %d entries", len(mc.RegistryLoadFiles))
+	}
+
+	// Sanity: the same opts with matching fields should install
+	// cleanly. Confirms the rejection is mismatch-specific, not
+	// a side-effect of having both fields set.
+	sess2, mc2 := openInstallSession(t)
+	opts2 := sampleOpts()
+	opts2.LoadImage = nil
+	loadFileMatching, err := gp.BuildPlainLoadFile(lfdbA, gp.LoadFileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts2.LoadFileDataBlock = lfdbA
+	opts2.LoadFile = loadFileMatching
+	if err := sess2.Install(context.Background(), opts2); err != nil {
+		t.Fatalf("matching fields should install: %v", err)
+	}
+	if len(mc2.RegistryLoadFiles) != 1 {
+		t.Errorf("matching install should produce 1 registry entry; got %d", len(mc2.RegistryLoadFiles))
+	}
+}
+
+// TestSession_SelectApplication_RejectsBadAIDLength pins the
+// ISO/IEC 7816-5 AID length bounds (5..16 bytes) for the public
+// SelectApplication helper. Pre-stage rejection here means a
+// caller that mistakenly passes a 4-byte truncated AID gets a
+// clear error rather than discovering the problem only after
+// the card returns SW=6A80 / 6A82 / 6700.
+func TestSession_SelectApplication_RejectsBadAIDLength(t *testing.T) {
+	sess, _ := openInstallSession(t)
+	cases := []struct {
+		name string
+		aid  []byte
+	}{
+		{"empty", nil},
+		{"4 bytes (one short)", []byte{0xA0, 0x00, 0x00, 0x01}},
+		{"17 bytes (one long)", bytes.Repeat([]byte{0xAA}, 17)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := sess.SelectApplication(context.Background(), tc.aid); err == nil {
+				t.Fatal("expected refusal of out-of-range AID length")
+			}
+		})
+	}
+}
+
+// TestSession_VerifySelect_HappyPath drives the post-install
+// SELECT round-trip end-to-end: install an applet, SELECT it,
+// require SW=9000. The mockcard's SCP03 SELECT path defers to
+// GPState.HandleGPCommand which consults RegistryApps; a match
+// returns 9000, no-match falls through to the permissive
+// always-9000 default that keeps the SD-open path working.
+// (The "unknown applet returns 6A82" path is real-card behavior
+// but isn't modelled in the in-tree SCP03 mock — it stays
+// permissive on SELECT so SD-open via SELECT-by-AID works
+// without each test seeding the SD AID. Real-card --verify-select
+// gets the 6A82 diagnostic from the card itself.)
+func TestSession_VerifySelect_HappyPath(t *testing.T) {
+	sess, mc := openInstallSession(t)
+
+	opts := sampleOpts()
+	if err := sess.Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if len(mc.RegistryApps) != 1 {
+		t.Fatalf("RegistryApps len = %d, want 1", len(mc.RegistryApps))
+	}
+
+	resp, err := sess.SelectApplication(context.Background(), opts.AppletAID)
+	if err != nil {
+		t.Fatalf("SelectApplication: %v", err)
+	}
+	if resp.StatusWord() != 0x9000 {
+		t.Errorf("SW = %04X, want 9000", resp.StatusWord())
 	}
 }

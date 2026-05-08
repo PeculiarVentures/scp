@@ -251,10 +251,24 @@ func (o *InstallOptions) lfdb() []byte {
 // once via gp.ParseLoadFile to refuse malformed input before any
 // destructive APDU). Otherwise the LFDB is wrapped via
 // gp.BuildPlainLoadFile.
+//
+// When both LoadFile AND LoadFileDataBlock (or the legacy LoadImage
+// alias) are set, the inner C4 DataBlock parsed from LoadFile must
+// match the supplied LFDB byte-for-byte. Pre-fix the library accepted
+// the disagreeing-fields case silently — the wire would carry the
+// LoadFile's LFDB while the install hash and the operator-facing
+// report would describe the LoadFileDataBlock value, leaving a
+// quiet inconsistency between the host's belief and the card's
+// observation. Fail closed instead.
 func (o *InstallOptions) loadFileBytes() ([]byte, error) {
 	if len(o.LoadFile) != 0 {
-		if _, err := gp.ParseLoadFile(o.LoadFile); err != nil {
+		parsed, err := gp.ParseLoadFile(o.LoadFile)
+		if err != nil {
 			return nil, fmt.Errorf("install: LoadFile parse: %w", err)
+		}
+		if lfdb := o.lfdb(); len(lfdb) != 0 && !bytes.Equal(parsed.DataBlock, lfdb) {
+			return nil, fmt.Errorf("install: LoadFileDataBlock (%d bytes) does not match the C4 DataBlock inside LoadFile (%d bytes); the install hash and operator-facing report would describe one byte string while the wire carried another",
+				len(lfdb), len(parsed.DataBlock))
 		}
 		return o.LoadFile, nil
 	}
@@ -396,13 +410,12 @@ func validateInstallOptions(opts InstallOptions) error {
 			return err
 		}
 	}
-	if len(opts.LoadFile) == 0 && len(opts.lfdb()) == 0 {
-		return errors.New("install: LoadFile or LoadFileDataBlock must be non-empty")
-	}
-	if len(opts.LoadFile) != 0 {
-		if _, err := gp.ParseLoadFile(opts.LoadFile); err != nil {
-			return fmt.Errorf("install: LoadFile parse: %w", err)
-		}
+	// Delegate load-file validation to the helper that Install
+	// itself uses, so the two paths can't drift. This catches
+	// empty inputs, malformed pre-built LoadFile, and the
+	// LFDB-vs-LoadFile mismatch case in one place.
+	if _, err := opts.loadFileBytes(); err != nil {
+		return err
 	}
 	if len(opts.Privileges) > 3 {
 		return fmt.Errorf("install: Privileges length %d invalid (must be 0..3 bytes)", len(opts.Privileges))

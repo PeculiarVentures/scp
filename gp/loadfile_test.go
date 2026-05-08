@@ -193,6 +193,44 @@ func TestParseLoadFile_RejectsDuplicateC4(t *testing.T) {
 	}
 }
 
+// TestParseLoadFile_RejectsDAPAfterC4 pins the GP §11.6.2 ordering
+// constraint: DAP blocks must precede the C4 LFDB. A stream like
+// 'C4 LFDB E2 DAP' is structurally a sequence of valid TLVs but
+// not a valid Load File — real-card behavior on out-of-order tags
+// is undefined, and accepting the looser shape would let callers
+// believe their DAP-signed install was authenticated when the card
+// might have processed it as unsigned.
+func TestParseLoadFile_RejectsDAPAfterC4(t *testing.T) {
+	lfdb := []byte{0x01, 0x02, 0x03}
+	c4, err := EncodeTLV(TagLoadFileDataBlock, lfdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dapBody := append([]byte{TagSecurityDomainAID, 0x05, 0xA0, 0x00, 0x00, 0x01, 0x51},
+		TagLoadFileDataBlockSignature, 0x01, 0xAA)
+	dap, err := EncodeTLV(TagDAPBlock, dapBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream := append([]byte{}, c4...)
+	stream = append(stream, dap...)
+
+	_, err = ParseLoadFile(stream)
+	if err == nil {
+		t.Fatal("expected DAP-after-C4 rejection")
+	}
+	if !errors.Is(err, ErrInvalidLoadFile) {
+		t.Errorf("err = %v, want ErrInvalidLoadFile", err)
+	}
+	// Sanity-check: the same DAP-then-C4 ordering parses fine,
+	// confirming the rejection is order-specific not content-specific.
+	if _, err := ParseLoadFile(append(append([]byte{}, dap...), c4...)); err != nil {
+		t.Errorf("DAP-then-C4 should parse cleanly; got: %v", err)
+	}
+}
+
 // TestLoadFileDataBlockHashes_ExcludeC4TagAndLength is the
 // load-bearing assertion for the install hash flow: the SHA-256
 // over the LFDB must NOT equal the SHA-256 over the C4-wrapped

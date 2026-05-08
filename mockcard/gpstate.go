@@ -75,6 +75,21 @@ func NewGPState() *GPState { return &GPState{} }
 // work.
 func (g *GPState) HandleGPCommand(cmd *apdu.Command) (*apdu.Response, bool) {
 	switch cmd.INS {
+	case 0xA4:
+		// SELECT-by-AID. Consult RegistryApps so post-install
+		// --verify-select against a freshly-installed applet
+		// round-trips against the mock the same way it would on
+		// a real card. If no installed applet matches, fall
+		// through (return ok=false) so the embedding mock's
+		// default SELECT handler can still resolve SD/PIV AIDs.
+		if cmd.P1 == 0x04 {
+			for _, app := range g.RegistryApps {
+				if bytes.Equal(cmd.Data, app.AID) {
+					return mkSW(0x9000), true
+				}
+			}
+		}
+		return nil, false
 	case 0xF2:
 		return g.handleGetStatus(cmd), true
 	case 0xF0:
