@@ -55,32 +55,69 @@ type DialOptions struct {
 
 	// GRPCDialOptions are passed through to grpc.NewClient. The
 	// canonical production use is grpc.WithTransportCredentials(
-	// credentials.NewTLS(...)) for mTLS. If empty, Dial uses
-	// insecure credentials, which is fine for tests and the local
-	// example but is NOT acceptable for any real deployment —
-	// CardRelay relies entirely on transport security to bound
-	// who can drive APDUs at the card.
+	// credentials.NewTLS(...)) for mTLS — CardRelay relies entirely
+	// on transport security to bound who can drive APDUs at the card.
+	//
+	// When non-empty, these options drive the dial as-is; AllowInsecure
+	// is ignored.
 	GRPCDialOptions []grpc.DialOption
+
+	// AllowInsecure must be true when GRPCDialOptions is empty AND the
+	// caller intends to dial without transport credentials. This is the
+	// loud-explicit form of "I am running this against an untrusted-but-
+	// known-local server (the smoke-test path, dev rig, etc.)" and the
+	// only way to get insecure credentials onto the wire after the
+	// post-2026 fail-closed default. Setting AllowInsecure=true alongside
+	// non-empty GRPCDialOptions is a configuration error; the dial will
+	// refuse rather than guess which the caller meant.
+	//
+	// The previous behavior — empty GRPCDialOptions silently fell through
+	// to insecure credentials — was flagged by external review as a
+	// production foot-gun: any deployment forgetting to pass mTLS would
+	// silently get plaintext APDU relay, exposing the card's wire to
+	// anyone with network access. The new behavior is fail-closed: a
+	// caller must either pass real credentials (production) or explicitly
+	// opt into insecure (dev/lab).
+	AllowInsecure bool
 }
 
 // Dial connects to a CardRelay server and opens a card session.
 // The returned Client implements transport.Transport.
 //
-// Insecure dial behavior: when GRPCDialOptions is empty, Dial uses
-// insecure credentials. This is intentional for the smoke-test path
-// (the example/server runs over plain TCP for local development).
-// Any deployment beyond that must pass explicit credentials — there
-// is no default mTLS configuration that would be both secure AND
-// not surprising; the choice belongs to the caller.
+// Credential resolution in order of precedence:
+//
+//   - Non-empty GRPCDialOptions: dial with those options. AllowInsecure
+//     is ignored. This is the production path: callers pass
+//     grpc.WithTransportCredentials(credentials.NewTLS(...)) (or whatever
+//     credentials their mTLS setup needs) and Dial passes them through.
+//
+//   - Empty GRPCDialOptions + AllowInsecure=true: dial with explicit
+//     insecure credentials. This is the dev/lab path; the caller has
+//     loudly opted in to plaintext APDU relay.
+//
+//   - Empty GRPCDialOptions + AllowInsecure=false (the default): refuse
+//     the dial with a clear error pointing at both correct shapes. This
+//     is the post-2026 fail-closed default — the previous silent insecure
+//     fallback was flagged by external review as a production foot-gun.
+//
+// Returning an error here means no connection was opened; the caller
+// does not need to clean anything up.
 func Dial(ctx context.Context, opts DialOptions) (*Client, error) {
 	if opts.Target == "" {
 		return nil, errors.New("grpc.Dial: Target is required")
 	}
 	dialOpts := opts.GRPCDialOptions
-	if len(dialOpts) == 0 {
+	switch {
+	case len(dialOpts) > 0:
+		if opts.AllowInsecure {
+			return nil, errors.New("grpc.Dial: GRPCDialOptions and AllowInsecure are mutually exclusive — pass credentials via GRPCDialOptions for production, or set AllowInsecure=true with empty GRPCDialOptions for dev/lab")
+		}
+	case opts.AllowInsecure:
 		dialOpts = []grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		}
+	default:
+		return nil, errors.New("grpc.Dial: no transport credentials configured. CardRelay relies on transport security to bound who can drive APDUs at the card. Pass GRPCDialOptions with TLS credentials (e.g. grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))) for production, or set AllowInsecure=true to dial without credentials for dev/lab use against a known-local server")
 	}
 	conn, err := grpc.NewClient(opts.Target, dialOpts...)
 	if err != nil {
