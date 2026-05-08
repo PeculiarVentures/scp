@@ -212,15 +212,81 @@ func NewGetData(cla byte, tag uint16) *Command {
 	}
 }
 
-// NewGetResponse builds a GET RESPONSE command to retrieve remaining data.
+// NewGetResponse builds a GET RESPONSE command on basic channel 0
+// to retrieve remaining data. Equivalent to NewGetResponseForCLA(0x00,
+// remaining); kept as a convenience for callers that have already
+// established they're operating on basic channel and want short-form.
+//
+// Callers driving traffic on logical channels 1-19 must use
+// NewGetResponseForCLA so the CLA references the same channel as
+// the preceding command per ISO 7816-4 §5.3.2.
 func NewGetResponse(remaining byte) *Command {
+	return NewGetResponseForCLA(0x00, remaining)
+}
+
+// NewGetResponseForCLA builds a GET RESPONSE command preserving the
+// channel encoded in cla. Per ISO 7816-4 §5.3.2 the CLA of GET
+// RESPONSE shall reference the same logical channel as the preceding
+// command whose response is being chained.
+//
+// Use GetResponseCLA(prevCmd.CLA) to compute the right value to pass
+// here; that helper masks out secure-messaging and chaining bits so
+// only the channel reference is preserved (GET RESPONSE itself is a
+// plain ISO 7816 housekeeping command and is not subject to the
+// original command's SM/chaining state).
+func NewGetResponseForCLA(cla, remaining byte) *Command {
 	return &Command{
-		CLA:  0x00,
+		CLA:  cla,
 		INS:  0xC0,
 		P1:   0x00,
 		P2:   0x00,
 		Data: nil,
 		Le:   int(remaining),
+	}
+}
+
+// GetResponseCLA returns the CLA byte that GET RESPONSE should use
+// to retrieve the remaining bytes of a 61xx-chained response that
+// began on the channel encoded in prevCLA. Per ISO 7816-4 §5.3.2
+// the GET RESPONSE CLA shall reference the same logical channel as
+// the preceding command.
+//
+// The returned CLA carries channel bits only; secure-messaging,
+// chaining, and other CLA flags are not preserved because GET
+// RESPONSE itself is a plain ISO 7816 housekeeping command and
+// is not subject to the original command's SM or chaining state.
+//
+// Encoding rules:
+//
+//   - First interindustry (CLA 0x00-0x3F) and proprietary (CLA
+//     0x80-0xFE): channel bits are 0-1, range 0-3. GET RESPONSE
+//     CLA is the channel as a first-interindustry CLA (0x00-0x03).
+//     Even when the original command was proprietary, the GET
+//     RESPONSE that retrieves its response is a standard ISO 7816
+//     command, encoded in the first-interindustry class.
+//
+//   - Further interindustry (CLA 0x40-0x7F): channel bits are 0-3,
+//     range 4-19 (channel = 4 + bit_value). GET RESPONSE CLA is
+//     0x40 | (prevCLA & 0x0F), preserving the further-interindustry
+//     class encoding alongside the channel offset.
+//
+//   - Reserved (CLA 0xFF): channel undefined. GET RESPONSE goes
+//     out on basic channel 0.
+//
+// Mirrors channel.LogicalChannel's classification but lives here in
+// apdu to avoid an import cycle (channel imports apdu).
+func GetResponseCLA(prevCLA byte) byte {
+	switch {
+	case prevCLA == 0xFF:
+		return 0x00 // reserved CLA, no defined channel
+	case prevCLA&0xC0 == 0x40:
+		// Further interindustry: 0x40-0x7F. Preserve channel offset.
+		return 0x40 | (prevCLA & 0x0F)
+	default:
+		// First interindustry (0x00-0x3F) or proprietary (0x80-0xFE).
+		// GET RESPONSE is encoded as first-interindustry with the
+		// channel from the preceding command.
+		return prevCLA & 0x03
 	}
 }
 
@@ -310,6 +376,14 @@ func TransmitWithChaining(ctx context.Context, tx Transmitter, cmd *Command) (*R
 		// Common case: no chaining needed. Avoid the buffer copy.
 		return resp, nil
 	}
+	// Compute the GET RESPONSE CLA from the originating command's CLA
+	// per ISO 7816-4 §5.3.2: the GET RESPONSE CLA shall reference the
+	// same logical channel as the preceding command. For commands on
+	// basic channel 0 (the typical case for current GP/PIV flows) the
+	// computed CLA is 0x00 and the loop is byte-identical to the
+	// pre-2026 behavior; for logical channels 1-19 the channel bits
+	// from cmd.CLA are preserved on every chained GET RESPONSE.
+	getRespCLA := GetResponseCLA(cmd.CLA)
 	body := append([]byte(nil), resp.Data...)
 	for steps := 0; resp.SW1 == 0x61; steps++ {
 		if steps >= MaxResponseChainSteps {
@@ -321,7 +395,7 @@ func TransmitWithChaining(ctx context.Context, tx Transmitter, cmd *Command) (*R
 		// 0x00 means "an unspecified amount, request the max" —
 		// passed through unchanged because Le=0 already encodes
 		// "ask for max" at the wire level.
-		resp, err = tx.Transmit(ctx, NewGetResponse(resp.SW2))
+		resp, err = tx.Transmit(ctx, NewGetResponseForCLA(getRespCLA, resp.SW2))
 		if err != nil {
 			return nil, fmt.Errorf("GET RESPONSE step %d: %w", steps+1, err)
 		}

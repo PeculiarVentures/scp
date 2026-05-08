@@ -530,7 +530,12 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 	// application command; the card answers it in cleartext at
 	// the SCP layer and only the assembled inner payload is
 	// covered by the channel's MAC.
-	resp, err = transport.DrainGetResponse(ctx, s.transport, resp)
+	//
+	// Use the CLA-aware drain so logical-channel SCP03 sessions
+	// (channel.Wrap preserves the channel bits when setting the SM
+	// bit) emit GET RESPONSE on the same channel as the wrapped
+	// command per ISO 7816-4 §5.3.2.
+	resp, err = transport.DrainGetResponseForCLA(ctx, s.transport, apdu.GetResponseCLA(wrapped.CLA), resp)
 	if err != nil {
 		return nil, fmt.Errorf("transmit: drain chained response: %w", err)
 	}
