@@ -384,13 +384,17 @@ func TestDiscoverISD_NilCandidateSendsEmptySelect(t *testing.T) {
 	}
 }
 
-// TestDiscoverISD_GemPlusCardManagerAID pins the curated list's
-// GemPlus / Gemalto Card Manager entry. Cards in the SafeNet eToken
-// Fusion / IDPrime / IDCore / GemXpresso families default-select
-// this AID; without it in the curated list, --discover-sd would
-// require operators to pass --sd-aid manually for any Thales-built
-// token even though discovery should resolve it automatically.
-func TestDiscoverISD_GemPlusCardManagerAID(t *testing.T) {
+// TestDiscoverISD_GemPlusRIDCardManagerAID pins the curated
+// list's entry for the GemPlus-RID Card Manager AID
+// (A000000018434D00). We have empirical confirmation that the
+// SafeNet eToken Fusion responds to this AID; other vendors'
+// cards (including Oberthur in real-hardware testing) have also
+// been observed responding to it. The test asserts the entry is
+// present in the curated list, that the Source string identifies
+// the AID's RID (not any specific vendor of card built around
+// it), and that DiscoverISD resolves a card that only answers
+// this AID.
+func TestDiscoverISD_GemPlusRIDCardManagerAID(t *testing.T) {
 	gemPlusAID, _ := hex.DecodeString("A000000018434D00")
 
 	// Confirm the curated list contains it.
@@ -398,27 +402,45 @@ func TestDiscoverISD_GemPlusCardManagerAID(t *testing.T) {
 	for _, c := range gp.ISDDiscoveryAIDs {
 		if bytes.Equal(c.AID, gemPlusAID) {
 			found = true
-			if !strings.Contains(c.Source, "GemPlus") &&
-				!strings.Contains(c.Source, "Gemalto") &&
-				!strings.Contains(c.Source, "Thales") {
-				t.Errorf("Source citation should mention vendor heritage; got %q", c.Source)
+			// Source must cite the AID's RID-level provenance,
+			// which is a fact about the ISO/IEC 7816-5
+			// registration. It must NOT name specific card
+			// vendors or firmware families, because matching
+			// this AID does not identify the card vendor. The
+			// post-cleanup Source mentions "GemPlus RID" (the
+			// RID owner per the registration) and "Card Manager"
+			// (the conventional meaning of the suffix); both
+			// are AID-level statements, not card-level.
+			if !strings.Contains(c.Source, "GemPlus RID") {
+				t.Errorf("Source should cite GemPlus RID per ISO/IEC 7816-5; got %q", c.Source)
+			}
+			if !strings.Contains(c.Source, "Card Manager") {
+				t.Errorf("Source should identify the AID as a Card Manager; got %q", c.Source)
+			}
+			// Guard against regression to the editorial form
+			// that named specific vendor families.
+			for _, banned := range []string{"GemXpresso", "IDPrime", "IDCore", "SafeNet eToken Fusion"} {
+				if strings.Contains(c.Source, banned) {
+					t.Errorf("Source should not name specific vendor families (matched %q in: %q)",
+						banned, c.Source)
+				}
 			}
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("ISDDiscoveryAIDs is missing the GemPlus Card Manager AID %X", gemPlusAID)
+		t.Fatalf("ISDDiscoveryAIDs is missing the GemPlus-RID Card Manager AID %X", gemPlusAID)
 	}
 
-	// Confirm a card that only answers the GemPlus AID gets resolved.
+	// Confirm a card that only answers the GemPlus-RID AID gets resolved.
 	tt := &selectiveTransport{accept: [][]byte{gemPlusAID}}
 	sess, match, err := securitydomain.DiscoverISD(context.Background(), tt, gp.ISDDiscoveryAIDs, nil)
 	if err != nil {
-		t.Fatalf("DiscoverISD against GemPlus-only card: %v", err)
+		t.Fatalf("DiscoverISD against GemPlus-RID-only card: %v", err)
 	}
 	defer sess.Close()
 	if !bytes.Equal(match.AID, gemPlusAID) {
-		t.Errorf("matched AID = %X, want %X (GemPlus Card Manager)", match.AID, gemPlusAID)
+		t.Errorf("matched AID = %X, want %X (GemPlus-RID Card Manager)", match.AID, gemPlusAID)
 	}
 }
 

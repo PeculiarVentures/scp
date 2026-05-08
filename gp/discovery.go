@@ -29,6 +29,19 @@ type ISDCandidate struct {
 // AID from the card's vendor documentation. As real-card
 // validation discovers commonly-deployed AIDs, they can be
 // added here so --discover-sd resolves them automatically.
+//
+// Source field policy. Source is rendered into the operator-
+// facing discovery output for every card the candidate is tried
+// against. It identifies the AID itself — its registration and
+// spec citation — not the card that happens to be in the reader.
+// Per-vendor commentary (which firmwares historically advertise
+// this AID, which cards we've observed using it) belongs in Go
+// comments above the entry rather than in Source, because Source
+// gets attached as a "detail" to every card that matches and
+// reads as a finding about that specific card. An Oberthur card
+// answering A000000018434D00 should not be reported with a
+// Gemalto provenance footnote, even though the AID's RID
+// component was originally registered to GemPlus.
 var ISDDiscoveryAIDs = []ISDCandidate{
 	{
 		AID:    mustHexAID("A000000151000000"),
@@ -36,25 +49,29 @@ var ISDDiscoveryAIDs = []ISDCandidate{
 	},
 	{
 		AID:    mustHexAID("A0000001510000"),
-		Source: "GP Card Spec v2.3.1 §F.6 (Card Manager AID, shorter form used by older cards)",
+		Source: "GP Card Spec v2.3.1 §F.6 (Card Manager AID)",
 	},
+	// AID A000000018434D00 has the GemPlus RID (A0000000 18, per
+	// ISO/IEC 7816-5 IIN registration) and the conventional
+	// "CM\0" suffix denoting Card Manager. Various vendors
+	// historically built firmware that advertises this AID,
+	// including but not limited to Thales-derived platforms
+	// (e.g. SafeNet eToken Fusion, where we have empirical
+	// confirmation). The Source string below does not name
+	// specific vendor families because matching this AID does
+	// not identify the card vendor — Oberthur and other vendors
+	// have shipped cards that respond to it as well.
+	//
+	// Clean-room provenance: derived from ISO/IEC 7816-5 IIN
+	// registration plus observed SELECT FCI responses. Not from
+	// any GPL/AGPL/LGPL implementation.
 	{
-		AID: mustHexAID("A000000018434D00"),
-		Source: "GemPlus / Gemalto / Thales Card Manager AID. " +
-			"IIN prefix A0000000 18 is the GemPlus RID per ISO/IEC " +
-			"7816-5 registration; suffix 434D00 (\"CM\\0\") is " +
-			"\"Card Manager\" as used in GemXpresso, IDPrime, IDCore, " +
-			"and SafeNet eToken Fusion firmware. Empirically " +
-			"confirmed against a SafeNet eToken Fusion (Thales-built, " +
-			"OS release date 2017-11-30), where the card returns FCI " +
-			"naming this AID as the default-selected application. " +
-			"Citation derived from ISO/IEC 7816-5 IIN registration " +
-			"and the card's own SELECT response, not from any " +
-			"GPL/AGPL/LGPL implementation.",
+		AID:    mustHexAID("A000000018434D00"),
+		Source: "AID with GemPlus RID per ISO/IEC 7816-5; \"CM\\0\" suffix denotes Card Manager",
 	},
 	{
 		AID:    nil,
-		Source: "ISO/IEC 7816-4 §5.3.1 (default selection: SELECT with no AID; some cards auto-select the ISD on power-up)",
+		Source: "ISO/IEC 7816-4 §5.3.1 (default selection: SELECT with empty AID)",
 	},
 }
 
