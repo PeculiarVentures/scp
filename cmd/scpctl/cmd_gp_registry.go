@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/securitydomain"
 )
 
@@ -47,6 +48,8 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	sdAIDHex := fs.String("sd-aid", "",
 		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID.")
+	discoverSD := fs.Bool("discover-sd", false,
+		"Walk a curated list of candidate Security Domain AIDs (gp.ISDDiscoveryAIDs) and use the first one that responds 9000, then open SCP03 against it. Mutually exclusive with --sd-aid. Useful for cards (SafeNet eToken, GemPlus / Thales-built JCOPs) whose ISD lives at A000000018434D00 or A0000001510000 rather than the GP default A000000151000000.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	if err := fs.Parse(args); err != nil {
@@ -76,6 +79,9 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	if err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if *discoverSD && sdAID != nil {
+		return &usageError{msg: "--discover-sd and --sd-aid are mutually exclusive (pick one)"}
+	}
 	if sdAID != nil {
 		cfg.SelectAID = sdAID
 	}
@@ -90,6 +96,44 @@ func cmdGPRegistry(ctx context.Context, env *runEnv, args []string) error {
 	data := &gpRegistryData{}
 	report.Data = data
 	report.Pass("SCP03 keys", scp03Keys.describeKeys(cfg))
+
+	// Discovery walks SELECT-only first to find the SD AID, then
+	// closes that session and opens SCP03 against the discovered
+	// AID. Going through OpenSCP03WithAID directly would skip the
+	// curated-AID walk and refuse against any card whose ISD is
+	// not at A000000151000000.
+	if *discoverSD {
+		trace := func(a securitydomain.DiscoveryAttempt) {
+			label := candidateAIDStr(a.Candidate)
+			detail := fmt.Sprintf("%s — %s", label, a.Candidate.Source)
+			if a.Selected {
+				report.Pass("discover ISD attempt", detail+" — SW=9000")
+				return
+			}
+			swText := "transport-error"
+			if a.SW != 0 {
+				swText = fmt.Sprintf("SW=%04X", a.SW)
+			}
+			report.Skip("discover ISD attempt",
+				fmt.Sprintf("%s — %s", detail, swText))
+		}
+		discoverySD, match, derr := securitydomain.DiscoverISD(ctx, t, gp.ISDDiscoveryAIDs, trace)
+		if derr != nil {
+			report.Fail("discover ISD", derr.Error())
+			_ = report.Emit(env.out, *jsonMode)
+			return fmt.Errorf("discover ISD: %w", derr)
+		}
+		// Close the discovery session before opening SCP03 against
+		// the same AID. Carrying the SELECT-only session through
+		// to the SCP03 layer would feed an INITIALIZE UPDATE on a
+		// transport that already has SD state; cleaner to start
+		// fresh. The transport (`t`) stays open across both.
+		discoverySD.Close()
+		report.Pass("discover ISD",
+			fmt.Sprintf("matched %s — %s", candidateAIDStr(match), match.Source))
+		sdAID = append([]byte(nil), match.AID...)
+		cfg.SelectAID = sdAID
+	}
 
 	sd, err := securitydomain.OpenSCP03WithAID(ctx, t, cfg, sdAID)
 	if err != nil {
