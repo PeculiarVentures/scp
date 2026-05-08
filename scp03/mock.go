@@ -273,6 +273,17 @@ func (c *MockCard) dispatchReassembled(cmd *apdu.Command) (*apdu.Response, error
 
 	switch cmd.INS {
 	case 0xA4: // SELECT
+		// Defer to PlainHandler when set so a composing mock
+		// (e.g. SCP03Card) can answer SELECT based on its
+		// registry. PlainHandler returning false means 'no
+		// match in your registry'; the historical always-9000
+		// fallback preserves the SD-open path that selects the
+		// ISD before INITIALIZE UPDATE.
+		if c.PlainHandler != nil {
+			if resp, ok := c.PlainHandler(cmd); ok {
+				return resp, nil
+			}
+		}
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case 0x50: // INITIALIZE UPDATE
 		return c.doInitializeUpdate(cmd)

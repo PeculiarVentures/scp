@@ -820,6 +820,19 @@ func (c *Card) doSelect(cmd *apdu.Command, underSM bool) (*apdu.Response, error)
 		c.pivSelected = true
 		return mkSW(c.selectMatchSW()), nil
 	}
+	// An applet that has been INSTALL [for install]'d shows up in
+	// RegistryApps. Recognizing those AIDs in SELECT lets the
+	// post-install --verify-select path round-trip against the
+	// mock the same way it would against a real card. Without
+	// this match the mock would reject the SELECT with 6A82 and
+	// every --verify-select test would have to special-case it.
+	for _, app := range c.GPState.RegistryApps {
+		if bytesEq(cmd.Data, app.AID) {
+			c.selectedAID = append([]byte(nil), app.AID...)
+			c.pivSelected = false
+			return mkSW(c.selectMatchSW()), nil
+		}
+	}
 	return mkSW(0x6A82), nil
 }
 

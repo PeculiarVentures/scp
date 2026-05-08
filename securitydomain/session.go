@@ -671,6 +671,54 @@ func (s *Session) Transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Respon
 	return s.transmit(ctx, cmd)
 }
 
+// SelectApplication issues a basic-channel SELECT-by-AID for the
+// given applet AID through the underlying transport, bypassing any
+// active SCP session. Returns the SELECT status word and FCI bytes.
+//
+// Intended use: post-install verification that a freshly-installed
+// applet is actually selectable. Pre-2026 the install command
+// returned success when LOAD and INSTALL [for install] both
+// returned SW=9000, but a card-side configuration error (wrong
+// install params, applet refusing init, lifecycle stuck in
+// INSTALLED rather than SELECTABLE) would only surface when
+// something later tried to select the applet. SelectApplication
+// gives a CLI flag like --verify-select a host-side primitive to
+// require that proof before reporting success.
+//
+// Call site contract:
+//
+//   - The SELECT is unwrapped (CLA=0x00). Sending a SCP-wrapped
+//     SELECT against an applet that isn't the SD has unpredictable
+//     cross-card behavior; the basic-channel SELECT is the shape
+//     real card managers use for verification.
+//
+//   - GET RESPONSE chaining is followed automatically per the
+//     usual TransmitCollectAll semantics (some cards return FCI
+//     in chunks).
+//
+//   - After this call returns the active applet on the card is
+//     the selected target, NOT the SD. Any subsequent SCP-wrapped
+//     command on this Session will either fail (session keys
+//     don't apply to the new applet's context) or succeed
+//     unpredictably depending on the card. Callers should treat
+//     SelectApplication as terminal for the session — close the
+//     session afterward.
+//
+//   - The 5..16 byte AID range is enforced per ISO/IEC 7816-5
+//     before the APDU goes on the wire.
+//
+// Returns the response (FCI plus SW) and any transport error. The
+// caller decides what SW values count as success — typically only
+// SW=9000 for a strict --verify-select, with possibly SW=6283
+// (CARD_LOCKED) tolerated separately if relevant.
+func (s *Session) SelectApplication(ctx context.Context, aid []byte) (*apdu.Response, error) {
+	if len(aid) < 5 || len(aid) > 16 {
+		return nil, fmt.Errorf("securitydomain: SelectApplication: AID length %d invalid (must be 5..16 bytes per ISO/IEC 7816-5)", len(aid))
+	}
+	cmd := apdu.NewSelect(aid)
+	return transport.TransmitCollectAll(ctx, s.transport, cmd)
+}
+
 // transmit sends a command through the appropriate channel.
 func (s *Session) transmit(ctx context.Context, cmd *apdu.Command) (*apdu.Response, error) {
 	if s.authenticated && s.scpSession != nil {

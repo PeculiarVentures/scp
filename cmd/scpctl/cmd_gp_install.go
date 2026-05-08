@@ -61,6 +61,17 @@ type gpInstallData struct {
 	Stage       string `json:"failed_stage,omitempty"`
 	BytesLoaded int    `json:"bytes_loaded,omitempty"`
 	CleanupHint string `json:"cleanup_hint,omitempty"`
+
+	// VerifySelectRequested is true when --verify-select was set.
+	// VerifySelectSW carries the post-install SELECT status word
+	// (e.g. "9000", "6A82", "6985") or "transport-error" when the
+	// SELECT failed to round-trip. VerifySelectFCIPrefixHex shows
+	// the first 16 bytes of the FCI returned by a SW=9000 SELECT —
+	// useful for confirming the card returned a real applet
+	// response, not just a 9000 stub.
+	VerifySelectRequested    bool   `json:"verify_select_requested,omitempty"`
+	VerifySelectSW           string `json:"verify_select_sw,omitempty"`
+	VerifySelectFCIPrefixHex string `json:"verify_select_fci_prefix_hex,omitempty"`
 }
 
 // cmdGPInstall is the destructive applet-install operator command.
@@ -163,6 +174,8 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		"If set, abort before any destructive APDU when the card's CIN (GET DATA 0x0045) does not match this hex value. Recommended for fleet automation: pin the CIN of the card you intended to install onto.")
 	confirm := fs.Bool("confirm-write", false,
 		"Confirm destructive write. Without this flag, gp install runs in dry-run mode (parses inputs, computes load image hashes, reports planned operations without transmitting writes).")
+	verifySelect := fs.Bool("verify-select", false,
+		"After successful install, SELECT the applet AID via a basic-channel SELECT and require SW=9000. Gives an end-to-end smoke proof that the applet is actually selectable, not merely that LOAD/INSTALL returned success. Recommended on real-card runs; ignored in dry-run mode.")
 
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: err.Error()}
@@ -469,6 +482,40 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	report.Pass("INSTALL [for load]", fmt.Sprintf("load file %s registered", data.PackageAID))
 	report.Pass("LOAD blocks", fmt.Sprintf("%d bytes streamed", data.LoadFileSize))
 	report.Pass("INSTALL [for install]", fmt.Sprintf("applet %s installed", data.AppletAID))
+
+	// --verify-select: SELECT the freshly-installed applet through
+	// a basic-channel SELECT (CLA=0x00) and require SW=9000. This
+	// is the post-install smoke proof — without it, an install
+	// that returned 9000 to LOAD and INSTALL [for install] but
+	// produced an applet that's not actually selectable (wrong
+	// install params, applet refusing init, lifecycle stuck in
+	// INSTALLED rather than SELECTABLE) would only surface
+	// downstream when something tried to use the applet. After
+	// SelectApplication completes, the active applet on the card
+	// is the target — NOT the SD — so this is necessarily the
+	// terminal operation on the session.
+	data.VerifySelectRequested = *verifySelect
+	if *verifySelect {
+		resp, selErr := sd.SelectApplication(ctx, appletAID)
+		switch {
+		case selErr != nil:
+			report.Fail("verify-select", selErr.Error())
+			data.VerifySelectSW = "transport-error"
+			_ = report.Emit(env.out, *jsonMode)
+			return fmt.Errorf("verify-select: %w", selErr)
+		case resp.StatusWord() == 0x9000:
+			data.VerifySelectSW = "9000"
+			data.VerifySelectFCIPrefixHex = strings.ToUpper(hex.EncodeToString(resp.Data[:min(len(resp.Data), 16)]))
+			report.Pass("verify-select", fmt.Sprintf("applet %s selectable (SW=9000, FCI %d bytes)",
+				data.AppletAID, len(resp.Data)))
+		default:
+			data.VerifySelectSW = fmt.Sprintf("%04X", resp.StatusWord())
+			report.Fail("verify-select", fmt.Sprintf("SELECT %s returned SW=%s; install reported success but the applet is NOT selectable. Common causes: applet refused install_params during init, lifecycle stuck in INSTALLED (not made SELECTABLE), wrong applet AID supplied",
+				data.AppletAID, data.VerifySelectSW))
+			_ = report.Emit(env.out, *jsonMode)
+			return fmt.Errorf("verify-select: SELECT returned SW=%s; install reported success but applet is not selectable", data.VerifySelectSW)
+		}
+	}
 
 	if err := report.Emit(env.out, *jsonMode); err != nil {
 		return err

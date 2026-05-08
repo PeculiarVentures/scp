@@ -186,6 +186,13 @@ func BuildPlainLoadFile(lfdb []byte, opts LoadFileOptions) ([]byte, error) {
 // pipeline that produces the same wire shape). Accepts zero or more
 // E2 DAP blocks followed by exactly one C4 plain LFDB.
 //
+// Order is enforced: GP §11.6.2 specifies the shape as
+// [E2 DAP]* C4 LFDB. DAP blocks appearing AFTER the C4 are
+// rejected because real-card behavior on out-of-order tags is
+// undefined — best-case the card rejects, worst-case it ignores
+// the DAP and the host believes the load was DAP-signed when the
+// card processed it as unsigned.
+//
 // Rejects D3 ICV and D4 ciphered LFDB with ErrInvalidLoadFile —
 // these tags are reserved in the spec and not yet implemented in
 // this package, and silently accepting them would let callers
@@ -197,6 +204,7 @@ func ParseLoadFile(stream []byte) (*LoadFile, error) {
 
 	var lf LoadFile
 	rest := stream
+	seenC4 := false
 
 	for len(rest) > 0 {
 		tag := rest[0]
@@ -207,6 +215,9 @@ func ParseLoadFile(stream []byte) (*LoadFile, error) {
 
 		switch tag {
 		case TagDAPBlock:
+			if seenC4 {
+				return nil, fmt.Errorf("%w: DAP block appears after C4 load file data block (GP §11.6.2 requires [E2 DAP]* before C4)", ErrInvalidLoadFile)
+			}
 			dap, err := parseDAPBlock(value)
 			if err != nil {
 				return nil, err
@@ -214,12 +225,13 @@ func ParseLoadFile(stream []byte) (*LoadFile, error) {
 			lf.DAPBlocks = append(lf.DAPBlocks, dap)
 
 		case TagLoadFileDataBlock:
-			if len(lf.DataBlock) != 0 {
+			if seenC4 {
 				return nil, fmt.Errorf("%w: duplicate C4 load file data block", ErrInvalidLoadFile)
 			}
 			if len(value) == 0 {
 				return nil, fmt.Errorf("%w: empty C4 load file data block", ErrInvalidLoadFile)
 			}
+			seenC4 = true
 			lf.DataBlock = append([]byte(nil), value...)
 
 		case TagCipheredLoadFileDataBlock:
@@ -235,7 +247,7 @@ func ParseLoadFile(stream []byte) (*LoadFile, error) {
 		rest = next
 	}
 
-	if len(lf.DataBlock) == 0 {
+	if !seenC4 {
 		return nil, fmt.Errorf("%w: missing C4 load file data block", ErrInvalidLoadFile)
 	}
 	return &lf, nil
