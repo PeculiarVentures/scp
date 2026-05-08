@@ -449,3 +449,78 @@ func intsEqual(a, b []int) bool {
 func (p *probeTransport) TrustBoundary() transport.TrustBoundary {
 	return transport.TrustBoundaryUnknown
 }
+
+// TestParse_ML840_SCP01Only pins the real-bytes CRD captured from a
+// Thales-built GP 2.1.1 card (ATR 3B7F96000080318065B0850300EF120F)
+// during ML840 hardware investigation. This is a useful fixture
+// because it's the first card we have bytes for that advertises
+// SCP01 only, with no SCP03 or SCP11. Future code that wants to
+// branch on "this card can't speak our supported protocols" gets
+// a real-bytes test target by reading SCPs and checking that all
+// entries have Version=0x01.
+//
+// Decoded structure per gppro v25.10.20 against the same bytes:
+//
+//	GP Version: 2.1.1                  (1.2.840.114283.2.2.1.1)
+//	Card ID scheme: IIN+CIN            (1.2.840.114283.3)
+//	SCP01 i=05                         (1.2.840.114283.4.1.5)
+//	JavaCard v2                        (1.3.6.1.4.1.42.2.110.1.2)
+//
+// This card is GP 2.1.1 / SCP01 only / DES3 keys per its KIT. The
+// library currently supports SCP03 and SCP11 only; this fixture
+// exists to make a future "decline SCP01 cleanly" check trivial
+// to write a regression for.
+func TestParse_ML840_SCP01Only(t *testing.T) {
+	const ml840CRDHex = "664C" +
+		"734A" +
+		"06072A864886FC6B01" + // GP RID
+		"600C060A2A864886FC6B02020101" + // GP 2.1.1
+		"630906072A864886FC6B03" + // Card ID scheme
+		"640B06092A864886FC6B040105" + // SCP01 i=05
+		"650B06092B8510864864020103" + // Card config
+		"660C060A2B060104012A026E0102" // JavaCard v2
+
+	raw, err := hex.DecodeString(ml840CRDHex)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+
+	info, err := cardrecognition.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	wantGP := []int{2, 1, 1}
+	if len(info.GPVersion) != len(wantGP) {
+		t.Fatalf("GPVersion = %v, want %v", info.GPVersion, wantGP)
+	}
+	for i, v := range wantGP {
+		if info.GPVersion[i] != v {
+			t.Errorf("GPVersion[%d] = %d, want %d", i, info.GPVersion[i], v)
+		}
+	}
+
+	if len(info.SCPs) != 1 {
+		t.Fatalf("SCPs len = %d, want 1; SCPs=%+v", len(info.SCPs), info.SCPs)
+	}
+	if info.SCPs[0].Version != 0x01 {
+		t.Errorf("SCPs[0].Version = 0x%02X, want 0x01 (SCP01)", info.SCPs[0].Version)
+	}
+	if info.SCPs[0].Parameter != 0x05 {
+		t.Errorf("SCPs[0].Parameter = 0x%X, want 0x05", info.SCPs[0].Parameter)
+	}
+
+	// The library currently supports SCP03 and SCP11. ML840
+	// advertises neither; a caller that wants to detect "we can't
+	// open this card with our supported SCPs" can do so by
+	// scanning info.SCPs for any entry with Version 0x03 or 0x11.
+	supported := false
+	for _, s := range info.SCPs {
+		if s.Version == 0x03 || s.Version == 0x11 {
+			supported = true
+		}
+	}
+	if supported {
+		t.Errorf("ML840 should not advertise SCP03 or SCP11; SCPs=%+v", info.SCPs)
+	}
+}
