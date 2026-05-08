@@ -700,6 +700,11 @@ func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*a
 		}
 		var allData []byte
 		allData = append(allData, resp.Data...)
+		// Preserve the originating command's logical channel on
+		// every chained GET RESPONSE per ISO 7816-4 §5.3.2. Basic
+		// channel 0 commands (the typical case) compute to CLA=0x00
+		// and the loop is byte-identical to the pre-2026 behavior.
+		getRespCLA := apdu.GetResponseCLA(cmd.CLA)
 		for i := 0; resp.IsMoreData(); i++ {
 			if i >= transport.MaxGetResponseIterations {
 				return nil, fmt.Errorf("GET RESPONSE exceeded %d iterations", transport.MaxGetResponseIterations)
@@ -707,7 +712,7 @@ func (s *Session) transmitCollectAll(ctx context.Context, cmd *apdu.Command) (*a
 			if len(allData) > transport.MaxCollectedResponseBytes {
 				return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", transport.MaxCollectedResponseBytes)
 			}
-			getResp := apdu.NewGetResponse(resp.SW2)
+			getResp := apdu.NewGetResponseForCLA(getRespCLA, resp.SW2)
 			resp, err = s.scpSession.Transmit(ctx, getResp)
 			if err != nil {
 				return nil, err

@@ -171,6 +171,14 @@ func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*a
 	var allData []byte
 	allData = append(allData, resp.Data...)
 
+	// Per ISO 7816-4 §5.3.2 the GET RESPONSE CLA must reference the
+	// same logical channel as the preceding command. For commands on
+	// basic channel 0 (the typical case for current GP/PIV flows) the
+	// computed CLA is 0x00 and the loop is byte-identical to the
+	// pre-2026 behavior; for logical channels 1-19 the channel bits
+	// from cmd.CLA are preserved on every chained GET RESPONSE.
+	getRespCLA := apdu.GetResponseCLA(cmd.CLA)
+
 	for i := 0; resp.IsMoreData(); i++ {
 		if i >= MaxGetResponseIterations {
 			return nil, fmt.Errorf("GET RESPONSE exceeded %d iterations", MaxGetResponseIterations)
@@ -178,7 +186,7 @@ func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*a
 		if len(allData) >= MaxCollectedResponseBytes {
 			return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", MaxCollectedResponseBytes)
 		}
-		getResp := apdu.NewGetResponse(resp.SW2)
+		getResp := apdu.NewGetResponseForCLA(getRespCLA, resp.SW2)
 		resp, err = t.Transmit(ctx, getResp)
 		if err != nil {
 			return nil, err
@@ -225,7 +233,23 @@ func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*a
 // SW1 is not 0x61, DrainGetResponse returns it unchanged with no
 // extra round trips. The same MaxGetResponseIterations and
 // MaxCollectedResponseBytes caps apply as TransmitCollectAll.
+//
+// DrainGetResponse is a backward-compatible wrapper that issues GET
+// RESPONSE on basic channel 0. Equivalent to DrainGetResponseForCLA(
+// ctx, t, 0x00, initial). Callers operating on logical channels 1-19
+// must use DrainGetResponseForCLA so the GET RESPONSE CLA references
+// the same channel as the preceding command per ISO 7816-4 §5.3.2.
 func DrainGetResponse(ctx context.Context, t Transport, initial *apdu.Response) (*apdu.Response, error) {
+	return DrainGetResponseForCLA(ctx, t, 0x00, initial)
+}
+
+// DrainGetResponseForCLA walks the GET RESPONSE chain emitting each
+// continuation on the channel encoded in cmdCLA. Use
+// apdu.GetResponseCLA(prevCmd.CLA) to compute the right cmdCLA value.
+//
+// MaxGetResponseIterations and MaxCollectedResponseBytes caps apply
+// as TransmitCollectAll.
+func DrainGetResponseForCLA(ctx context.Context, t Transport, cmdCLA byte, initial *apdu.Response) (*apdu.Response, error) {
 	if initial == nil {
 		return nil, fmt.Errorf("DrainGetResponse: nil initial response")
 	}
@@ -242,7 +266,7 @@ func DrainGetResponse(ctx context.Context, t Transport, initial *apdu.Response) 
 		if len(allData) >= MaxCollectedResponseBytes {
 			return nil, fmt.Errorf("GET RESPONSE exceeded %d bytes", MaxCollectedResponseBytes)
 		}
-		next, err := t.Transmit(ctx, apdu.NewGetResponse(resp.SW2))
+		next, err := t.Transmit(ctx, apdu.NewGetResponseForCLA(cmdCLA, resp.SW2))
 		if err != nil {
 			return nil, fmt.Errorf("GET RESPONSE step %d: %w", i+1, err)
 		}
