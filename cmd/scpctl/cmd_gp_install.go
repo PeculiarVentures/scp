@@ -136,7 +136,7 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		"INSTALL [for load] parameters, hex. Sent verbatim as the load_parameters_field per GP §11.5.2.3.1; common contents are tag-0xC8 (load file version) and tag-0xEF (system-specific). Empty (default) sends a zero-length field.")
 	reader := fs.String("reader", "", "PC/SC reader name (substring match).")
 	sdAIDHex := fs.String("sd-aid", "",
-		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Use this for cards with a non-default ISD (some SafeNet/Fusion variants, custom JCOP installs).")
+		"Override the Security Domain AID, hex (5..16 bytes). Default is the GP ISD AID (A000000151000000). Reach for this when the card's ISD lives at a non-default AID — usually after running 'gp probe --discover-sd' to find it.")
 	jsonMode := fs.Bool("json", false, "Emit JSON output.")
 	scp03Keys := registerSCP03KeyFlags(fs, scp03Required)
 	expectedCardID := fs.String("expected-card-id", "",

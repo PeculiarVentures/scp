@@ -10,7 +10,7 @@ The card under investigation:
 
 ```
 ATR:        3BFF9600008131FE4380318065B0855956FB120FFE82900000
-AID:        A000000018434D00 (Gemalto Card Manager)
+AID:        A000000018434D00 (Card Manager AID; GemPlus-registered RID per ISO/IEC 7816-5)
 CPLC ICType: 7897
 SCP advertised: SCP01 i=05/15, SCP02 i=05/15/45/55, SCP03 i=00/10 (AES-128/192/256)
 KIT (KVN=0xFF, AES-128, factory-key indicator)
