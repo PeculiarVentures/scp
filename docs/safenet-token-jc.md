@@ -88,6 +88,28 @@ Several causes are consistent with the observed transition, listed roughly in or
 
 What we'd need to disambiguate: a `GET STATUS` read of the SD between attempts (would tell us the Card Manager lifecycle state), or a successful Phase-2-style trace from a different card in the same family (would tell us whether the 6982 behavior is per-card-state or platform-wide). Neither was available in this investigation.
 
+### May 2026 follow-up: 12-attempt burn test
+
+A targeted re-investigation in May 2026 attempted to drive the lifecycle forward by 12 consecutive bad-key `INITIALIZE UPDATE` attempts (`gp registry --discover-sd --scp03-keys-default`, looped 12 times with a 1s sleep between attempts), comfortably exceeding the FIPS Security Policy's 80-attempt counter threshold expressed as a fractional ratio and any plausible firmware-specific counter below that. Pre-burn and post-burn `gp probe` captures were taken for comparison.
+
+**Result: zero observable state change.** Pre and post probes are byte-identical:
+
+- Same IC serial (`32196A53`), same CIN (`4508200432196A53A152`), same IIN (`4203636856`)
+- SELECT AID returns FCI with `SW=9000`, not the `SW=6283` that would indicate `CARD_LOCKED`
+- All GET DATA reads (CRD, CPLC, IIN, KDD, SSC, KIT) succeed identically
+- `gp probe`'s `card_locked` field remains `false` post-burn
+- All 12 attempts produced the same `InitializeUpdateError` shape: `SW=6982`, attempt context unchanged, error message confirming "rejected before key material was tested"
+
+**What this tells us about the hypotheses above:**
+
+The "failed-auth state change" hypothesis is now substantially weakened. If the card's failed-auth counter were decrementing on these `INITIALIZE UPDATE` attempts, 12 consecutive failures would have produced *some* observable state change at any reasonable counter threshold — either a transition to `CARD_LOCKED` (firmware with a low threshold), a different SW class (firmware that surfaces "approaching threshold" warnings), or at minimum a different `InitializeUpdateError.Diagnostic` message on the final attempt. None of those happened. The 12 attempts are byte-identical to each other and to the pre-burn baseline.
+
+The most consistent reading is that the post-#142 diagnostic is correctly distinguishing what it was designed to: SW=6982 *before* cryptogram check means the card refused at policy level without ever testing key material, so the failed-auth counter (whatever its threshold) was never decremented. This validates the diagnostic against a real-card pattern; it also means the lifecycle test path we were hoping to exercise via this card is unreachable from the host without breaking another auth gate first.
+
+The "vendor-mediated precondition" hypothesis is now the working theory. The card's `INITIALIZE UPDATE` is gated behind a SAC-side handshake that scpctl cannot replay (closed-source, vendor keys not public), and that's why the card refuses at policy level rather than at cryptogram level. Until a card from this family with a satisfied vendor precondition becomes available — or until SAC's handshake is replayable from open code — the GP master keyset on this hardware stays unreachable.
+
+What this does NOT change: the card is still useful for unauthenticated-read paths (CRD, CPLC, IIN, CIN, KDD, SSC, KIT, AID enumeration), and those paths remain hardware-validated against this card. The lifecycle/CARD_LOCKED test path simply moves to "unreachable from this hardware" rather than "unconfirmed."
+
 ### Diagnostic surface in the library
 
 After #140 and #142, both failure modes get distinct error types in the library, with attempt context preserved on the error:
