@@ -1,7 +1,9 @@
 package profile
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -392,5 +394,70 @@ func TestProbe_Follows61xxChainOnSelect(t *testing.T) {
 	}
 	if tx.calls[2].INS != 0xFD {
 		t.Errorf("third APDU INS=%02X, want 0xFD (GET VERSION)", tx.calls[2].INS)
+	}
+}
+
+// TestProbe_GoldKey_RealBytesSelectResponse pins the application
+// property template captured from a GoldKey Security PIV Token
+// (ATR 3B941881B1807D1F0319C80050DC) on May 2026. This is the
+// first non-YubiKey real-bytes PIV SELECT response in the test
+// suite. Its value is in the precise wire shape: a spec-conformant
+// SP 800-73-4 §3.1.3 application property template that omits the
+// optional PIV Version Number (tag 5FC107) and the optional
+// application label (tag 5FC102), carrying only the AID and the
+// coexistent tag allocation authority.
+//
+// The bytes:
+//
+//	61 1C                                                     -- outer template, 28 bytes
+//	  4F 0B A000000308000010000100                            -- AID (full 11-byte PIV PIX)
+//	  79 0D                                                   -- coexistent tag allocation authority, 13 bytes
+//	    4F 0B A000000308000010000100                          -- the AID again (NIST conventional shape)
+//
+// Probe should classify this card as standard-piv (no GET VERSION
+// support, so the YubiKey detection misses), populate
+// SelectResponse with the raw 30 bytes, and return PIVVersion=nil
+// (the optional tag 5FC107 is absent).
+//
+// This fixture catches regressions in two places: (1) a future
+// change to the SELECT-response handling that drops bytes or
+// mis-parses the outer template; (2) a future change to
+// findAppPropertyVersion that synthesizes a version from absent
+// tags. Both would be wrong against this real card.
+func TestProbe_GoldKey_RealBytesSelectResponse(t *testing.T) {
+	const goldKeyPIVSelectHex = "611c" +
+		"4f0ba000000308000010000100" +
+		"790d4f0ba000000308000010000100"
+
+	raw, err := hex.DecodeString(goldKeyPIVSelectHex)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+
+	tx := &fakeTransmitter{
+		responses: []apduPair{
+			// SELECT AID PIV returns the GoldKey-captured template.
+			{resp: &apdu.Response{Data: raw, SW1: 0x90, SW2: 0x00}},
+			// GET VERSION not supported (this is not a YubiKey).
+			{resp: &apdu.Response{Data: nil, SW1: 0x6D, SW2: 0x00}},
+		},
+	}
+	res, err := Probe(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+
+	if res.Profile.Name() != "standard-piv" {
+		t.Errorf("Profile.Name = %q, want standard-piv", res.Profile.Name())
+	}
+	if res.YubiKeyFW != nil {
+		t.Errorf("YubiKeyFW should be nil on a non-YubiKey card; got %+v", res.YubiKeyFW)
+	}
+	if !bytes.Equal(res.SelectResponse, raw) {
+		t.Errorf("SelectResponse = %X, want %X", res.SelectResponse, raw)
+	}
+	if res.PIVVersion != nil {
+		t.Errorf("PIVVersion should be nil on a card that omits tag 5FC107; got %X",
+			res.PIVVersion)
 	}
 }
