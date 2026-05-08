@@ -676,10 +676,12 @@ func openProbeSession(
 // The reads are independent. A card that supports CPLC but not
 // IIN gets one PASS line and one SKIP. None of these reads are
 // required for the probe to be useful — they're informational
-// identification material that exists across the GP card population
-// in varying combinations (SafeNet/IDPrime/IDCore advertise all
-// five; YubiKey 5.x advertises only CPLC; some cards advertise
-// none).
+// identification material that varies across the GP card
+// population. Some cards (the SafeNet eToken Fusion is one
+// observed example) answer all five; YubiKey 5.x answers only
+// CPLC; some cards answer none. Which combinations a given card
+// supports is a property of that card's firmware and is not
+// inferable from its vendor or family name.
 //
 // The function reads through the SD session so that an authenticated
 // probe (e.g. cmdProbe with SCP03 keys supplied) can still see
