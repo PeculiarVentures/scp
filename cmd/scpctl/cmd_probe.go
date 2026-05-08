@@ -414,89 +414,103 @@ func runProbe(ctx context.Context, env *runEnv, args []string, opts probeOptions
 				"authenticated reads may be rejected by the card.")
 	}
 
-	raw, err := sd.GetCardRecognitionData(ctx)
-	if err != nil {
+	data := &probeData{AuthMode: authMode, CardLocked: cardLocked}
+
+	// CRD is informational. The probe continues even if the card
+	// rejects GET DATA tag 0x66 (e.g. with SW=6D00 'instruction
+	// not supported') or returns an empty CRD. Real example: a
+	// GoldKey Security PIV Token (ATR
+	// 3B941881B1807D1F0319C80050DC) has a Card Manager at
+	// A0000001510000 but does not implement GET DATA tag 0x66 —
+	// the card returns SW=6D00. Pre-fix the probe aborted at
+	// that point and the operator never saw CPLC, IIN, CIN,
+	// KDD, SSC, or KIT, all of which are independent reads
+	// that can succeed even when CRD is absent.
+	//
+	// CRD-derived fields (Profile, GPVersion, SCPs,
+	// CardIdentificationOID, etc.) stay zero when CRD isn't
+	// available; probeData uses omitempty so the JSON output
+	// simply omits them rather than emitting empty strings.
+	var info *cardrecognition.CardInfo
+	if raw, err := sd.GetCardRecognitionData(ctx); err != nil {
 		report.Fail("GET DATA tag 0x66", err.Error())
-		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("get CRD: %w", err)
-	}
-	if len(raw) == 0 {
-		report.Skip("parse CRD", "card returned empty CRD")
-		_ = report.Emit(env.out, *jsonMode)
-		return nil
-	}
-	report.Pass("GET DATA tag 0x66", fmt.Sprintf("%d bytes", len(raw)))
-
-	info, err := cardrecognition.Parse(raw)
-	if err != nil {
-		report.Fail("parse CRD", err.Error())
-		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("parse CRD: %w", err)
-	}
-	report.Pass("parse CRD", "")
-
-	data := &probeData{RawHex: hexEncode(raw), AuthMode: authMode, CardLocked: cardLocked}
-
-	// Classify via profile.ClassifyByCRD so cmd probe and
-	// profile.Probe agree on what counts as yubikey-sd. Computed
-	// from the already-parsed CardInfo rather than re-running
-	// profile.Probe to avoid duplicate SELECT + GET DATA round
-	// trips, but the classification rule is the same.
-	if prof := profile.ClassifyByCRD(info); prof != nil {
-		data.Profile = prof.Name()
+	} else if len(raw) == 0 {
+		report.Skip("GET DATA tag 0x66", "card returned empty CRD")
 	} else {
-		data.Profile = "standard-sd"
-	}
+		report.Pass("GET DATA tag 0x66", fmt.Sprintf("%d bytes", len(raw)))
+		data.RawHex = hexEncode(raw)
 
-	if len(info.GPVersion) > 0 {
-		data.GPVersion = joinInts(info.GPVersion, ".")
-	}
-	if len(info.SCPs) > 0 {
-		// JSON back-compat: scp_version and scp_parameter mirror
-		// SCPs[0] for any consumer still parsing the old single-
-		// SCP shape. The SCPs slice carries the full set.
-		first := info.SCPs[0]
-		data.SCPVersion = fmt.Sprintf("0x%02X", first.Version)
-		// SCP11 v1.3 i-parameters can be 2 bytes; render the wider
-		// form when needed so SCP02/03 stay 0xNN and SCP11 reports
-		// 0xNNNN truthfully instead of being truncated to the low byte.
-		if first.Parameter > 0xFF {
-			data.SCPParameter = fmt.Sprintf("0x%04X", first.Parameter)
+		parsed, perr := cardrecognition.Parse(raw)
+		if perr != nil {
+			report.Fail("parse CRD", perr.Error())
 		} else {
-			data.SCPParameter = fmt.Sprintf("0x%02X", first.Parameter)
+			info = parsed
+			report.Pass("parse CRD", "")
 		}
 	}
-	for _, s := range info.SCPs {
-		data.SCPs = append(data.SCPs, formatSCP(s))
-	}
-	if len(info.CardIdentificationOID) > 0 {
-		data.CardIdentificationOID = info.CardIdentificationOID.String()
-	}
-	if len(info.CardConfigDetailsOID) > 0 {
-		data.CardConfigDetailsOID = info.CardConfigDetailsOID.String()
-	}
-	if len(info.CardChipDetailsOID) > 0 {
-		data.CardChipDetailsOID = info.CardChipDetailsOID.String()
-	}
 
-	// Capability checks — strictly informational. The probe does not
-	// authenticate or authorize anything; it just tells the user what
-	// the card advertises so they can pick a smoke test sensibly.
-	if data.GPVersion != "" {
-		report.Pass("GP version", data.GPVersion)
-	} else {
-		report.Skip("GP version", "not advertised in CRD")
-	}
-	if len(info.SCPs) == 0 {
-		report.Skip("SCP advertised", "no SCP element in CRD")
-	} else {
-		// One report line per advertised SCP. Cards that advertise
-		// more than one (e.g. retail YubiKey 5.7+ ships SCP03 and
-		// SCP11 together) get multiple PASS lines so the operator
-		// can see exactly what's available without inspecting the
-		// raw CRD bytes.
+	if info != nil {
+		// Classify via profile.ClassifyByCRD so cmd probe and
+		// profile.Probe agree on what counts as yubikey-sd. Computed
+		// from the already-parsed CardInfo rather than re-running
+		// profile.Probe to avoid duplicate SELECT + GET DATA round
+		// trips, but the classification rule is the same.
+		if prof := profile.ClassifyByCRD(info); prof != nil {
+			data.Profile = prof.Name()
+		} else {
+			data.Profile = "standard-sd"
+		}
+
+		if len(info.GPVersion) > 0 {
+			data.GPVersion = joinInts(info.GPVersion, ".")
+		}
+		if len(info.SCPs) > 0 {
+			// JSON back-compat: scp_version and scp_parameter mirror
+			// SCPs[0] for any consumer still parsing the old single-
+			// SCP shape. The SCPs slice carries the full set.
+			first := info.SCPs[0]
+			data.SCPVersion = fmt.Sprintf("0x%02X", first.Version)
+			// SCP11 v1.3 i-parameters can be 2 bytes; render the wider
+			// form when needed so SCP02/03 stay 0xNN and SCP11 reports
+			// 0xNNNN truthfully instead of being truncated to the low byte.
+			if first.Parameter > 0xFF {
+				data.SCPParameter = fmt.Sprintf("0x%04X", first.Parameter)
+			} else {
+				data.SCPParameter = fmt.Sprintf("0x%02X", first.Parameter)
+			}
+		}
 		for _, s := range info.SCPs {
-			report.Pass("SCP advertised", formatSCP(s))
+			data.SCPs = append(data.SCPs, formatSCP(s))
+		}
+		if len(info.CardIdentificationOID) > 0 {
+			data.CardIdentificationOID = info.CardIdentificationOID.String()
+		}
+		if len(info.CardConfigDetailsOID) > 0 {
+			data.CardConfigDetailsOID = info.CardConfigDetailsOID.String()
+		}
+		if len(info.CardChipDetailsOID) > 0 {
+			data.CardChipDetailsOID = info.CardChipDetailsOID.String()
+		}
+
+		// Capability checks — strictly informational. The probe does not
+		// authenticate or authorize anything; it just tells the user what
+		// the card advertises so they can pick a smoke test sensibly.
+		if data.GPVersion != "" {
+			report.Pass("GP version", data.GPVersion)
+		} else {
+			report.Skip("GP version", "not advertised in CRD")
+		}
+		if len(info.SCPs) == 0 {
+			report.Skip("SCP advertised", "no SCP element in CRD")
+		} else {
+			// One report line per advertised SCP. Cards that advertise
+			// more than one (e.g. retail YubiKey 5.7+ ships SCP03 and
+			// SCP11 together) get multiple PASS lines so the operator
+			// can see exactly what's available without inspecting the
+			// raw CRD bytes.
+			for _, s := range info.SCPs {
+				report.Pass("SCP advertised", formatSCP(s))
+			}
 		}
 	}
 

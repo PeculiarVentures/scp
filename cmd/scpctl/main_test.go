@@ -268,8 +268,15 @@ func TestProbe_FailsClosedOnSelectError(t *testing.T) {
 
 // probeFakeTransport: SELECT returns 9000, GET DATA tag 0x66 returns
 // the pre-canned CRD. Anything else returns 6D00.
+//
+// crdSW, when nonzero, overrides the CRD response. The SW is
+// returned with empty data — useful for modeling cards that have
+// a discoverable Security Domain but reject GET DATA tag 0x66
+// (e.g. SW=6D00 'instruction not supported', as observed against
+// a GoldKey Security PIV Token).
 type probeFakeTransport struct {
 	crd         []byte
+	crdSW       uint16
 	selectError error
 }
 
@@ -281,6 +288,12 @@ func (p *probeFakeTransport) Transmit(_ context.Context, cmd *apdu.Command) (*ap
 		}
 		return &apdu.Response{SW1: 0x90, SW2: 0x00}, nil
 	case cmd.INS == 0xCA && cmd.P1 == 0x00 && cmd.P2 == 0x66:
+		if p.crdSW != 0 {
+			return &apdu.Response{
+				SW1: byte(p.crdSW >> 8),
+				SW2: byte(p.crdSW),
+			}, nil
+		}
 		return &apdu.Response{Data: p.crd, SW1: 0x90, SW2: 0x00}, nil
 	default:
 		return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
@@ -295,4 +308,96 @@ func (p *probeFakeTransport) Close() error { return nil }
 
 func (p *probeFakeTransport) TrustBoundary() transport.TrustBoundary {
 	return transport.TrustBoundaryUnknown
+}
+
+// TestProbe_ContinuesWhenCRDRejected is the regression for the
+// CRD-failure-aborts-everything bug surfaced against a GoldKey
+// Security PIV Token. The card has a Card Manager at
+// A0000001510000 (SELECT returns 9000) but does not implement
+// GET DATA tag 0x66 (returns SW=6D00). Pre-fix the probe aborted
+// at the CRD fetch and emitted only one check line beyond
+// discovery — operators never saw any of the GP §H reads. Post-
+// fix CRD failure is reported as FAIL but the probe continues
+// through the optional GET DATA reads.
+func TestProbe_ContinuesWhenCRDRejected(t *testing.T) {
+	tt := &probeFakeTransport{crdSW: 0x6D00}
+	var buf bytes.Buffer
+	env := &runEnv{
+		out:    &buf,
+		errOut: &buf,
+		connect: func(_ context.Context, _ string) (transport.Transport, error) {
+			return tt, nil
+		},
+	}
+	// cmdProbe returns "reported failures" because the CRD check
+	// is FAIL — that's the right exit-code semantic for scripts.
+	// The important thing is that the probe completed all the
+	// other reads and emitted them in the report rather than
+	// aborting after CRD.
+	err := cmdProbe(context.Background(), env, []string{"--reader", "fake", "--json"})
+	if err == nil {
+		t.Fatal("expected probe to report failures (CRD was rejected); got nil error")
+	}
+	if !strings.Contains(err.Error(), "reported failures") {
+		t.Fatalf("expected 'reported failures' error; got %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, buf.String())
+	}
+
+	checks, ok := got["checks"].([]any)
+	if !ok {
+		t.Fatalf("missing checks field; got %v", got)
+	}
+
+	// The CRD check should appear as FAIL.
+	var sawCRDFail bool
+	// The optional GET DATA reads should still appear in the
+	// output. They'll be SKIP against this fake (which returns
+	// 6D00 for everything other than SELECT and GET DATA 0x66),
+	// but they should be present rather than missing.
+	var sawCPLC, sawIIN bool
+	for _, c := range checks {
+		m, _ := c.(map[string]any)
+		name, _ := m["name"].(string)
+		result, _ := m["result"].(string)
+		switch name {
+		case "GET DATA tag 0x66":
+			if result == "FAIL" {
+				sawCRDFail = true
+			}
+		case "GET DATA tag 0x9F7F (CPLC)":
+			sawCPLC = true
+		case "GET DATA tag 0x0042 (IIN)":
+			sawIIN = true
+		}
+	}
+
+	if !sawCRDFail {
+		t.Errorf("CRD check should appear as FAIL in checks; got %v", checks)
+	}
+	if !sawCPLC {
+		t.Errorf("CPLC check should be present even when CRD failed; checks=%v", checks)
+	}
+	if !sawIIN {
+		t.Errorf("IIN check should be present even when CRD failed; checks=%v", checks)
+	}
+
+	// Data section should exist with auth_mode populated, even
+	// though CRD-derived fields are absent.
+	data, ok := got["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data field should be present even without CRD; got %v", got)
+	}
+	if _, hasAuthMode := data["auth_mode"]; !hasAuthMode {
+		t.Errorf("data.auth_mode should be present; got %v", data)
+	}
+	// CRD-derived fields should be absent (omitempty kicks in).
+	for _, field := range []string{"gp_version", "scp_version", "scps", "raw_hex"} {
+		if _, present := data[field]; present {
+			t.Errorf("data.%s should be absent when CRD was rejected; got %v", field, data[field])
+		}
+	}
 }
