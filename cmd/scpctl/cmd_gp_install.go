@@ -15,14 +15,34 @@ import (
 // section names operators see in text mode so JSON consumers and
 // humans see structurally similar output.
 type gpInstallData struct {
-	Protocol      string `json:"protocol,omitempty"`
-	CAPPath       string `json:"cap_path,omitempty"`
-	PackageAID    string `json:"package_aid,omitempty"`
-	AppletAID     string `json:"applet_aid,omitempty"`
-	ModuleAID     string `json:"module_aid,omitempty"`
-	LoadImageSize int    `json:"load_image_size,omitempty"`
-	SHA256        string `json:"load_image_sha256,omitempty"`
-	SHA1          string `json:"load_image_sha1,omitempty"`
+	Protocol   string `json:"protocol,omitempty"`
+	CAPPath    string `json:"cap_path,omitempty"`
+	PackageAID string `json:"package_aid,omitempty"`
+	AppletAID  string `json:"applet_aid,omitempty"`
+	ModuleAID  string `json:"module_aid,omitempty"`
+
+	// LoadFileDataBlockSize is the LFDB byte count: the input to
+	// the install hash field, the bytes inside the C4 wrapper.
+	LoadFileDataBlockSize int `json:"load_file_data_block_size,omitempty"`
+
+	// LoadFileSize is the wire-format Load File byte count: LFDB
+	// plus the C4 BER-TLV wrapper plus any DAP blocks. This is
+	// what gets chunked across LOAD APDUs.
+	LoadFileSize int `json:"load_file_size,omitempty"`
+
+	// LoadFilePrefixHex shows the first 16 bytes of the wire
+	// stream. An operator looking at the report can confirm the
+	// stream starts with C4 (or E2 if DAP-signed) — useful for
+	// catching the pre-2026 raw-LFDB regression at a glance.
+	LoadFilePrefixHex string `json:"load_file_prefix_hex,omitempty"`
+
+	SHA256 string `json:"load_file_data_block_sha256,omitempty"`
+	SHA1   string `json:"load_file_data_block_sha1,omitempty"`
+
+	// LoadImageSize is the deprecated alias for
+	// LoadFileDataBlockSize, kept in JSON output so pre-2026
+	// JSON consumers don't see a sudden field-name change.
+	LoadImageSize int `json:"load_image_size,omitempty"`
 
 	// Preflight surfaces the host-side decisions the operator
 	// should review before authorizing a write. JSON consumers
@@ -229,30 +249,50 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		return err
 	}
 
-	// 2. Build the load image and hash it. Hashes go in the report
-	//    so an operator running --confirm-write later can verify
-	//    they're sending the same bytes a previous dry-run reviewed.
+	// 2. Build the LFDB and the C4-wrapped Load File. Both go in
+	//    the report: hashes are over the LFDB (per GP §11.5.2.3)
+	//    and the wire stream is the C4-wrapped form. An operator
+	//    running --confirm-write later compares both the LFDB hash
+	//    AND the LoadFile prefix to confirm they're sending the
+	//    same bytes a previous dry-run reviewed.
 	policy := gp.DefaultLoadImagePolicy()
 	policy.ExcludeDebug = !*includeDebug
 	policy.ExcludeDescriptor = !*includeDescriptor
 
-	loadImage, err := cap.LoadImage(policy)
+	lfdb, err := cap.LoadFileDataBlock(policy)
 	if err != nil {
-		report.Fail("build load image", err.Error())
+		report.Fail("build load file data block", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("build load image: %w", err)
+		return fmt.Errorf("build load file data block: %w", err)
 	}
-	sha256Sum, sha1Sum, err := cap.LoadImageHashes(policy)
+	loadFile, err := gp.BuildPlainLoadFile(lfdb, gp.LoadFileOptions{})
 	if err != nil {
-		report.Fail("hash load image", err.Error())
+		report.Fail("build GP load file", err.Error())
 		_ = report.Emit(env.out, *jsonMode)
-		return fmt.Errorf("hash load image: %w", err)
+		return fmt.Errorf("build GP load file: %w", err)
 	}
-	data.LoadImageSize = len(loadImage)
+	sha256Sum, sha1Sum, err := gp.LoadFileDataBlockHashes(lfdb)
+	if err != nil {
+		report.Fail("hash load file data block", err.Error())
+		_ = report.Emit(env.out, *jsonMode)
+		return fmt.Errorf("hash load file data block: %w", err)
+	}
+	data.LoadFileDataBlockSize = len(lfdb)
+	data.LoadFileSize = len(loadFile)
+	data.LoadImageSize = len(lfdb) // deprecated alias
 	data.SHA256 = strings.ToUpper(hex.EncodeToString(sha256Sum))
 	data.SHA1 = strings.ToUpper(hex.EncodeToString(sha1Sum))
-	report.Pass("load image",
-		fmt.Sprintf("%d bytes, SHA-256=%s", data.LoadImageSize, data.SHA256))
+
+	prefixLen := len(loadFile)
+	if prefixLen > 16 {
+		prefixLen = 16
+	}
+	data.LoadFilePrefixHex = strings.ToUpper(hex.EncodeToString(loadFile[:prefixLen]))
+
+	report.Pass("load file data block",
+		fmt.Sprintf("%d bytes, SHA-256=%s", data.LoadFileDataBlockSize, data.SHA256))
+	report.Pass("GlobalPlatform load file",
+		fmt.Sprintf("%d bytes, starts with 0x%s", data.LoadFileSize, data.LoadFilePrefixHex))
 
 	// Preflight: surface the host-side decisions the operator
 	// should review before authorizing a write. Component list
@@ -272,12 +312,12 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	if chunkSize == 0 {
 		chunkSize = 200 // matches securitydomain.InstallOptions default
 	}
-	chunkCount := (data.LoadImageSize + chunkSize - 1) / chunkSize
+	chunkCount := (data.LoadFileSize + chunkSize - 1) / chunkSize
 	data.LoadBlockSize = chunkSize
 	data.LoadBlockCount = chunkCount
 	report.Pass("load block plan",
 		fmt.Sprintf("%d LOAD APDU(s) at %d bytes each (final block %d bytes)",
-			chunkCount, chunkSize, finalBlockBytes(data.LoadImageSize, chunkSize)))
+			chunkCount, chunkSize, finalBlockBytes(data.LoadFileSize, chunkSize)))
 
 	data.PrivilegesHex = strings.ToUpper(hex.EncodeToString(privs))
 	report.Pass("privileges", "0x"+data.PrivilegesHex)
@@ -292,7 +332,7 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		_ = report.Emit(env.out, *jsonMode)
 		return &usageError{msg: err.Error()}
 	}
-	loadHash := hashSpec.Resolve(loadImage)
+	loadHash := hashSpec.Resolve(lfdb)
 	data.LoadHashAlgorithm = hashSpec.Label()
 	var hashDetail string
 	if hashSpec.Algorithm != "none" && len(loadHash) > 0 {
@@ -398,15 +438,16 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 	//    the stage; we map that to per-stage check lines so the
 	//    operator sees exactly where the chain stopped.
 	opts := securitydomain.InstallOptions{
-		LoadFileAID:   loadFileAID,
-		LoadImage:     loadImage,
-		LoadHash:      loadHash,
-		LoadParams:    loadParamsBytes,
-		ModuleAID:     moduleAID,
-		AppletAID:     appletAID,
-		Privileges:    privs,
-		InstallParams: installParams,
-		LoadBlockSize: *loadBlockSize,
+		LoadFileAID:       loadFileAID,
+		LoadFileDataBlock: lfdb,
+		LoadFile:          loadFile,
+		LoadHash:          loadHash,
+		LoadParams:        loadParamsBytes,
+		ModuleAID:         moduleAID,
+		AppletAID:         appletAID,
+		Privileges:        privs,
+		InstallParams:     installParams,
+		LoadBlockSize:     *loadBlockSize,
 	}
 	// Block progress: print 'LOAD N/M' lines to stderr in text
 	// mode so an operator watching a long install sees progress
@@ -426,7 +467,7 @@ func cmdGPInstall(ctx context.Context, env *runEnv, args []string) error {
 		return err
 	}
 	report.Pass("INSTALL [for load]", fmt.Sprintf("load file %s registered", data.PackageAID))
-	report.Pass("LOAD blocks", fmt.Sprintf("%d bytes streamed", data.LoadImageSize))
+	report.Pass("LOAD blocks", fmt.Sprintf("%d bytes streamed", data.LoadFileSize))
 	report.Pass("INSTALL [for install]", fmt.Sprintf("applet %s installed", data.AppletAID))
 
 	if err := report.Emit(env.out, *jsonMode); err != nil {

@@ -127,13 +127,24 @@ func TestLoad_FullSequence_RegistersLoadFile(t *testing.T) {
 	dispatchUnsecured(t, c, 0xE6, 0x02, 0x00,
 		buildInstallForLoadData(loadAID, nil, versionParams))
 
+	// Build a valid C4-wrapped GP Load File and split across two
+	// LOAD APDUs. Pre-2026 the mockcard accepted any raw bytes;
+	// post-fix it requires the spec wire shape (C4 || BER-len ||
+	// LFDB), matching real-card behavior.
+	loadFile, err := gp.BuildPlainLoadFile([]byte{0xAA, 0xBB, 0xCC, 0xDD}, gp.LoadFileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// loadFile = C4 04 AA BB CC DD (6 bytes). Split 3/3.
+	mid := len(loadFile) / 2
+
 	// LOAD block 0: not last (P1=0x00).
-	resp := dispatchUnsecured(t, c, 0xE8, 0x00, 0x00, []byte{0xAA, 0xBB})
+	resp := dispatchUnsecured(t, c, 0xE8, 0x00, 0x00, loadFile[:mid])
 	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("LOAD[0] SW = 0x%04X", got)
 	}
 	// LOAD block 1: last (P1 bit 7 set).
-	resp = dispatchUnsecured(t, c, 0xE8, 0x80, 0x01, []byte{0xCC, 0xDD})
+	resp = dispatchUnsecured(t, c, 0xE8, 0x80, 0x01, loadFile[mid:])
 	if got := resp.StatusWord(); got != 0x9000 {
 		t.Fatalf("LOAD[final] SW = 0x%04X", got)
 	}
@@ -152,6 +163,28 @@ func TestLoad_FullSequence_RegistersLoadFile(t *testing.T) {
 	}
 	if !bytes.Equal(got.Version, []byte{0x01, 0x00}) {
 		t.Errorf("Version = %X, want 0100 (extracted from tag 0xC8 in params)", got.Version)
+	}
+}
+
+// TestLoad_RawLFDBRejectedWithoutC4Wrapper pins the post-2026
+// mockcard strictness: raw LFDB bytes streamed through LOAD
+// without the GP §11.6.2 C4 wrapper get rejected with SW=6A80.
+// This is the regression test for the host-side bug fixed in
+// this PR (pre-fix, the host streamed raw LFDB and the mockcard
+// happily accepted it; real GP cards reject the raw shape).
+func TestLoad_RawLFDBRejectedWithoutC4Wrapper(t *testing.T) {
+	c, _ := New()
+	loadAID := []byte{0xD2, 0x76, 0x00, 0x01, 0x24, 0x01}
+	dispatchUnsecured(t, c, 0xE6, 0x02, 0x00,
+		buildInstallForLoadData(loadAID, nil, nil))
+
+	// Send raw LFDB (no C4 wrapper) as a single final block.
+	resp := dispatchUnsecured(t, c, 0xE8, 0x80, 0x00, []byte{0x01, 0x00, 0x00})
+	if got := resp.StatusWord(); got != 0x6A80 {
+		t.Fatalf("SW = 0x%04X, want 0x6A80 (incorrect parameters: malformed LOAD payload)", got)
+	}
+	if len(c.RegistryLoadFiles) != 0 {
+		t.Errorf("registry should be empty after rejected LOAD, got %d entries", len(c.RegistryLoadFiles))
 	}
 }
 
@@ -278,8 +311,12 @@ func TestInstallEndToEnd_GetStatusReflectsInstalled(t *testing.T) {
 	// 1. INSTALL [for load]
 	dispatchUnsecured(t, c, 0xE6, 0x02, 0x00,
 		buildInstallForLoadData(loadAID, nil, []byte{0xC8, 0x02, 0x01, 0x00}))
-	// 2. LOAD final block
-	dispatchUnsecured(t, c, 0xE8, 0x80, 0x00, []byte{0xCA, 0xFE, 0xBA, 0xBE})
+	// 2. LOAD final block — C4-wrapped per GP §11.6.2.
+	loadFile, err := gp.BuildPlainLoadFile([]byte{0xCA, 0xFE, 0xBA, 0xBE}, gp.LoadFileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchUnsecured(t, c, 0xE8, 0x80, 0x00, loadFile)
 	// 3. INSTALL [for install]
 	dispatchUnsecured(t, c, 0xE6, 0x04, 0x00,
 		buildInstallForInstallData(loadAID, loadAID, appletAID, []byte{0x00}))
@@ -312,7 +349,11 @@ func TestInstallThenDelete_RestoresEmptyState(t *testing.T) {
 
 	dispatchUnsecured(t, c, 0xE6, 0x02, 0x00,
 		buildInstallForLoadData(loadAID, nil, nil))
-	dispatchUnsecured(t, c, 0xE8, 0x80, 0x00, []byte{0xCA, 0xFE})
+	loadFile, err := gp.BuildPlainLoadFile([]byte{0xCA, 0xFE}, gp.LoadFileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchUnsecured(t, c, 0xE8, 0x80, 0x00, loadFile)
 	dispatchUnsecured(t, c, 0xE6, 0x04, 0x00,
 		buildInstallForInstallData(loadAID, loadAID, appletAID, []byte{0x00}))
 

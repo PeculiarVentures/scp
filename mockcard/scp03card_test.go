@@ -59,10 +59,14 @@ func TestSCP03Card_GPInstallRoundTrip(t *testing.T) {
 		t.Fatalf("INSTALL [for load] SW=0x%04X, want 9000", sw)
 	}
 
-	// 2. LOAD final block (P1 bit 7 = last)
+	// 2. LOAD final block (P1 bit 7 = last) — C4-wrapped per GP §11.6.2.
+	loadFile, err := gp.BuildPlainLoadFile([]byte{0xCA, 0xFE, 0xBA, 0xBE}, gp.LoadFileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp, err = sess.Transmit(ctx, &apdu.Command{
 		CLA: 0x80, INS: 0xE8, P1: 0x80, P2: 0x00,
-		Data: []byte{0xCA, 0xFE, 0xBA, 0xBE},
+		Data: loadFile,
 	})
 	if err != nil {
 		t.Fatalf("LOAD: %v", err)

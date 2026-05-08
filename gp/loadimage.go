@@ -50,18 +50,50 @@ func DefaultLoadImagePolicy() LoadImagePolicy {
 	}
 }
 
-// LoadImage assembles the byte stream that the host streams to the
-// card via INSTALL [for load] + LOAD per GP §11.6. The output is
-// the concatenation of the chosen CAP components in JC VM Spec
-// load order; each component contributes its full file content
-// (tag byte + 2-byte size + payload bytes), as the runtime
-// expects to parse them sequentially.
+// LoadFileDataBlock assembles the Java Card Load File Data Block
+// (LFDB) — the concatenation of the chosen CAP components in JC VM
+// Spec load order. Each component contributes its full file content
+// (tag byte + 2-byte size + payload), as the runtime expects to
+// parse them sequentially.
+//
+// The LFDB is the bytes that go INSIDE the C4 wrapper at LOAD time.
+// It is also the input to the Load File Data Block Hash field of
+// INSTALL [for load] per GP §11.5.2.3 — the hash is over the LFDB
+// alone, NOT over the C4-wrapped form. To get the complete wire-
+// format Load File for streaming through LOAD, wrap the LFDB with
+// gp.BuildPlainLoadFile.
 //
 // Returns ErrInvalidLoadImage if the policy excludes a required
 // component (Header) or if the CAP has no components at all.
 //
-// The returned bytes are a fresh allocation; callers may modify
-// or extend the slice without affecting the underlying CAP.
+// The returned bytes are a fresh allocation; callers may modify or
+// extend the slice without affecting the underlying CAP.
+func (c *CAPFile) LoadFileDataBlock(policy LoadImagePolicy) ([]byte, error) {
+	return c.LoadImage(policy)
+}
+
+// LoadFileDataBlockHashes computes the SHA-256 and SHA-1 digests
+// over the Load File Data Block (NOT over the C4-wrapped wire-
+// format Load File). Equivalent to gp.LoadFileDataBlockHashes
+// applied to LoadFileDataBlock(policy), bundled here for callers
+// that have a CAPFile in hand.
+func (c *CAPFile) LoadFileDataBlockHashes(policy LoadImagePolicy) (sha256Sum, sha1Sum []byte, err error) {
+	lfdb, err := c.LoadFileDataBlock(policy)
+	if err != nil {
+		return nil, nil, err
+	}
+	return LoadFileDataBlockHashes(lfdb)
+}
+
+// LoadImage is the legacy name for LoadFileDataBlock. It returns
+// the Java Card Load File Data Block (LFDB), NOT the wire-format
+// Load File — the previous version of this comment claimed the
+// output was the byte stream the host streams through LOAD, which
+// is wrong: the wire-format Load File requires the C4 wrapper
+// (see gp.BuildPlainLoadFile). The function itself is correct;
+// only the docstring needed updating.
+//
+// New code should call LoadFileDataBlock for clarity.
 func (c *CAPFile) LoadImage(policy LoadImagePolicy) ([]byte, error) {
 	if len(c.Components) == 0 {
 		return nil, fmt.Errorf("%w: CAP has no components", ErrInvalidLoadImage)
@@ -131,13 +163,13 @@ func (c *CAPFile) LoadImageComponents(policy LoadImagePolicy) []CAPComponent {
 	return keep
 }
 
-// LoadImageHashes computes both SHA-256 (preferred) and SHA-1
-// (legacy compatibility) digests of the load image. The DAP
-// signature path uses the SHA-256 hash; older cards may require
-// SHA-1. Callers that don't need both should call LoadImage and
-// hash the result themselves; this helper exists so destructive
-// CLI flows can print both digests for operator verification
-// before committing the install.
+// LoadImageHashes is the legacy name for LoadFileDataBlockHashes.
+// It computes both SHA-256 and SHA-1 over the LFDB (the bytes
+// inside the C4 wrapper, NOT the wire-format Load File). Per the
+// rename in CAPFile.LoadImage's doc, the function itself is
+// correct — only the framing was misleading.
+//
+// New code should call LoadFileDataBlockHashes for clarity.
 func (c *CAPFile) LoadImageHashes(policy LoadImagePolicy) (sha256Sum, sha1Sum []byte, err error) {
 	image, err := c.LoadImage(policy)
 	if err != nil {

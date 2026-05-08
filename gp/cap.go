@@ -41,9 +41,16 @@ import (
 //     parse here as long as Header, Applet, and Import are
 //     well-formed.
 //
-// CAPFile.LoadImage builds the LOAD-ready byte stream for the
-// INSTALL [for load] flow; see loadimage.go for the policy
+// CAPFile.LoadFileDataBlock returns the Java Card Load File Data
+// Block (LFDB) — the concatenation of selected CAP components in
+// JC VM load order. The LFDB is the input to the Load File Data
+// Block Hash field of INSTALL [for load], and the bytes that go
+// inside the C4 wrapper at LOAD time. To get the wire-format Load
+// File for streaming through LOAD, wrap the LFDB with
+// gp.BuildPlainLoadFile. See loadimage.go for the policy
 // (Debug + Descriptor excluded; component order per JC VM Spec).
+//
+// CAPFile.LoadImage is the deprecated alias for LoadFileDataBlock.
 //
 // References:
 //   - Java Card VM Specification §6 (CAP file format).

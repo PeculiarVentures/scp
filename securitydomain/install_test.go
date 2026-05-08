@@ -10,6 +10,7 @@ import (
 
 	"github.com/PeculiarVentures/scp/apdu"
 	"github.com/PeculiarVentures/scp/channel"
+	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/mockcard"
 	"github.com/PeculiarVentures/scp/scp03"
 	"github.com/PeculiarVentures/scp/securitydomain"
@@ -153,8 +154,18 @@ func TestSession_Install_FailsAtLoadMidStream(t *testing.T) {
 	if pe.BytesLoaded != expectedBytesLoaded {
 		t.Errorf("BytesLoaded = %d, want %d", pe.BytesLoaded, expectedBytesLoaded)
 	}
-	if pe.TotalLoadBytes != len(opts.LoadImage) {
-		t.Errorf("TotalLoadBytes = %d, want %d", pe.TotalLoadBytes, len(opts.LoadImage))
+	// Post-2026 the diagnostic reports the wire-stream length
+	// (LFDB + C4 wrapper), which is what gets chunked across LOAD
+	// APDUs. Pre-fix this asserted len(opts.LoadImage) directly
+	// because the host streamed raw LFDB; that bug is fixed and
+	// the assertion now checks the wrapped-form length.
+	wrappedLoadFile, buildErr := gp.BuildPlainLoadFile(opts.LoadImage, gp.LoadFileOptions{})
+	if buildErr != nil {
+		t.Fatal(buildErr)
+	}
+	if pe.TotalLoadBytes != len(wrappedLoadFile) {
+		t.Errorf("TotalLoadBytes = %d, want wrapped-form len %d (LFDB len %d + C4 wrapper)",
+			pe.TotalLoadBytes, len(wrappedLoadFile), len(opts.LoadImage))
 	}
 	// CleanupRecipe should mention DELETE since the load file is partially registered.
 	recipe := pe.CleanupRecipe()
@@ -169,8 +180,9 @@ func TestSession_Install_FailsAtLoadMidStream(t *testing.T) {
 	if !strings.Contains(err.Error(), "LOAD") {
 		t.Errorf("error message should mention LOAD: %v", err)
 	}
-	if !strings.Contains(err.Error(), "400/800") {
-		t.Errorf("error message should report byte progress 400/800: %v", err)
+	expectedProgress := fmt.Sprintf("%d/%d", expectedBytesLoaded, len(wrappedLoadFile))
+	if !strings.Contains(err.Error(), expectedProgress) {
+		t.Errorf("error message should report byte progress %s: %v", expectedProgress, err)
 	}
 }
 
@@ -201,9 +213,16 @@ func TestSession_Install_FailsAtInstallForInstall(t *testing.T) {
 	if !bytes.Equal(pe.AppletAID, opts.AppletAID) {
 		t.Errorf("AppletAID = %X, want %X", pe.AppletAID, opts.AppletAID)
 	}
-	if pe.BytesLoaded != len(opts.LoadImage) {
-		t.Errorf("BytesLoaded = %d, want full length %d (LOAD completed before stage-3 failure)",
-			pe.BytesLoaded, len(opts.LoadImage))
+	// Post-2026: BytesLoaded after LOAD completes is the wrapped
+	// stream length (LFDB + C4 wrapper), the bytes that actually
+	// went on the wire — not the raw LFDB length.
+	wrappedLoadFile, buildErr := gp.BuildPlainLoadFile(opts.LoadImage, gp.LoadFileOptions{})
+	if buildErr != nil {
+		t.Fatal(buildErr)
+	}
+	if pe.BytesLoaded != len(wrappedLoadFile) {
+		t.Errorf("BytesLoaded = %d, want wrapped-form len %d (LFDB len %d, all bytes streamed)",
+			pe.BytesLoaded, len(wrappedLoadFile), len(opts.LoadImage))
 	}
 	// Load file IS registered (LOAD completed); applet is NOT.
 	if len(mc.RegistryLoadFiles) != 1 {
@@ -421,29 +440,36 @@ func TestSession_Install_RequiresAuthentication(t *testing.T) {
 // (255-257 bytes) — exercising the boundary without making a
 // 51KB+ CAP-shaped image. The mock acknowledges every LOAD
 // regardless of size, so the cap is purely host-side.
+// TestSession_Install_LoadBlockCount_Boundary exercises the 256-
+// block LOAD sequence-number limit. Post-2026 the limit applies
+// to the C4-wrapped Load File length (the bytes chunked across
+// LOAD APDUs), not the raw LFDB length, so the test pre-builds
+// LoadFile values of exact byte sizes and uses InstallOptions.LoadFile
+// directly. blocks here means "wrapped-stream byte count" since
+// LoadBlockSize=1.
 func TestSession_Install_LoadBlockCount_Boundary(t *testing.T) {
 	cases := []struct {
-		name        string
-		blocks      int
-		wantErr     bool
-		wantLastSeq int
+		name              string
+		wrappedStreamSize int
+		wantErr           bool
+		wantLastSeq       int
 	}{
 		{
-			name:        "255_blocks_just_below_limit",
-			blocks:      255,
-			wantErr:     false,
-			wantLastSeq: 254,
+			name:              "255_blocks_just_below_limit",
+			wrappedStreamSize: 255,
+			wantErr:           false,
+			wantLastSeq:       254,
 		},
 		{
-			name:        "256_blocks_exactly_at_limit",
-			blocks:      256,
-			wantErr:     false,
-			wantLastSeq: 255,
+			name:              "256_blocks_exactly_at_limit",
+			wrappedStreamSize: 256,
+			wantErr:           false,
+			wantLastSeq:       255,
 		},
 		{
-			name:    "257_blocks_just_above_limit_refused",
-			blocks:  257,
-			wantErr: true,
+			name:              "257_blocks_just_above_limit_refused",
+			wrappedStreamSize: 257,
+			wantErr:           true,
 		},
 	}
 
@@ -451,14 +477,32 @@ func TestSession_Install_LoadBlockCount_Boundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sess, _ := openInstallSession(t)
 			opts := sampleOpts()
-			opts.LoadImage = bytes.Repeat([]byte{0x55}, tc.blocks)
+			// Build an LFDB whose wrapped form lands at exactly
+			// tc.wrappedStreamSize bytes. For sizes >= 131 the
+			// wrapper is C4 81 LL (3 bytes overhead); we ensure
+			// the LFDB is non-zero so BuildPlainLoadFile succeeds.
+			lfdbLen := tc.wrappedStreamSize - 3
+			if lfdbLen < 1 {
+				lfdbLen = 1
+			}
+			lfdb := bytes.Repeat([]byte{0x55}, lfdbLen)
+			loadFile, err := gp.BuildPlainLoadFile(lfdb, gp.LoadFileOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loadFile) != tc.wrappedStreamSize {
+				t.Fatalf("test fixture: wrapped len = %d, want %d", len(loadFile), tc.wrappedStreamSize)
+			}
+			opts.LoadFileDataBlock = lfdb
+			opts.LoadFile = loadFile
+			opts.LoadImage = nil
 			opts.LoadBlockSize = 1
 
-			err := sess.Install(context.Background(), opts)
+			err = sess.Install(context.Background(), opts)
 
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("expected refusal at %d blocks; got success", tc.blocks)
+					t.Fatalf("expected refusal at %d wrapped bytes; got success", tc.wrappedStreamSize)
 				}
 				var pe *securitydomain.PartialInstallError
 				if !errors.As(err, &pe) {
@@ -478,7 +522,7 @@ func TestSession_Install_LoadBlockCount_Boundary(t *testing.T) {
 			}
 
 			if err != nil {
-				t.Fatalf("unexpected error at %d blocks: %v", tc.blocks, err)
+				t.Fatalf("unexpected error at %d wrapped bytes: %v", tc.wrappedStreamSize, err)
 			}
 			// Happy path: assert the registry shows the applet
 			// was installed (which means INSTALL [for install]

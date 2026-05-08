@@ -150,18 +150,34 @@ func (e *PartialInstallError) CleanupRecipe() string {
 }
 
 // InstallOptions is the high-level Install API input. Either
-// supply pre-computed parameters and a load image (caller has
-// already parsed the CAP), or wrap a CAP file with one of the
+// supply pre-computed parameters and a load file data block (caller
+// has already parsed the CAP), or wrap a CAP file with one of the
 // helpers in package gp.
 //
 // Required fields:
 //   - LoadFileAID: AID of the load file (package AID from the CAP)
-//   - LoadImage:   bytes of the load file data block (concatenated
-//     CAP components in the order GP §F.2 specifies)
+//   - LoadFileDataBlock or LoadFile: bytes to load (see below)
 //   - ModuleAID:   AID of the applet's class within the package
 //   - AppletAID:   AID under which the instantiated applet is
 //     registered (often equals ModuleAID for single-
 //     class applets but not always)
+//
+// Load-bytes selection:
+//   - LoadFileDataBlock: the Java Card LFDB (concatenated CAP
+//     components per JC VM Spec §6, GP §F.2). Install wraps this
+//     in the GP-spec C4 outer per gp.BuildPlainLoadFile and chunks
+//     the wrapped form across LOAD APDUs. This is the typical
+//     path; LoadHash is computed over LoadFileDataBlock (NOT over
+//     the wrapped form) per GP §11.5.2.3.
+//   - LoadFile: a complete pre-built GP Load File (E2 DAP blocks
+//     followed by the C4 LFDB). Used by callers that have an
+//     externally-computed DAP signature to inject. If non-empty,
+//     it bypasses the wrap step and goes through LOAD as-is.
+//     Mutually compatible with LoadFileDataBlock; if both are
+//     present LoadFile wins for the wire format and
+//     LoadFileDataBlock is still used for hash computation.
+//   - LoadImage: deprecated alias for LoadFileDataBlock. Kept for
+//     backward compatibility; behaves identically.
 //
 // Optional fields:
 //   - SDAID:           target SD AID; empty means current SD (most common)
@@ -174,9 +190,28 @@ func (e *PartialInstallError) CleanupRecipe() string {
 //   - LoadBlockSize:   chunk size for LOAD; 0 means default 200 bytes
 type InstallOptions struct {
 	LoadFileAID []byte
-	LoadImage   []byte
-	ModuleAID   []byte
-	AppletAID   []byte
+
+	// LoadFileDataBlock is the concatenated CAP component stream
+	// (the LFDB). Install wraps it in C4 || BER-length || LFDB and
+	// streams the wrapped form through LOAD per GP §11.6.2. The
+	// LoadHash field, when computed by the caller, is over this
+	// LFDB (NOT over the wrapped form).
+	LoadFileDataBlock []byte
+
+	// LoadFile is a pre-built complete GP Load File (zero or more
+	// E2 DAP blocks followed by the C4 LFDB). When non-empty it
+	// bypasses the wrap step and is streamed through LOAD as-is.
+	// Used by callers with externally-computed DAP signatures.
+	// LoadFileDataBlock should still be set when LoadFile is set,
+	// because the hash field requires the unwrapped LFDB.
+	LoadFile []byte
+
+	// LoadImage is the deprecated alias for LoadFileDataBlock.
+	// Kept for backward compatibility with pre-2026 callers.
+	LoadImage []byte
+
+	ModuleAID []byte
+	AppletAID []byte
 
 	SDAID         []byte
 	LoadParams    []byte
@@ -199,6 +234,35 @@ type InstallOptions struct {
 	// install. Errors returned by the callback are not surfaced
 	// — the callback is observation-only.
 	OnLoadProgress func(blockNum, totalBlocks, bytesLoaded, totalBytes int)
+}
+
+// lfdb returns the canonical Load File Data Block: prefer
+// LoadFileDataBlock, fall back to the deprecated LoadImage alias.
+// Returns nil when neither is set.
+func (o *InstallOptions) lfdb() []byte {
+	if len(o.LoadFileDataBlock) != 0 {
+		return o.LoadFileDataBlock
+	}
+	return o.LoadImage
+}
+
+// loadFileBytes returns the wire-format bytes to chunk across
+// LOAD APDUs. If LoadFile is non-empty it's used as-is (validated
+// once via gp.ParseLoadFile to refuse malformed input before any
+// destructive APDU). Otherwise the LFDB is wrapped via
+// gp.BuildPlainLoadFile.
+func (o *InstallOptions) loadFileBytes() ([]byte, error) {
+	if len(o.LoadFile) != 0 {
+		if _, err := gp.ParseLoadFile(o.LoadFile); err != nil {
+			return nil, fmt.Errorf("install: LoadFile parse: %w", err)
+		}
+		return o.LoadFile, nil
+	}
+	lfdb := o.lfdb()
+	if len(lfdb) == 0 {
+		return nil, errors.New("install: LoadFile or LoadFileDataBlock must be non-empty")
+	}
+	return gp.BuildPlainLoadFile(lfdb, gp.LoadFileOptions{})
 }
 
 // defaultLoadBlockSize is conservative (~200 bytes) to fit short-Lc
@@ -260,11 +324,26 @@ func (s *Session) Install(ctx context.Context, opts InstallOptions) error {
 		return err
 	}
 
+	// Compute the wire-format Load File length up front so all
+	// PartialInstallError reports use the same TotalLoadBytes
+	// number. This is the byte count that gets streamed through
+	// LOAD (LFDB plus C4 wrapper, plus any DAP blocks if a
+	// pre-built LoadFile was supplied) — distinct from the LFDB
+	// length, which is what gets hashed for the install hash.
+	loadFile, err := opts.loadFileBytes()
+	if err != nil {
+		// Validation already verified the inputs; reaching this
+		// path means LoadFile parse failed in the helper. Surface
+		// it as a pre-stage error with no card mutation attempted.
+		return fmt.Errorf("install: %w", err)
+	}
+	totalLoadBytes := len(loadFile)
+
 	// Stage 1: INSTALL [for load].
 	if err := s.installForLoad(ctx, opts); err != nil {
 		return &PartialInstallError{
 			Stage:          StageInstallForLoad,
-			TotalLoadBytes: len(opts.LoadImage),
+			TotalLoadBytes: totalLoadBytes,
 			LastBlockSeq:   -1,
 			SW:             swFromError(err),
 			Cause:          err,
@@ -273,13 +352,13 @@ func (s *Session) Install(ctx context.Context, opts InstallOptions) error {
 
 	// Stage 2: LOAD blocks. We track progress so a failure mid-
 	// stream produces an accurate PartialInstallError.
-	bytesLoaded, lastSeq, err := s.loadImageInBlocks(ctx, opts)
+	bytesLoaded, lastSeq, err := s.loadImageInBlocks(ctx, opts, loadFile)
 	if err != nil {
 		return &PartialInstallError{
 			Stage:          StageLoad,
 			LoadFileAID:    bytes.Clone(opts.LoadFileAID),
 			BytesLoaded:    bytesLoaded,
-			TotalLoadBytes: len(opts.LoadImage),
+			TotalLoadBytes: totalLoadBytes,
 			LastBlockSeq:   lastSeq,
 			SW:             swFromError(err),
 			Cause:          err,
@@ -292,8 +371,8 @@ func (s *Session) Install(ctx context.Context, opts InstallOptions) error {
 			Stage:          StageInstallForInstall,
 			LoadFileAID:    bytes.Clone(opts.LoadFileAID),
 			AppletAID:      bytes.Clone(opts.AppletAID),
-			BytesLoaded:    len(opts.LoadImage),
-			TotalLoadBytes: len(opts.LoadImage),
+			BytesLoaded:    totalLoadBytes,
+			TotalLoadBytes: totalLoadBytes,
 			LastBlockSeq:   lastSeq,
 			SW:             swFromError(err),
 			Cause:          err,
@@ -317,8 +396,13 @@ func validateInstallOptions(opts InstallOptions) error {
 			return err
 		}
 	}
-	if len(opts.LoadImage) == 0 {
-		return errors.New("install: LoadImage must be non-empty")
+	if len(opts.LoadFile) == 0 && len(opts.lfdb()) == 0 {
+		return errors.New("install: LoadFile or LoadFileDataBlock must be non-empty")
+	}
+	if len(opts.LoadFile) != 0 {
+		if _, err := gp.ParseLoadFile(opts.LoadFile); err != nil {
+			return fmt.Errorf("install: LoadFile parse: %w", err)
+		}
 	}
 	if len(opts.Privileges) > 3 {
 		return fmt.Errorf("install: Privileges length %d invalid (must be 0..3 bytes)", len(opts.Privileges))
@@ -354,13 +438,17 @@ func (s *Session) installForLoad(ctx context.Context, opts InstallOptions) error
 	return checkSW(resp, "INSTALL [for load]")
 }
 
-// loadImageInBlocks streams the load image to the card in chunks
-// of opts.LoadBlockSize (or the default). Returns the number of
-// bytes successfully written and the last sequence number the
-// card acknowledged. On error, those counts reflect what was
-// confirmed up to the failure — useful in PartialInstallError so
-// the operator knows how far the load progressed.
-func (s *Session) loadImageInBlocks(ctx context.Context, opts InstallOptions) (bytesLoaded, lastSeq int, err error) {
+// loadImageInBlocks streams the wire-format Load File to the card
+// in chunks of opts.LoadBlockSize (or the default). The loadFile
+// argument is the COMPLETE GP Load File (LFDB wrapped in C4 plus
+// any DAP blocks per gp.BuildPlainLoadFile), NOT the raw LFDB —
+// streaming raw LFDB through LOAD was the pre-2026 bug this
+// function's name still reflects. Returns the number of bytes
+// successfully written and the last sequence number the card
+// acknowledged. On error, those counts reflect what was confirmed
+// up to the failure — useful in PartialInstallError so the
+// operator knows how far the load progressed.
+func (s *Session) loadImageInBlocks(ctx context.Context, opts InstallOptions, loadFile []byte) (bytesLoaded, lastSeq int, err error) {
 	blockSize := opts.LoadBlockSize
 	if blockSize <= 0 {
 		blockSize = defaultLoadBlockSize
@@ -379,26 +467,25 @@ func (s *Session) loadImageInBlocks(ctx context.Context, opts InstallOptions) (b
 			"load: block size %d exceeds safe maximum %d bytes (wrapped APDU would exceed %d-byte short-Lc cap after SCP03 LevelFull SM overhead of up to %d bytes); reduce --load-block-size",
 			blockSize, maxLoadBlockPlaintext, shortLcMaxPayload, scp03FullSMOverhead)
 	}
-	image := opts.LoadImage
-	totalBlocks := (len(image) + blockSize - 1) / blockSize
+	totalBlocks := (len(loadFile) + blockSize - 1) / blockSize
 	if totalBlocks == 0 {
-		return 0, -1, errors.New("load: image is empty")
+		return 0, -1, errors.New("load: load file is empty")
 	}
 	if totalBlocks > 256 {
 		// LOAD sequence counter is 1 byte (P2). 256 blocks at
 		// blockSize bytes each gives 256*blockSize byte capacity;
 		// past that, the host must fragment differently or use
 		// a larger blockSize.
-		return 0, -1, fmt.Errorf("load: image too large: %d bytes / %d-byte blocks > 256 LOAD blocks",
-			len(image), blockSize)
+		return 0, -1, fmt.Errorf("load: load file too large: %d bytes / %d-byte blocks > 256 LOAD blocks",
+			len(loadFile), blockSize)
 	}
 
 	lastSeq = -1
 	for seq := 0; seq < totalBlocks; seq++ {
 		start := seq * blockSize
 		end := start + blockSize
-		if end > len(image) {
-			end = len(image)
+		if end > len(loadFile) {
+			end = len(loadFile)
 		}
 		isLast := (seq == totalBlocks-1)
 
@@ -411,7 +498,7 @@ func (s *Session) loadImageInBlocks(ctx context.Context, opts InstallOptions) (b
 			INS:  0xE8,
 			P1:   p1,
 			P2:   byte(seq),
-			Data: image[start:end],
+			Data: loadFile[start:end],
 		}
 		resp, err := s.transmit(ctx, cmd)
 		if err != nil {
@@ -423,7 +510,7 @@ func (s *Session) loadImageInBlocks(ctx context.Context, opts InstallOptions) (b
 		bytesLoaded = end
 		lastSeq = seq
 		if opts.OnLoadProgress != nil {
-			opts.OnLoadProgress(seq, totalBlocks, bytesLoaded, len(image))
+			opts.OnLoadProgress(seq, totalBlocks, bytesLoaded, len(loadFile))
 		}
 	}
 	return bytesLoaded, lastSeq, nil
