@@ -151,6 +151,67 @@ type Policy struct {
 	CustomValidator func(rawCardResponse []byte) (*Result, error)
 }
 
+// Validate checks the Policy for internal consistency. Returns nil
+// for a well-formed policy; returns ErrPolicyConfigConflict (with
+// a context-rich message) when the policy mixes CustomValidator
+// with any of the fields the custom validator path ignores.
+//
+// Callers that consume a Policy (ValidateSCP11Chain and the SCP11
+// Session.Open path) call Validate before doing anything else, so
+// a misconfigured policy fails closed at the configuration boundary
+// rather than producing an opaque session-open error or, worse,
+// silently dropping fields the caller expected to be enforced.
+//
+// The two-mode contract this enforces:
+//
+//   - Built-in mode: CustomValidator is nil. Roots is required;
+//     Intermediates, ExpectedEKUs, AllowedSerials, ExpectedSKI,
+//     RequireP256 are honored.
+//
+//   - Custom mode: CustomValidator is non-nil. All of Roots,
+//     Intermediates, ExpectedEKUs, AllowedSerials, ExpectedSKI,
+//     RequireP256 must be unset (zero / nil / empty). The custom
+//     validator owns the trust decision; setting any of those
+//     fields suggests the caller expected composition that does
+//     not happen.
+//
+// Two invariants ARE enforced regardless of mode (P-256 curve and
+// ECDH-convertibility on the returned key) because they are
+// protocol preconditions, not policy. Validate does not check
+// those — they are checked at validator-result handling time.
+func (p Policy) Validate() error {
+	if p.CustomValidator == nil {
+		return nil // built-in mode: any field combination is fine here; ValidateSCP11Chain checks Roots presence separately.
+	}
+
+	var conflicts []string
+	if p.Roots != nil {
+		conflicts = append(conflicts, "Roots")
+	}
+	if p.Intermediates != nil {
+		conflicts = append(conflicts, "Intermediates")
+	}
+	if len(p.ExpectedEKUs) > 0 {
+		conflicts = append(conflicts, "ExpectedEKUs")
+	}
+	if len(p.AllowedSerials) > 0 {
+		conflicts = append(conflicts, "AllowedSerials")
+	}
+	if len(p.ExpectedSKI) > 0 {
+		conflicts = append(conflicts, "ExpectedSKI")
+	}
+	if p.RequireP256 != nil {
+		conflicts = append(conflicts, "RequireP256")
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: CustomValidator is set alongside %v; these fields are silently ignored when CustomValidator is non-nil per Policy doc. "+
+		"To use the built-in chain validator with these fields, leave CustomValidator nil. "+
+		"To use the custom validator, leave the listed fields zero-valued (the custom validator owns the trust decision in full)",
+		ErrPolicyConfigConflict, conflicts)
+}
+
 // Result holds the output of a successful chain validation.
 type Result struct {
 	// Leaf is the validated leaf certificate.
@@ -166,13 +227,14 @@ type Result struct {
 
 // Errors returned by validation.
 var (
-	ErrNoRoots        = errors.New("trust: no root certificates configured")
-	ErrNoCertificates = errors.New("trust: no certificates to validate")
-	ErrChainInvalid   = errors.New("trust: certificate chain validation failed")
-	ErrWrongCurve     = errors.New("trust: leaf certificate key is not P-256")
-	ErrWrongKeyType   = errors.New("trust: leaf certificate key is not ECDSA")
-	ErrSerialMismatch = errors.New("trust: leaf certificate serial not in allowed list")
-	ErrSKIMismatch    = errors.New("trust: leaf certificate SKI does not match expected value")
+	ErrNoRoots              = errors.New("trust: no root certificates configured")
+	ErrNoCertificates       = errors.New("trust: no certificates to validate")
+	ErrChainInvalid         = errors.New("trust: certificate chain validation failed")
+	ErrWrongCurve           = errors.New("trust: leaf certificate key is not P-256")
+	ErrWrongKeyType         = errors.New("trust: leaf certificate key is not ECDSA")
+	ErrSerialMismatch       = errors.New("trust: leaf certificate serial not in allowed list")
+	ErrSKIMismatch          = errors.New("trust: leaf certificate SKI does not match expected value")
+	ErrPolicyConfigConflict = errors.New("trust: policy configuration conflict")
 )
 
 // ValidateSCP11Chain validates a certificate chain for SCP11 trust
@@ -187,6 +249,9 @@ var (
 // If validation fails, the error describes why. The caller must not
 // use any certificate material from a failed validation.
 func ValidateSCP11Chain(certs []*x509.Certificate, policy Policy) (*Result, error) {
+	if err := policy.Validate(); err != nil {
+		return nil, err
+	}
 	if policy.Roots == nil || policy.Roots.Equal(x509.NewCertPool()) {
 		return nil, ErrNoRoots
 	}

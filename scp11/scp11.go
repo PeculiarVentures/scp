@@ -860,6 +860,17 @@ func (s *Session) legacyExtractAndStoreKey(data []byte) error {
 //   - Otherwise: parse as X.509, run ValidateSCP11Chain (P-256, chain,
 //     EKU, serials, SKI, time), use the validated leaf's public key.
 func (s *Session) validateCardCertChain(data []byte) error {
+	// Reject misconfigured policies at the consumption boundary.
+	// trust.Policy.Validate catches the silent foot-gun where a
+	// caller sets CustomValidator alongside Roots/EKUs/etc and
+	// expects composition that doesn't happen — those fields are
+	// ignored under CustomValidator and the silent ignore was
+	// flagged by external review. Calling Validate here means the
+	// session fails open with a clear error rather than dropping
+	// trust constraints the caller expected to be enforced.
+	if err := s.config.CardTrustPolicy.Validate(); err != nil {
+		return fmt.Errorf("trust policy: %w", err)
+	}
 	if s.config.CardTrustPolicy.CustomValidator != nil {
 		result, err := s.config.CardTrustPolicy.CustomValidator(data)
 		if err != nil {
