@@ -425,7 +425,26 @@ func isZeroSecret(secret []byte) bool {
 //
 // Returns certificates in the order they appear (leaf-last per
 // Yubico convention).
-func parseCertsFromStore(data []byte) ([]*x509.Certificate, error) {
+//
+// strict controls how parse failures on individual DER blobs are
+// handled:
+//
+//   - strict=false (legacy default): blobs that fail
+//     x509.ParseCertificate are silently skipped. This preserves
+//     compatibility with cards that mix X.509 and GP-proprietary
+//     entries (the proprietary entries fail X.509 parse and the
+//     parser proceeds with whichever entries did parse).
+//
+//   - strict=true: any parse failure returns an error naming the
+//     index and leading bytes of the failed entry. This is the
+//     production-trust-policy-enforcement mode for deployments
+//     that ONLY expect X.509 entries, where a malformed entry
+//     alongside a valid one would be a real anomaly the operator
+//     needs to see.
+//
+// Set via Policy.RejectUnparseableCertEntries at the SCP11 call
+// site.
+func parseCertsFromStore(data []byte, strict bool) ([]*x509.Certificate, error) {
 	var derCerts [][]byte
 
 	// Try TLV parsing first.
@@ -462,11 +481,26 @@ func parseCertsFromStore(data []byte) ([]*x509.Certificate, error) {
 
 	// Parse all DER blobs into x509.Certificate objects.
 	var certs []*x509.Certificate
-	for _, der := range derCerts {
+	for i, der := range derCerts {
 		cert, err := x509.ParseCertificate(der)
 		if err != nil {
-			// Try GP proprietary format — not an X.509 cert,
-			// skip it for chain validation purposes.
+			if strict {
+				// Production-trust-policy mode: parse failures
+				// are anomalies, not compatibility cases. Surface
+				// the index and leading bytes (up to 16) so the
+				// operator can identify whether the failure is a
+				// transport corruption, a card-vendor quirk, or
+				// a genuinely malformed cert.
+				preview := der
+				if len(preview) > 16 {
+					preview = preview[:16]
+				}
+				return nil, fmt.Errorf("parse cert entry %d (len=%d, leading bytes %X): %w",
+					i, len(der), preview, err)
+			}
+			// Compatibility mode: try GP proprietary format —
+			// not an X.509 cert, skip it for chain validation
+			// purposes.
 			continue
 		}
 		certs = append(certs, cert)

@@ -101,6 +101,45 @@ type Policy struct {
 	// (since SCP11 mandates P-256).
 	RequireP256 *bool
 
+	// RejectUnparseableCertEntries, when true, makes the SCP11
+	// certificate-store parser fail closed on any DER blob that
+	// does not parse as a valid X.509 certificate. The default
+	// (false) preserves the legacy compatibility-first behavior:
+	// individual blobs that fail x509.ParseCertificate are
+	// silently skipped, and the chain proceeds with whichever
+	// certs did parse.
+	//
+	// Compatibility-first is reasonable in deployments that mix
+	// X.509 and GP-proprietary entries (a common pattern on
+	// JCOP-style cards): the proprietary entry parses as garbage
+	// to the X.509 parser, the X.509 parser skips it, and the
+	// remaining valid certs validate the chain. But it is too
+	// permissive for deployments that ONLY expect X.509: a card
+	// that returns a malformed entry alongside a valid one would
+	// silently appear to validate via a shorter path, and the
+	// caller would not see the malformed entry as anomalous.
+	//
+	// Strict deployments (production trust-policy enforcement,
+	// regulated PKI, CA-driven cert stores) should set this to
+	// true so any parse failure surfaces immediately. Permissive
+	// deployments (heterogeneous JCOP-style cards, where vendor-
+	// specific blobs coexist with X.509 chain entries) should
+	// leave it false.
+	//
+	// The error returned on a parse failure under strict mode
+	// names which DER blob (by index in the parsed sequence and
+	// by leading bytes) failed and what the parse error was.
+	// This is enough for an operator to identify whether the
+	// failure is a transport-level corruption, a card vendor
+	// quirk, or a genuinely malformed cert.
+	//
+	// Has no effect when CustomValidator is set: in that mode
+	// the built-in parser is not called and the custom validator
+	// owns the entire decision (including how to handle blobs it
+	// doesn't recognize). Setting both is a configuration error
+	// and Policy.Validate refuses it.
+	RejectUnparseableCertEntries bool
+
 	// CustomValidator, if non-nil, is called instead of the built-in
 	// X.509 chain validator. The card response bytes (the BF21 cert
 	// store, exactly as returned by GET DATA) are passed in; the
@@ -202,6 +241,9 @@ func (p Policy) Validate() error {
 	}
 	if p.RequireP256 != nil {
 		conflicts = append(conflicts, "RequireP256")
+	}
+	if p.RejectUnparseableCertEntries {
+		conflicts = append(conflicts, "RejectUnparseableCertEntries")
 	}
 	if len(conflicts) == 0 {
 		return nil

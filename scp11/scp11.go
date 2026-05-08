@@ -897,7 +897,7 @@ func (s *Session) validateCardCertChain(data []byte) error {
 		return nil
 	}
 
-	certs, err := parseCertsFromStore(data)
+	certs, err := parseCertsFromStore(data, s.config.CardTrustPolicy.RejectUnparseableCertEntries)
 	if err != nil {
 		return fmt.Errorf("parse card certificates: %w", err)
 	}
