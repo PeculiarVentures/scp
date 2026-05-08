@@ -213,29 +213,6 @@ type Config struct {
 	// to the SD's cert chain before extracting the leaf pubkey).
 	PreverifiedCardStaticPublicKey *ecdh.PublicKey
 
-	// HostID is the optional OCE identifier included in the KDF shared
-	// info per GP SCP11 §3.1.2. If set, it is appended to the shared
-	// info as a length-value pair: len(HostID) || HostID.
-	//
-	// Expansion target: the KDF shared-info path appends HostID
-	// correctly, but the wire-side encoding is not yet wired — the
-	// AUTHENTICATE command does not set the SCP11 parameter bit
-	// indicating identifiers are included, and does not include the
-	// tag-0x84 Host ID in the control reference template. Setting
-	// this field today would derive a different key schedule than
-	// the card, so Open fails closed when it is non-empty. Completing
-	// the implementation covers the AUTHENTICATE parameter bit, tag
-	// 0x84, and matching KDF shared-info behavior end-to-end.
-	HostID []byte
-
-	// CardGroupID is the optional card group identifier for SCP11c.
-	// Included in the KDF shared info after HostID if set.
-	//
-	// Expansion target: same caveat as HostID — the KDF inclusion is
-	// wired but the AUTHENTICATE parameter bit and tag 0x84 are not.
-	// Open rejects sessions with this field set.
-	CardGroupID []byte
-
 	// SecurityLevel controls which secure messaging operations to apply.
 	// Default: full security (C-MAC + C-DEC + R-MAC + R-ENC).
 	SecurityLevel channel.SecurityLevel
@@ -411,15 +388,6 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 	if cfg.SecurityLevel != channel.LevelFull {
 		return nil, fmt.Errorf("%w: SCP11 currently only supports full security level (C-MAC|C-DEC|R-MAC|R-ENC); "+
 			"the key usage qualifier 0x3C negotiated with the card requires it", ErrInvalidConfig)
-	}
-
-	// HostID and CardGroupID are partially implemented: the KDF
-	// appends them to SharedInfo, but AUTHENTICATE doesn't set the
-	// SCP11 parameter bit nor include tag 0x84. Opening with these
-	// set would silently derive different keys than the card. Fail
-	// closed until the wire side is implemented.
-	if len(cfg.HostID) > 0 || len(cfg.CardGroupID) > 0 {
-		return nil, fmt.Errorf("%w: SCP11 HostID/CardGroupID identifiers are not fully implemented (KDF inclusion is wired but the AUTHENTICATE parameter bit and tag 0x84 are not); leave both nil", ErrInvalidConfig)
 	}
 
 	// Trust-posture guard. Caller must declare one of:
@@ -1234,10 +1202,14 @@ func (s *Session) performKeyAgreement(ctx context.Context) error {
 	}
 
 	// Derive session keys.
-	// GP SCP11 §3.1.2: SharedInfo = keyUsage || keyType || keyLength
-	// Optionally followed by: hostIDLen || hostID || cardGroupIDLen || cardGroupID
-	keys, err := kdf.DeriveSessionKeysFromSharedSecrets(shSee, shSes,
-		s.config.HostID, s.config.CardGroupID)
+	// GP SCP11 §3.1.2: SharedInfo = keyUsage || keyType || keyLength.
+	//
+	// HostID / CardGroupID identifiers are not currently part of
+	// scp11.Config (the public API does not advertise them; the
+	// wire-side encoding — AUTHENTICATE parameter bit, tag 0x84 —
+	// is not implemented). Pass nil/nil here so SharedInfo matches
+	// the basic-profile shape every current real-card flow uses.
+	keys, err := kdf.DeriveSessionKeysFromSharedSecrets(shSee, shSes, nil, nil)
 	if err != nil {
 		return fmt.Errorf("derive session keys: %w", err)
 	}

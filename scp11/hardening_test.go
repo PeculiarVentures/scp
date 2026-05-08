@@ -8,47 +8,6 @@ import (
 	"github.com/PeculiarVentures/scp/mockcard"
 )
 
-// TestOpen_RejectsHostID confirms HostID is rejected at Open. The
-// field is partially implemented (KDF SharedInfo includes it, but
-// AUTHENTICATE doesn't set the SCP11 parameter bit nor include tag
-// 0x84). Setting it would silently derive different keys than the
-// card. Until the wire side is implemented, fail closed.
-func TestOpen_RejectsHostID(t *testing.T) {
-	card, err := mockcard.New()
-	if err != nil {
-		t.Fatalf("mockcard.New: %v", err)
-	}
-	cfg := testYubiKeySCP11bConfig()
-	cfg.InsecureSkipCardAuthentication = true
-	cfg.HostID = []byte("test-host-id")
-	_, err = Open(context.Background(), card.Transport(), cfg)
-	if err == nil {
-		t.Fatal("Open with HostID set should fail until full impl")
-	}
-	if !strings.Contains(err.Error(), "HostID") {
-		t.Errorf("error should mention HostID; got: %v", err)
-	}
-}
-
-// TestOpen_RejectsCardGroupID confirms the CardGroupID variant of
-// the same guardrail.
-func TestOpen_RejectsCardGroupID(t *testing.T) {
-	card, err := mockcard.New()
-	if err != nil {
-		t.Fatalf("mockcard.New: %v", err)
-	}
-	cfg := testYubiKeySCP11bConfig()
-	cfg.InsecureSkipCardAuthentication = true
-	cfg.CardGroupID = []byte("test-cg-id")
-	_, err = Open(context.Background(), card.Transport(), cfg)
-	if err == nil {
-		t.Fatal("Open with CardGroupID set should fail until full impl")
-	}
-	if !strings.Contains(err.Error(), "CardGroupID") {
-		t.Errorf("error should mention CardGroupID; got: %v", err)
-	}
-}
-
 // TestOpen_SCP11b_RequiresReceiptByDefault confirms the new strict
 // default: SCP11b sessions against a card that omits the receipt
 // fail closed unless InsecureAllowSCP11bWithoutReceipt is set.
