@@ -128,12 +128,44 @@ func TransmitWithChaining(ctx context.Context, t Transport, cmd *apdu.Command) (
 	return nil, nil
 }
 
-// TransmitCollectAll sends a command and handles GET RESPONSE chaining
-// (status 61xx) to collect the full response data.
+// TransmitCollectAll sends a command and handles two ISO 7816-4 /
+// GP-spec "data delivery" status-word patterns:
+//
+//   - SW=6Cxx ("wrong Le; correct length is xx"). Retry the SAME
+//     command with Le=xx as the card hinted. Hint byte 0x00 means
+//     256 (max short-form Le).
+//   - SW=61xx ("more data available"). Walk the GET RESPONSE chain
+//     until a non-61xx terminator. Concatenated body is returned.
+//
+// 6Cxx and 61xx can compose; the helper handles that by performing
+// the Le-corrected retry first, then falling through to the 61xx
+// chain loop on the retry's response.
+//
+// Also applies the MaxGetResponseIterations and
+// MaxCollectedResponseBytes safety bounds against runaway cards.
 func TransmitCollectAll(ctx context.Context, t Transport, cmd *apdu.Command) (*apdu.Response, error) {
 	resp, err := t.Transmit(ctx, cmd)
 	if err != nil {
 		return nil, err
+	}
+
+	// 6Cxx Le-retry: the card is telling us the request had the
+	// wrong Le. Retry the SAME command with the corrected Le. Per
+	// ISO 7816-4 §5.3.4 the hint byte 0x00 means 256, not zero.
+	// This is a one-shot retry; if the card answers the retry with
+	// 6Cxx again it is misbehaving, and we fall through to surface
+	// that SW rather than looping.
+	if resp.SW1 == 0x6C {
+		retry := *cmd
+		if resp.SW2 == 0x00 {
+			retry.Le = 256
+		} else {
+			retry.Le = int(resp.SW2)
+		}
+		resp, err = t.Transmit(ctx, &retry)
+		if err != nil {
+			return nil, fmt.Errorf("6Cxx Le-retry: %w", err)
+		}
 	}
 
 	var allData []byte
