@@ -34,6 +34,9 @@ func main() {
 	client, err := scpgrpc.Dial(ctx, scpgrpc.DialOptions{
 		Target: *target,
 		Reader: *reader,
+		// Example/dev rig: dial without TLS. Production deployments
+		// pass GRPCDialOptions with mTLS credentials instead.
+		AllowInsecure: true,
 	})
 	if err != nil {
 		log.Fatalf("Dial: %v", err)
