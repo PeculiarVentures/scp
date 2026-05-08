@@ -284,8 +284,14 @@ func Open(ctx context.Context, t transport.Transport, cfg *Config) (*Session, er
 
 	// Step 1: SELECT the target applet (whose SCP03 key set we
 	// authenticate against). Skipped if SelectAID is nil.
+	//
+	// Routed through apdu.TransmitWithChaining so cards that respond
+	// with SW=61xx (FCI fetched separately via GET RESPONSE) get
+	// their FCI assembled transparently. Same bug class as PR #144 /
+	// #146 / #150; this is the parallel fix for the SCP03 plaintext
+	// SELECT, which sits ahead of every SCP03 handshake.
 	if len(cfg.SelectAID) > 0 {
-		resp, err := t.Transmit(ctx, apdu.NewSelect(cfg.SelectAID))
+		resp, err := apdu.TransmitWithChaining(ctx, t, apdu.NewSelect(cfg.SelectAID))
 		if err != nil {
 			return nil, fmt.Errorf("select applet: %w", err)
 		}
