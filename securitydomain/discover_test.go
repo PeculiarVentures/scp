@@ -421,3 +421,90 @@ func TestDiscoverISD_GemPlusCardManagerAID(t *testing.T) {
 		t.Errorf("matched AID = %X, want %X (GemPlus Card Manager)", match.AID, gemPlusAID)
 	}
 }
+
+// chainedSelectTransport models a card that answers SELECT to a
+// specific AID with SW=61xx (FCI is xx bytes, fetch with GET
+// RESPONSE), then returns the FCI on the GET RESPONSE call. This
+// is the behavior some Thales/Gemalto cards (notably the GP 2.1.1
+// SafeNet eToken family with ATR 3B7F96000080318065B0850300EF120F)
+// emit when the host sends SELECT without an Le=00 trailer or when
+// the underlying PC/SC layer doesn't auto-follow the chain. Pre-
+// fix the SELECT path used t.Transmit directly and reported SW=6167
+// as a SELECT failure; post-fix it routes through
+// transport.TransmitCollectAll so the chain is followed
+// transparently and the FCI is assembled into one Response.
+type chainedSelectTransport struct {
+	matchAID     []byte
+	fci          []byte
+	getRespCalls int
+	selectCalls  int
+}
+
+func (t *chainedSelectTransport) Transmit(_ context.Context, cmd *apdu.Command) (*apdu.Response, error) {
+	switch cmd.INS {
+	case 0xA4: // SELECT
+		t.selectCalls++
+		if !bytes.Equal(cmd.Data, t.matchAID) {
+			return &apdu.Response{SW1: 0x6A, SW2: 0x82}, nil
+		}
+		// Real Thales card behavior: SW=61<len> indicating "FCI is
+		// <len> bytes, fetch with GET RESPONSE." Length is the
+		// length of t.fci; cap at 0xFF so the encoding fits SW2.
+		l := len(t.fci)
+		if l > 0xFF {
+			l = 0xFF
+		}
+		return &apdu.Response{SW1: 0x61, SW2: byte(l)}, nil
+	case 0xC0: // GET RESPONSE
+		t.getRespCalls++
+		// Return the FCI in one chunk, terminated with 9000.
+		return &apdu.Response{Data: append([]byte(nil), t.fci...), SW1: 0x90, SW2: 0x00}, nil
+	default:
+		return &apdu.Response{SW1: 0x6D, SW2: 0x00}, nil
+	}
+}
+
+func (*chainedSelectTransport) TransmitRaw(_ context.Context, _ []byte) ([]byte, error) {
+	return nil, errors.New("not implemented")
+}
+func (*chainedSelectTransport) Close() error { return nil }
+func (*chainedSelectTransport) TrustBoundary() transport.TrustBoundary {
+	return transport.TrustBoundaryUnknown
+}
+
+// TestDiscoverISD_Follows61xxChainOnSelect is the regression for
+// the SELECT-with-61xx response pattern observed against a Thales
+// GP 2.1.1 card during ML840 hardware investigation. Pre-fix
+// scpctl reported SW=6167 as a SELECT failure and aborted; post-fix
+// the chain is followed and the SD opens cleanly.
+func TestDiscoverISD_Follows61xxChainOnSelect(t *testing.T) {
+	gemAID, _ := hex.DecodeString("A000000018434D00")
+	// Synthetic 0x67-byte FCI body. Content doesn't matter for
+	// this test; only the assembly path matters.
+	fci := bytes.Repeat([]byte{0xCC}, 0x67)
+
+	tt := &chainedSelectTransport{
+		matchAID: gemAID,
+		fci:      fci,
+	}
+
+	candidates := []gp.ISDCandidate{
+		{AID: []byte{0xA0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00}}, // GP default, won't match
+		{AID: gemAID}, // matches with 61xx
+	}
+
+	sd, picked, err := securitydomain.DiscoverISD(context.Background(), tt, candidates, nil)
+	if err != nil {
+		t.Fatalf("DiscoverISD should follow 61xx chain on SELECT; got err = %v", err)
+	}
+	defer sd.Close()
+	if !bytes.Equal(picked.AID, gemAID) {
+		t.Errorf("picked AID = %X, want %X", picked.AID, gemAID)
+	}
+	if tt.selectCalls != 2 {
+		t.Errorf("expected 2 SELECT calls (one 6A82 then one 61xx); got %d", tt.selectCalls)
+	}
+	if tt.getRespCalls != 1 {
+		t.Errorf("expected 1 GET RESPONSE call following the 61xx; got %d", tt.getRespCalls)
+	}
+}
