@@ -115,6 +115,24 @@ func cmdPIVInfo(ctx context.Context, env *runEnv, args []string) error {
 		data.Notes = append(data.Notes,
 			"standard-piv profile: identity detection and capability classification verified against non-YubiKey hardware; cryptographic operations (PIN verify, mgmt-key auth, GENERATE KEY, certificate operations, attestation) not yet hardware-verified against a non-YubiKey card. See docs/piv-compatibility.md.")
 	}
+
+	// ROCA (CVE-2017-15361 / Yubico YSA-2017-01) affects YubiKey
+	// firmware 4.2.6 through 4.3.4 inclusive. RSA keys generated
+	// on-card in this firmware range are factorable in practice.
+	// Surface this on the operator's first contact with the card,
+	// not buried in a doc, because the failure mode is silent: a
+	// 'piv info' that doesn't mention it will let an operator
+	// proceed to GENERATE KEY (RSA) and produce a key that looks
+	// fine but is compromised. ECC keys and imported RSA keys are
+	// unaffected, so the disclosure has to be precise about scope.
+	if probeRes.YubiKeyFW != nil && probeRes.YubiKeyFW.IsROCAAffected() {
+		data.Notes = append(data.Notes,
+			fmt.Sprintf("YubiKey firmware %s is in the ROCA-affected range (4.2.6 through 4.3.4 inclusive, "+
+				"per Yubico Security Advisory YSA-2017-01 / CVE-2017-15361). RSA keys GENERATED on-card by "+
+				"this firmware are factorable in practice. ECC keys (P-256, P-384) and RSA keys IMPORTED "+
+				"onto the card are unaffected. Yubico fixed the issue in firmware 4.3.5+.",
+				probeRes.YubiKeyFW))
+	}
 	report.Data = data
 	report.Pass("capabilities", strings.Join(data.Capabilities, ", "))
 	for _, note := range data.Notes {

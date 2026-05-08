@@ -24,6 +24,12 @@ The YubiKey rows are verified against retail YubiKey 5 series tokens via `cmd/sc
 
 Most recent end-to-end hardware verification: **YubiKey 5C NFC firmware 5.7.4, May 2026**. The full `scpctl piv provision --attest` flow (open SCP11b vs PIV → MGMT-KEY AUTH (AES-192) → VERIFY PIN → GENERATE KEY (ECC P-256) → ATTESTATION) succeeded end-to-end including the chained-response GET RESPONSE path that ATTEST exercises. The `scpctl probe` and `scpctl sd keys list` profile auto-detection landed on `yubikey-sd` via `securitydomain/profile.classifyByCRD`, which requires three signals together: the GP-standard Card_IDS OID `1.2.840.114283.3` present in the Card Recognition Data, no `CardChipDetailsOID` (YubiKey CRD doesn't tag a chip platform; cards that do — e.g. SafeNet eToken Fusion emitting JavaCard v3 `1.3.6.1.4.1.42.2.110.1.3` — fall through to `standard-sd`), and SCP11 advertised in the SCPs list (YubiKey 5.7+ ships `SCP03 i=0x60` and `SCP11 i=0x0D86`). The earlier classifier matched on the Card_IDS OID alone and was tightened after a non-YubiKey card was observed emitting the same OID.
 
+## ROCA (CVE-2017-15361) on YubiKey 4.2.6 — 4.3.4
+
+Firmware versions in this range ship the Infineon RSALib build vulnerable to the Return Of the Coppersmith Attack. RSA keys *generated on-card* in this firmware range are factorable in practice. ECC keys (P-256, P-384) and RSA keys *imported* onto the card are unaffected. Yubico fixed the issue in firmware 4.3.5+ per Security Advisory YSA-2017-01.
+
+`scpctl piv info` surfaces this as a `note` in the report when the probe identifies an affected firmware version, before any RSA key-generation operation can run. The disclosure scope is precise: it names the affected operation (`GENERATE on-card`), the unaffected algorithm (ECC), the unaffected key-installation path (import), and the firmware that fixed the issue. The `YubiKeyVersion.IsROCAAffected()` helper in `piv/profile` is exposed for callers that want to gate operations programmatically. Hardware-verified against a YubiKey 4 firmware 4.3.1 in May 2026.
+
 ## What `spec` means for the Standard PIV row
 
 The library emits the SP 800-73-4 instruction subset for Standard PIV operations (SELECT, VERIFY, CHANGE REFERENCE DATA, RESET RETRY COUNTER, GENERATE ASYMMETRIC KEY PAIR, GENERAL AUTHENTICATE, PUT DATA, GET DATA). The host-side capability gate refuses YubiKey-proprietary instructions under the Standard PIV profile, so a Standard PIV card cannot be issued an INS byte it does not understand.
