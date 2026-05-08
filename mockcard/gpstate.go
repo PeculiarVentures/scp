@@ -4,6 +4,7 @@ import (
 	"bytes"
 
 	"github.com/PeculiarVentures/scp/apdu"
+	"github.com/PeculiarVentures/scp/gp"
 	"github.com/PeculiarVentures/scp/tlv"
 )
 
@@ -309,6 +310,25 @@ func (g *GPState) handleLoad(cmd *apdu.Command) *apdu.Response {
 
 	if !last {
 		return mkSW(0x9000)
+	}
+
+	// On the final block, validate the accumulated bytes as a
+	// well-formed GP Load File per GP §11.6.2: optional E2 DAP
+	// blocks followed by exactly one C4 LFDB. Pre-2026 the
+	// mockcard accepted any accumulated bytes and called it
+	// loaded — that mirrored the host bug of streaming raw LFDB
+	// through LOAD. Real GP cards reject the raw shape; this
+	// validation makes the mockcard match real-card strictness
+	// so the host bug surfaces in unit tests rather than only
+	// against hardware.
+	parsed, err := gp.ParseLoadFile(g.loadCtx.bytesLoaded)
+	if err != nil {
+		g.loadCtx = nil
+		return mkSW(0x6A80)
+	}
+	if len(parsed.DataBlock) == 0 {
+		g.loadCtx = nil
+		return mkSW(0x6A80)
 	}
 
 	entry := MockRegistryEntry{
