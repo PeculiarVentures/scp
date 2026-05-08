@@ -331,3 +331,66 @@ func TestCapabilities_Helpers(t *testing.T) {
 		t.Error("expected SupportsMgmtKeyAlg(3DES) false")
 	}
 }
+
+// TestProbe_Follows61xxChainOnSelect is the regression for the
+// PIV SELECT 61xx response shape observed against a GoldKey
+// Security PIV Token (ATR 3B941881B1807D1F0319C80050DC). Pre-fix,
+// SELECT AID PIV returning SW=611E was reported as
+// ErrNoPIVApplet because the bare Transmit didn't follow the
+// chain. Post-fix, apdu.TransmitWithChaining fetches the 30-byte
+// application property template via GET RESPONSE and Probe parses
+// it normally. Same bug class as PR #144 / #146 in the Security
+// Domain SELECT path.
+func TestProbe_Follows61xxChainOnSelect(t *testing.T) {
+	// Simulate a GoldKey-style response: SELECT AID PIV responds
+	// with SW=611E (30 bytes available); GET RESPONSE returns a
+	// minimal but parseable application property template (tag
+	// 0x61 outer, tag 5FC107 version 010000 inner, padded to 30
+	// bytes with extra 5FC102 application label bytes). The
+	// content doesn't matter for the regression — only that the
+	// chain is followed and Probe returns success rather than
+	// ErrNoPIVApplet.
+	appPropTemplate := []byte{
+		0x61, 0x1C, // outer tag, length 28
+		0x5F, 0xC1, 0x07, 0x03, 0x01, 0x00, 0x00, // PIV version 1.0.0
+		0x5F, 0xC1, 0x02, 0x10, // application label, length 16
+		'P', 'I', 'V', ' ', 'C', 'a', 'r', 'd', // 8 bytes
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // pad to 16
+		// total payload: 2 + 7 + 4 + 16 = 29 bytes? Let me count
+		// outer header (2) + 5FC107 TLV (7) + 5FC102 TLV (20) = 29.
+		// Add one filler byte to hit 30 to match SW=611E.
+		0x00,
+	}
+	tx := &fakeTransmitter{
+		responses: []apduPair{
+			// SELECT AID PIV (full AID) returns SW=611E.
+			{resp: &apdu.Response{Data: nil, SW1: 0x61, SW2: 0x1E}},
+			// GET RESPONSE Le=0x1E returns the 30-byte template
+			// with terminal 9000.
+			{resp: &apdu.Response{Data: appPropTemplate, SW1: 0x90, SW2: 0x00}},
+			// GET VERSION not supported (this isn't a YubiKey).
+			{resp: &apdu.Response{Data: nil, SW1: 0x6D, SW2: 0x00}},
+		},
+	}
+	res, err := Probe(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("Probe should follow 61xx chain; got err = %v", err)
+	}
+	if res.Profile.Name() != "standard-piv" {
+		t.Errorf("Profile.Name = %q, want standard-piv", res.Profile.Name())
+	}
+	// Confirm the chain was actually followed: SELECT + GET
+	// RESPONSE + GET VERSION = 3 APDUs.
+	if len(tx.calls) != 3 {
+		t.Fatalf("expected 3 APDUs (SELECT + GET RESPONSE + GET VERSION); got %d", len(tx.calls))
+	}
+	if tx.calls[0].INS != 0xA4 {
+		t.Errorf("first APDU INS=%02X, want 0xA4 (SELECT)", tx.calls[0].INS)
+	}
+	if tx.calls[1].INS != 0xC0 {
+		t.Errorf("second APDU INS=%02X, want 0xC0 (GET RESPONSE)", tx.calls[1].INS)
+	}
+	if tx.calls[2].INS != 0xFD {
+		t.Errorf("third APDU INS=%02X, want 0xFD (GET VERSION)", tx.calls[2].INS)
+	}
+}

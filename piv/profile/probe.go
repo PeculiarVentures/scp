@@ -143,6 +143,18 @@ func Probe(ctx context.Context, tx Transmitter) (*ProbeResult, error) {
 // and returns the response. Transport errors are wrapped; status-
 // word interpretation is the caller's job because Probe wants to
 // branch on 6A82 specifically before treating it as terminal.
+//
+// SELECT is sent through apdu.TransmitWithChaining rather than the
+// bare tx.Transmit, so cards that respond to SELECT with SW=61xx
+// ("application property template is xx bytes, fetch with GET
+// RESPONSE") get their template assembled transparently. Real-world
+// example: a GoldKey Security PIV Token (ATR
+// 3B941881B1807D1F0319C80050DC) returns SW=611E to SELECT AID
+// PIV. Pre-fix the probe interpreted that as "no PIV applet found"
+// and aborted; post-fix the chain is followed and the 30-byte
+// application property template (tag 5FC107 version, etc.) is
+// returned for parsing. Same bug class as PR #144 / #146 in the
+// Security Domain SELECT path.
 func selectPIVApplet(ctx context.Context, tx Transmitter, aid []byte) (*apdu.Response, error) {
 	cmd := &apdu.Command{
 		CLA:  0x00,
@@ -152,7 +164,7 @@ func selectPIVApplet(ctx context.Context, tx Transmitter, aid []byte) (*apdu.Res
 		Data: aid,
 		Le:   0,
 	}
-	resp, err := tx.Transmit(ctx, cmd)
+	resp, err := apdu.TransmitWithChaining(ctx, tx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("piv/profile: SELECT AID PIV transport failed: %w", err)
 	}
