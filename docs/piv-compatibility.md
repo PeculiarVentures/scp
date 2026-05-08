@@ -30,7 +30,7 @@ The library emits the SP 800-73-4 instruction subset for Standard PIV operations
 
 Status notes for the Standard PIV row's individual cells:
 
-- **SELECT: verified.** `scpctl piv info` was driven against a GoldKey Security PIV Token (ATR `3B941881B1807D1F0319C80050DC`) in May 2026. The probe correctly classified the card as `standard-piv`, the SELECT response decoded as a spec-conformant application property template (PIX `A000000308000010000100`), and the capability classifier produced `RSA-2048, ECC P-256, ECC P-384`. This run satisfies step 1 of the promotion checklist below; the remaining `spec` cells need steps 2-4.
+- **SELECT: verified.** `scpctl piv info` was driven against two non-YubiKey PIV cards in May 2026: a GoldKey Security PIV Token (ATR `3B941881B1807D1F0319C80050DC`) and a Feitian-built Taglio PIVKey (ATR `3B9F958131FE9F006646530510001171DF000000000002`). On both cards the probe correctly classified the applet as `standard-piv`, the SELECT response decoded as a spec-conformant SP 800-73-4 §3.1.3 application property template with PIX `A000000308000010000100`, and the capability classifier produced `RSA-2048, ECC P-256, ECC P-384`. The two cards exercise different application property template shapes (the GoldKey echoes the full 11-byte PIX in the coexistent tag allocation authority slot; the Feitian uses a 5-byte RID-only there), giving cross-vendor coverage of the parser. These runs satisfy step 1 of the promotion checklist below; the remaining `spec` cells need steps 2-4.
 - **PIN ops, Generate, Put cert: spec.** The wire bytes are spec-conformant by code review and CI mock test coverage but have not been driven against non-YubiKey hardware end to end.
 
 What is **not** yet validated:

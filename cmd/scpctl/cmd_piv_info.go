@@ -104,12 +104,13 @@ func cmdPIVInfo(ctx context.Context, env *runEnv, args []string) error {
 	}
 	// Standard PIV identity detection and capability classification
 	// are spec-implemented and have been hardware-verified against
-	// a non-YubiKey card (GoldKey Security PIV Token, May 2026).
-	// Cryptographic operations (PIN verify, mgmt-key auth,
-	// GENERATE KEY, certificate operations, attestation) are not
-	// yet hardware-verified against a non-YubiKey card. Surface
-	// the precise scope in the machine output and human report so
-	// it does not require consulting docs/piv-compatibility.md.
+	// non-YubiKey cards (GoldKey Security PIV Token, Feitian-built
+	// Taglio PIVKey; both May 2026). Cryptographic operations
+	// (PIN verify, mgmt-key auth, GENERATE KEY, certificate
+	// operations, attestation) are not yet hardware-verified
+	// against a non-YubiKey card. Surface the precise scope in
+	// the machine output and human report so it does not require
+	// consulting docs/piv-compatibility.md.
 	if caps.StandardPIV {
 		data.Notes = append(data.Notes,
 			"standard-piv profile: identity detection and capability classification verified against non-YubiKey hardware; cryptographic operations (PIN verify, mgmt-key auth, GENERATE KEY, certificate operations, attestation) not yet hardware-verified against a non-YubiKey card. See docs/piv-compatibility.md.")

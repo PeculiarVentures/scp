@@ -461,3 +461,84 @@ func TestProbe_GoldKey_RealBytesSelectResponse(t *testing.T) {
 			res.PIVVersion)
 	}
 }
+
+// TestProbe_FeitianPIVKey_RealBytesSelectResponse pins the
+// application property template captured from a Feitian-built
+// Taglio PIVKey (ATR 3B9F958131FE9F006646530510001171DF000000000002,
+// reader "FeiTian.Ltd USB Token 1.00") on May 2026. This is the
+// second non-YubiKey real-bytes PIV SELECT in the test suite,
+// alongside the GoldKey fixture.
+//
+// Its value is a third distinct response shape across our
+// fixture set:
+//
+//	YubiKey 5.7+: 17-byte template, 6-byte truncated PIX,
+//	              5-byte RID in the coexistent allocation tag.
+//	GoldKey:      28-byte template, 11-byte full PIX,
+//	              11-byte full PIX echoed in the coexistent tag.
+//	Feitian:      22-byte template, 11-byte full PIX,
+//	              5-byte RID in the coexistent tag (asymmetric).
+//
+// The bytes:
+//
+//	61 16                                                     -- outer template, 22 bytes
+//	  4F 0B A000000308000010000100                            -- AID (full 11-byte PIV PIX)
+//	  79 07                                                   -- coexistent tag allocation authority, 7 bytes
+//	    4F 05 A000000308                                      -- RID only (NIST 5-byte RID)
+//
+// Probe should classify as standard-piv (no GET VERSION → not
+// YubiKey), populate SelectResponse with the raw 24 bytes, and
+// return PIVVersion=nil (the optional tag 5FC107 is absent).
+//
+// This card holds a real CA-signed PIV cert (PIVKey 905D0709...,
+// signed by PIVKey Device Certificate Authority, valid through
+// 2027-01-26) and the Feitian platform is widely deployed in
+// federal contracting environments. Its presence in the fixture
+// set is therefore meaningful coverage, not just a curiosity.
+//
+// Cross-vendor note: gppro (v25.10.20) cannot identify this card
+// and emits 'Could not auto-detect ISD AID' against the SELECT
+// response, because the Feitian's response to default-SELECT is
+// the bare CRD (tag 0x66) rather than an FCI template (tag 0x6F)
+// wrapping the CRD. scpctl's SD probe handles both shapes; this
+// fixture exercises the bare-CRD path.
+func TestProbe_FeitianPIVKey_RealBytesSelectResponse(t *testing.T) {
+	const feitianPIVSelectHex = "6116" +
+		"4f0ba000000308000010000100" +
+		"79074f05a000000308"
+
+	raw, err := hex.DecodeString(feitianPIVSelectHex)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+	if len(raw) != 24 {
+		t.Fatalf("fixture: expected 24 bytes, got %d", len(raw))
+	}
+
+	tx := &fakeTransmitter{
+		responses: []apduPair{
+			// SELECT AID PIV returns the Feitian-captured template.
+			{resp: &apdu.Response{Data: raw, SW1: 0x90, SW2: 0x00}},
+			// GET VERSION not supported (Feitian is not a YubiKey).
+			{resp: &apdu.Response{Data: nil, SW1: 0x6D, SW2: 0x00}},
+		},
+	}
+	res, err := Probe(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+
+	if res.Profile.Name() != "standard-piv" {
+		t.Errorf("Profile.Name = %q, want standard-piv", res.Profile.Name())
+	}
+	if res.YubiKeyFW != nil {
+		t.Errorf("YubiKeyFW should be nil on a non-YubiKey card; got %+v", res.YubiKeyFW)
+	}
+	if !bytes.Equal(res.SelectResponse, raw) {
+		t.Errorf("SelectResponse = %X, want %X", res.SelectResponse, raw)
+	}
+	if res.PIVVersion != nil {
+		t.Errorf("PIVVersion should be nil on a card that omits tag 5FC107; got %X",
+			res.PIVVersion)
+	}
+}
