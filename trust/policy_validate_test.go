@@ -100,6 +100,11 @@ func TestPolicy_Validate_CustomModeWithConflicts(t *testing.T) {
 			Policy{CustomValidator: cv, RequireP256: boolPtr(true)},
 			"RequireP256",
 		},
+		{
+			"RejectUnparseableCertEntries set",
+			Policy{CustomValidator: cv, RejectUnparseableCertEntries: true},
+			"RejectUnparseableCertEntries",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

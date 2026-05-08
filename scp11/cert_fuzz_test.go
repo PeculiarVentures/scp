@@ -132,12 +132,13 @@ func FuzzParseCertsFromStore(f *testing.F) {
 	f.Add([]byte{0x30, 0x85, 0x00, 0x00, 0x00, 0x00, 0x10})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		// Property: never panic. parseCertsFromStore swallows
-		// individual parse errors at the x509.ParseCertificate
-		// boundary (skips non-X.509 entries) and returns whatever
-		// it could parse, so we don't assert on the err shape —
-		// we just verify no panic and no crazy output cardinality.
-		certs, err := parseCertsFromStore(data)
+		// Property: never panic. In permissive mode (strict=false),
+		// parseCertsFromStore swallows individual parse errors at
+		// the x509.ParseCertificate boundary (skips non-X.509
+		// entries) and returns whatever it could parse, so we
+		// don't assert on the err shape — we just verify no panic
+		// and no crazy output cardinality.
+		certs, err := parseCertsFromStore(data, false)
 		_ = err // documented as nil-only on success; we don't pin
 
 		// A successful return with more certs than input bytes is

@@ -204,7 +204,7 @@ func TestSCP11_OptInBypassWorks(t *testing.T) {
 func TestParseCertsFromStore_SingleDER(t *testing.T) {
 	// Generate a self-signed cert and pass its raw DER.
 	cert := generateSelfSignedCert(t)
-	certs, err := parseCertsFromStore(cert.Raw)
+	certs, err := parseCertsFromStore(cert.Raw, false)
 	if err != nil {
 		t.Fatalf("parseCertsFromStore: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestParseCertsFromStore_ConcatenatedDER(t *testing.T) {
 
 	// Concatenate raw DER.
 	concat := append(cert1.Raw, cert2.Raw...)
-	certs, err := parseCertsFromStore(concat)
+	certs, err := parseCertsFromStore(concat, false)
 	if err != nil {
 		t.Fatalf("parseCertsFromStore: %v", err)
 	}
